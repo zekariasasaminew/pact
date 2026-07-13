@@ -3,84 +3,6 @@
 version = 4
 
 [[package]]
-name = "agentyard-agents"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ctrlc",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "agentyard-cli"
-version = "0.1.0"
-dependencies = [
- "agentyard-agents",
- "agentyard-coord",
- "agentyard-core",
- "anyhow",
- "clap",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "agentyard-coord"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "globset",
- "rmcp",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "agentyard-core"
-version = "0.1.0"
-dependencies = [
- "agentyard-agents",
- "agentyard-deps",
- "agentyard-vcs",
- "anyhow",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "agentyard-deps"
-version = "0.1.0"
-dependencies = [
- "agentyard-vcs",
- "anyhow",
- "reflink-copy",
- "sha2",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "agentyard-vcs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "sysinfo",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -855,6 +777,84 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "pact-agents"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ctrlc",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "pact-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "pact-agents",
+ "pact-coord",
+ "pact-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pact-coord"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "globset",
+ "rmcp",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "pact-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pact-agents",
+ "pact-deps",
+ "pact-vcs",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "pact-deps"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pact-vcs",
+ "reflink-copy",
+ "sha2",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "pact-vcs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "parking_lot"

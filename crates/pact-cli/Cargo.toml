@@ -1,0 +1,19 @@
+[package]
+name = "pact-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pact"
+path = "src/main.rs"
+
+[dependencies]
+pact-core.workspace = true
+pact-agents.workspace = true
+pact-coord.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

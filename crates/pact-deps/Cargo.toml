@@ -1,0 +1,13 @@
+[package]
+name = "pact-deps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pact-vcs.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+reflink-copy.workspace = true
+walkdir.workspace = true
