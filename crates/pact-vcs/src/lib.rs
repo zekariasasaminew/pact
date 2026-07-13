@@ -129,7 +129,17 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    pub fn remove_workspace(&self, id: &str) -> Result<()> {
+    /// Removes a workspace's worktree and, unless `keep_branch` is set,
+    /// the `pact/<id>` branch created for it. Confirmed via a real trial
+    /// run (an outside reviewer's report): `git worktree remove` does not
+    /// delete the branch it was created with -- that's standard git
+    /// behavior, worktree removal and branch deletion are independent --
+    /// so without this, every torn-down workspace left a dead branch
+    /// behind, accumulating over repeated use. Force-deletes (`-D`, not
+    /// `-d`) since an agent's throwaway workspace branch is very often
+    /// unmerged; `keep_branch` exists for anyone who wants to inspect or
+    /// rebase a workspace's commits after tearing it down.
+    pub fn remove_workspace(&self, id: &str, keep_branch: bool) -> Result<()> {
         let workspace = self.get_workspace(id)?;
         kill_if_alive(&workspace);
 
@@ -137,10 +147,34 @@ impl WorkspaceManager {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
                 .context("acquiring git worktree lock")?;
             self.remove_worktree_retrying(&workspace.path)?;
+            if !keep_branch {
+                self.delete_branch(&workspace.branch);
+            }
         }
 
         let _ = std::fs::remove_file(self.meta_path(id));
         Ok(())
+    }
+
+    /// Best-effort: a failure to delete the branch (e.g. it was already
+    /// removed, or checked out somewhere else) shouldn't fail the whole
+    /// teardown -- the worktree is already gone at this point, which is
+    /// the part that actually matters for freeing up the workspace.
+    fn delete_branch(&self, branch: &str) {
+        let output = Command::new("git")
+            .args(["branch", "-D", branch])
+            .current_dir(&self.repo_root)
+            .output();
+        match output {
+            Ok(o) if !o.status.success() => {
+                tracing::warn!(
+                    "failed to delete branch '{branch}' after teardown: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            Err(err) => tracing::warn!("failed to spawn git to delete branch '{branch}': {err}"),
+            _ => {}
+        }
     }
 
     /// Removes a worktree directory, tolerating the two Windows failure

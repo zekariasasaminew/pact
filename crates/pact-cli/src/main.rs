@@ -47,6 +47,11 @@ enum Command {
     Teardown {
         /// Workspace id (as shown by `list`)
         id: String,
+
+        /// Don't delete the pact/<id> branch -- keep it around to inspect
+        /// or rebase the workspace's commits after tearing it down.
+        #[arg(long)]
+        keep_branch: bool,
     },
     /// Run the coordination MCP server over stdio. Not meant to be invoked
     /// directly -- `spawn` launches this itself (as the agent CLI's own
@@ -136,8 +141,8 @@ fn main() -> Result<()> {
                 println!("    task: {}", workspace.task);
             }
         }
-        Command::Teardown { id } => {
-            orchestrator.teardown(&id)?;
+        Command::Teardown { id, keep_branch } => {
+            orchestrator.teardown(&id, keep_branch)?;
             println!("removed workspace {id}");
         }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),

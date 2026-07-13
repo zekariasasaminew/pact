@@ -151,9 +151,9 @@ impl Orchestrator {
         self.workspaces.list_workspaces()
     }
 
-    pub fn teardown(&self, id: &str) -> Result<()> {
+    pub fn teardown(&self, id: &str, keep_branch: bool) -> Result<()> {
         // WorkspaceManager::remove_workspace already kills any live agent
         // process recorded against this workspace before removing it.
-        self.workspaces.remove_workspace(id)
+        self.workspaces.remove_workspace(id, keep_branch)
     }
 }
