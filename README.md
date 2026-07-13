@@ -1,4 +1,4 @@
-# agentyard
+# pact
 
 A language-agnostic orchestrator for running multiple AI coding agent CLIs
 (Claude Code, GitHub Copilot CLI, Codex) in parallel on the same repository,
@@ -57,7 +57,7 @@ Since Claude Code, Copilot CLI, and Codex all write via native git
 constantly — not occasionally — that's not an edge case, it's a
 guaranteed collision, just moved one layer down and made silent instead of
 loud. The bug that motivated considering jj is real, but the fix belongs in
-the orchestrator's own locking (see `agentyard-vcs` below), not in swapping
+the orchestrator's own locking (see `pact-vcs` below), not in swapping
 the VCS.
 
 ### Rust
@@ -74,7 +74,7 @@ Go modules, Maven, Gradle, uv, pnpm, yarn, poetry, and pipenv all use a
 global content-addressed or version-keyed cache by default. The gap is
 narrower than "no ecosystem shares dependencies": it's specifically plain
 npm (flat, per-project `node_modules`) and plain pip/venv. So
-`agentyard-deps` (Phase 1) detects the package manager and passes through
+`pact-deps` (Phase 1) detects the package manager and passes through
 to the ecosystem's own cache where one already exists well
 (`passthrough.rs`), and only builds its own lockfile-hash-keyed content
 store for the ecosystem that doesn't (`store.rs`, npm only).
@@ -119,7 +119,7 @@ Leases are advisory by design, not enforced: `claim_files` is granted
 regardless of conflicts it finds, same as prior art. What isn't a minor
 detail is *how* overlap is detected -- two glob patterns can look nothing
 alike as strings and still cover the same files (`src/**/*.rs` vs
-`src/foo.rs`), so `agentyard-coord` expands both patterns against the
+`src/foo.rs`), so `pact-coord` expands both patterns against the
 actual files in a workspace and intersects the resulting sets, rather than
 comparing pattern strings. Verified against exactly that case, not just
 identical patterns: one agent claimed `src/*.txt`, a second claimed the
@@ -127,7 +127,7 @@ narrower `src/hello.txt`, and the conflict was correctly detected and
 reported with the specific overlapping file named.
 
 The coordination database is deliberately *not* stored alongside
-per-workspace bookkeeping in `.agentyard-<repo>/` (see State layout) --
+per-workspace bookkeeping in `.pact-<repo>/` (see State layout) --
 that directory sits one level above every workspace
 (`workspaces/<id>/../..`), and headless launches default to
 `bypassPermissions`, so a careless broad shell command in any one agent's
@@ -140,7 +140,7 @@ independent plan review before this was built, not after.
 
 `rmcp` (the official Rust MCP SDK) requires an async runtime. Rather than
 making the whole CLI async for this one server, it runs as its own OS
-process (`agentyard mcp-serve`, launched by the agent CLI itself over
+process (`pact mcp-serve`, launched by the agent CLI itself over
 stdio, not run in-process by the orchestrator), and that subcommand builds
 its own `tokio::Runtime` just for its own lifetime -- `spawn`/`list`/
 `teardown` stay exactly as synchronous as before. Same reasoning as the
@@ -164,7 +164,7 @@ adapter would mean either a half-async codebase or forcing every existing
 blocking call through `spawn_blocking` for no present benefit, since only
 one child process runs per `spawn` today. The seam that will matter is
 structural, not sync-vs-async: process supervision lives entirely behind
-`agentyard_agents::run_and_stream`, so whichever phase first needs to
+`pact_agents::run_and_stream`, so whichever phase first needs to
 supervise several *running* agents concurrently can change what's behind
 that boundary without touching adapters or the orchestrator's call site.
 
@@ -220,12 +220,12 @@ directory would plausibly break headless login on first use. The inline
 
 ```mermaid
 graph TD
-    CLI["agentyard-cli<br/>(clap binary: spawn / list / teardown)"]
-    Core["agentyard-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
-    VCS["agentyard-vcs<br/>(PidLock + git worktree lifecycle)"]
-    Deps["agentyard-deps<br/>(dependency broker: detect + passthrough + content store)"]
-    Agents["agentyard-agents<br/>(AgentAdapter: Claude Code + Copilot CLI live-verified, Codex docs-only)"]
-    Coord["agentyard-coord<br/>(leases + messages, its own MCP server process)"]
+    CLI["pact-cli<br/>(clap binary: spawn / list / teardown)"]
+    Core["pact-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
+    VCS["pact-vcs<br/>(PidLock + git worktree lifecycle)"]
+    Deps["pact-deps<br/>(dependency broker: detect + passthrough + content store)"]
+    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI live-verified, Codex docs-only)"]
+    Coord["pact-coord<br/>(leases + messages, its own MCP server process)"]
 
     CLI --> Core
     Core --> VCS
@@ -236,10 +236,10 @@ graph TD
     Agent2["chosen agent CLI (child process)"] -.launches as its own child, over stdio.-> Coord
 ```
 
-`agentyard-deps` reuses `agentyard-vcs`'s `PidLock` directly (generalized
+`pact-deps` reuses `pact-vcs`'s `PidLock` directly (generalized
 from its original git-specific name) to guard concurrent population of a
 store entry, the same protection Phase 0 built for `git worktree`
-operations. `agentyard-coord` is not called in-process by `agentyard-core`
+operations. `pact-coord` is not called in-process by `pact-core`
 at all -- the orchestrator only writes the config file that tells the
 agent CLI to launch it itself, over stdio, as its own separate process.
 
@@ -247,17 +247,17 @@ agent CLI to launch it itself, over stdio, as its own separate process.
 
 ```mermaid
 sequenceDiagram
-    participant U as agentyard spawn "<task>"
+    participant U as pact spawn "<task>"
     participant Core as Orchestrator
     participant Lock as PidLock
     participant Git as git worktree
-    participant Deps as agentyard-deps
+    participant Deps as pact-deps
     participant Agent as claude -p (child process)
 
     U->>Core: spawn(task, permission_mode)
     Core->>Lock: acquire (steal if holder PID is dead)
     Lock-->>Core: acquired
-    Core->>Git: worktree add <path> -b agentyard/<id>
+    Core->>Git: worktree add <path> -b pact/<id>
     Git-->>Core: ok
     Core->>Lock: release (on drop)
     Core->>Deps: prepare(workspace.path)
@@ -278,22 +278,22 @@ sequenceDiagram
 The git lock exists because git itself races on `.git/config.lock` when
 `git worktree add`/`remove` run concurrently
 ([anthropics/claude-code#34645](https://github.com/anthropics/claude-code/issues/34645)) --
-`agentyard-vcs` serializes what git doesn't safely parallelize on its own,
+`pact-vcs` serializes what git doesn't safely parallelize on its own,
 and steals locks left behind by a process that died without cleaning up
 (checked via PID liveness, not a timeout guess). The same `PidLock` guards
-content-store population in `agentyard-deps`, so two concurrent spawns
+content-store population in `pact-deps`, so two concurrent spawns
 targeting the same lockfile hash don't race each other.
 
 `teardown` kills a workspace's live agent process (whole tree, not just the
 tracked PID -- see Status) before removing its worktree, in case it's
-invoked from a different `agentyard` call than the one blocked on `spawn`.
+invoked from a different `pact` call than the one blocked on `spawn`.
 
 ### Cross-agent coordination flow
 
 ```mermaid
 sequenceDiagram
     participant A as Agent A (claude -p)
-    participant Coord as agentyard-coord (mcp-serve)
+    participant Coord as pact-coord (mcp-serve)
     participant DB as state.db
     participant B as Agent B (claude -p)
 
@@ -313,7 +313,7 @@ sequenceDiagram
 ```
 
 Each agent is a separate `claude -p` process that launches its own
-`agentyard mcp-serve` as an MCP server over stdio (per its generated
+`pact mcp-serve` as an MCP server over stdio (per its generated
 config); they're not talking to each other directly, or to a shared
 in-process daemon -- `state.db` (SQLite, WAL mode) is the only thing
 actually shared between them.
@@ -324,7 +324,7 @@ All state lives as a **sibling** of the repo, not inside its working tree,
 so it never shows up in the main repo's `git status`:
 
 ```
-<repo-parent>/.agentyard-<repo-name>/
+<repo-parent>/.pact-<repo-name>/
 ├── locks/git.lock              # PID-aware lock serializing worktree add/remove
 ├── meta/<id>.json               # id, path, branch, task, created_at, agent_pid
 ├── mcp/<id>.json                 # generated --mcp-config file for this workspace
@@ -339,11 +339,11 @@ The coordination database is the one exception -- deliberately *not* here
 (see Design decisions for why):
 
 ```
-<platform-local-data-dir>/agentyard/<sha256(repo_root)[..16]>/state.db
+<platform-local-data-dir>/pact/<sha256(repo_root)[..16]>/state.db
 ```
 
-e.g. `%LOCALAPPDATA%\agentyard\<hash>\state.db` on Windows,
-`~/.local/share/agentyard/<hash>/state.db` on Linux.
+e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
+`~/.local/share/pact/<hash>/state.db` on Linux.
 
 ## Status
 
@@ -357,7 +357,7 @@ e.g. `%LOCALAPPDATA%\agentyard\<hash>\state.db` on Windows,
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
-claude-code#34645), `git worktree list` matched agentyard's own state
+claude-code#34645), `git worktree list` matched pact's own state
 exactly, and `teardown` removed a worktree cleanly with no orphaned
 metadata.
 
@@ -394,7 +394,7 @@ a child shell process, and killing just the parent left that child alive,
 still holding the directory open for the rest of its natural life. Fixed
 with a retry-then-fall-back-to-direct-removal path for (1)/(2), and
 `taskkill /F /T /PID` (kills the whole descendant tree) for (3). See the
-`agentyard-vcs` commit history for the full writeup.
+`pact-vcs` commit history for the full writeup.
 
 Phase 3 was verified with two real, concurrent Claude Code sessions in the
 same repo, not a mocked or single-agent test: agent A claimed `src/*.txt`
@@ -414,10 +414,10 @@ to capture `toolRequests`' real field names rather than guessing (they
 turned out to differ from Claude Code's: `name`/`arguments`, not
 `name`/`input`). A real coordination run against Copilot CLI worked
 end-to-end: `claim_files` called through the generated MCP config,
-`agentyard-coord` reported `connected`, and the exact JSON result written
+`pact-coord` reported `connected`, and the exact JSON result written
 back to disk correctly. One more real bug found in the process, the same
 class as Phase 1's: Copilot CLI is *also* a Windows `.cmd` shim, and
-`agentyard-agents`' own process spawning had never gotten the `cmd /C`
+`pact-agents`' own process spawning had never gotten the `cmd /C`
 fix Phase 1 applied elsewhere in the codebase -- every Copilot launch was
 silently failing with "program not found" until fixed. The Codex adapter
 was implemented from documentation but could not be run at all (`codex`
@@ -439,7 +439,7 @@ limitations.
 - **No custom dependency-sharing store for plain pip/venv** -- deliberately
   out of scope (see Design decisions), not an oversight.
 - **Ctrl-C handling is single-shot per process** (see
-  `agentyard_agents::run_and_stream`'s doc comment) -- fine for today's
+  `pact_agents::run_and_stream`'s doc comment) -- fine for today's
   one-agent-per-`spawn` architecture, would need a different design for a
   future phase supervising several agents concurrently in one process.
 
@@ -449,11 +449,11 @@ limitations.
 cargo build
 
 # from inside (or pass --repo to) a git repository:
-agentyard spawn "implement the thing"
-agentyard spawn "implement the thing" --agent copilot
-agentyard spawn "implement the thing" --agent claude --safety acceptEdits
-agentyard list
-agentyard teardown <id>
+pact spawn "implement the thing"
+pact spawn "implement the thing" --agent copilot
+pact spawn "implement the thing" --agent claude --safety acceptEdits
+pact list
+pact teardown <id>
 ```
 
 `spawn` creates the worktree, best-effort prepares dependencies for every
