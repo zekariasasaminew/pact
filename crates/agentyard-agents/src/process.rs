@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
-use crate::event::{self, AgentEvent};
+use crate::event::AgentEvent;
 
 /// How an agent process run ended.
 #[derive(Debug, Clone)]
@@ -38,11 +38,19 @@ pub struct RunOutcome {
 /// `[stderr] `) rather than left inherited or piped-but-undrained --
 /// either of those risks interleaved garbage in the terminal or a
 /// full-pipe deadlock if the child writes enough of it.
+///
+/// `parse_line` is adapter-supplied and returns zero or more events for one
+/// raw line -- not exactly one -- because not every adapter's schema maps
+/// one line to one event (confirmed necessary for Copilot CLI, whose
+/// `assistant.message` events can carry both response text and one or more
+/// tool calls in the same line; Claude Code's schema happens to be
+/// one-event-per-line, but this function doesn't assume that of anyone).
 pub fn run_and_stream(
     program: &str,
     args: &[String],
     cwd: &Path,
     log_path: &Path,
+    parse_line: impl Fn(&str) -> Vec<AgentEvent>,
     mut on_event: impl FnMut(&AgentEvent),
     on_pid: impl FnOnce(u32),
 ) -> Result<RunOutcome> {
@@ -57,7 +65,21 @@ pub fn run_and_stream(
             .with_context(|| format!("opening log file {}", log_path.display()))?,
     ));
 
-    let mut child = Command::new(program)
+    // On Windows, some agent CLIs (Copilot CLI, confirmed) ship as `.cmd`
+    // shims rather than a real `.exe` -- `std::process::Command` doesn't
+    // consult `PATHEXT` the way a real shell does, so `Command::new(program)`
+    // fails with "program not found" even though the CLI works fine typed
+    // interactively. Routing through `cmd /C` restores that resolution.
+    // Claude Code (a real PE executable) doesn't need this, but it's
+    // harmless for it either way.
+    let mut command = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(program);
+        c
+    } else {
+        Command::new(program)
+    };
+    let mut child = command
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -88,14 +110,15 @@ pub fn run_and_stream(
         if let Ok(mut f) = log.lock() {
             let _ = writeln!(f, "{line}");
         }
-        let parsed = event::parse_line(&line);
-        if let AgentEvent::Result { success, summary } = &parsed {
-            saw_result = Some(RunOutcome {
-                success: *success,
-                summary: summary.clone(),
-            });
+        for parsed in parse_line(&line) {
+            if let AgentEvent::Result { success, summary } = &parsed {
+                saw_result = Some(RunOutcome {
+                    success: *success,
+                    summary: summary.clone(),
+                });
+            }
+            on_event(&parsed);
         }
-        on_event(&parsed);
     }
 
     let _ = stderr_thread.join();
