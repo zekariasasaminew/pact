@@ -6,3 +6,14 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+rmcp.workspace = true
+rusqlite.workspace = true
+globset.workspace = true
+walkdir.workspace = true
+dirs.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true

@@ -29,6 +29,11 @@ sha2 = "0.10"
 reflink-copy = "0.1"
 walkdir = "2"
 ctrlc = "3"
+rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "schemars"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+globset = "0.4"
+dirs = "5"
+schemars = "1"
 
 agentyard-vcs = { path = "crates/agentyard-vcs" }
 agentyard-deps = { path = "crates/agentyard-deps" }
