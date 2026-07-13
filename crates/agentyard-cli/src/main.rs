@@ -38,6 +38,17 @@ enum Command {
         /// Workspace id (as shown by `list`)
         id: String,
     },
+    /// Run the coordination MCP server over stdio. Not meant to be invoked
+    /// directly -- `spawn` launches this itself (as the agent CLI's own
+    /// child process, per the generated --mcp-config) with these arguments
+    /// already filled in.
+    #[command(hide = true)]
+    McpServe {
+        #[arg(long)]
+        agent_id: String,
+        #[arg(long)]
+        workspace: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -53,6 +64,17 @@ fn main() -> Result<()> {
         Some(p) => p,
         None => find_repo_root(&std::env::current_dir()?)?,
     };
+
+    // mcp-serve gets its own, self-contained tokio runtime rather than
+    // making the whole CLI async -- it's the only command that needs one
+    // (rmcp requires async), and every other command stays exactly as
+    // synchronous as it already is. See the README for why that tradeoff
+    // was made deliberately, not by default.
+    if let Command::McpServe { agent_id, workspace } = cli.command {
+        let runtime = tokio::runtime::Runtime::new()?;
+        return runtime.block_on(agentyard_coord::serve(&repo_root, agent_id, workspace));
+    }
+
     let orchestrator = Orchestrator::open(repo_root)?;
 
     match cli.command {
@@ -101,6 +123,7 @@ fn main() -> Result<()> {
             orchestrator.teardown(&id)?;
             println!("removed workspace {id}");
         }
+        Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
     }
 
     Ok(())
@@ -112,7 +135,7 @@ fn main() -> Result<()> {
 /// than something safe to drop silently.
 fn print_event(event: &AgentEvent) {
     match event {
-        AgentEvent::Init { session_id } => println!("[init] session {session_id}"),
+        AgentEvent::Init { session_id, .. } => println!("[init] session {session_id}"),
         AgentEvent::AssistantText(text) => println!("[assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[tool] {name} {input}"),
         AgentEvent::Result { .. } => {} // surfaced by the caller as the final outcome instead
