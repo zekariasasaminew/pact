@@ -11,6 +11,12 @@ use serde_json::Value;
 pub enum AgentEvent {
     Init {
         session_id: String,
+        /// (server name, status) pairs from the init event's `mcp_servers`
+        /// array, e.g. `("agentyard-coord", "connected")` or `(..., "failed")`.
+        /// Carried through deliberately -- a coordination server that fails
+        /// to start would otherwise be a silent no-op with no signal
+        /// anywhere that leases/messages simply aren't working.
+        mcp_servers: Vec<(String, String)>,
     },
     AssistantText(String),
     ToolUse {
@@ -45,7 +51,24 @@ pub fn parse_line(line: &str) -> AgentEvent {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            AgentEvent::Init { session_id }
+            let mcp_servers = value
+                .get("mcp_servers")
+                .and_then(Value::as_array)
+                .map(|servers| {
+                    servers
+                        .iter()
+                        .filter_map(|s| {
+                            let name = s.get("name")?.as_str()?.to_string();
+                            let status = s.get("status")?.as_str()?.to_string();
+                            Some((name, status))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            AgentEvent::Init {
+                session_id,
+                mcp_servers,
+            }
         }
         Some("assistant") => parse_assistant(&value),
         Some("result") => {
