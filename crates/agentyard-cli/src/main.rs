@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use agentyard_agents::AgentEvent;
+use agentyard_agents::{AgentEvent, AgentKind};
 use agentyard_core::Orchestrator;
 
 #[derive(Parser)]
@@ -19,17 +19,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new isolated agent workspace and run Claude Code in it
+    /// Create a new isolated agent workspace and run an agent CLI in it
     Spawn {
         /// Task/prompt to give the agent
         task: String,
 
-        /// Permission mode for the headless session (acceptEdits, auto,
-        /// bypassPermissions, manual, dontAsk, plan). Defaults to
-        /// bypassPermissions, the only mode guaranteed not to hang with no
-        /// TTY to answer a permission prompt -- see the README.
+        /// Which agent CLI to launch (claude, copilot, codex). Codex's
+        /// adapter is implemented from documentation only and has not
+        /// been live-tested -- see the README.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+
+        /// Raw safety/approval override passed straight through to the
+        /// chosen agent's own vocabulary: Claude Code's --permission-mode
+        /// values (acceptEdits, bypassPermissions, ...), Codex's
+        /// --ask-for-approval values (never, on-request, untrusted).
+        /// Ignored by Copilot CLI, which has no gradient. Defaults to
+        /// each adapter's own unattended-safety setting -- see the README
+        /// for why headless mode requires *some* such setting regardless
+        /// of adapter, not just for Claude Code.
         #[arg(long)]
-        permission_mode: Option<String>,
+        safety: Option<String>,
     },
     /// List active agent workspaces
     List,
@@ -80,21 +90,28 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Spawn {
             task,
-            permission_mode,
+            agent,
+            safety,
         } => {
-            let permission_mode = permission_mode.unwrap_or_else(|| {
-                agentyard_agents::claude_code::DEFAULT_PERMISSION_MODE.to_string()
-            });
-            if permission_mode == agentyard_agents::claude_code::DEFAULT_PERMISSION_MODE {
-                eprintln!(
-                    "warning: running with --permission-mode {permission_mode} -- the agent \
-                     bypasses every permission check with no human in the loop. Pass \
-                     --permission-mode explicitly to use a different mode."
-                );
+            let kind = AgentKind::parse(&agent).ok_or_else(|| {
+                anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, or codex)")
+            })?;
+            let adapter = agentyard_agents::adapter(kind);
+            match &safety {
+                Some(s) => eprintln!(
+                    "warning: running '{agent}' with an explicit safety override ({s}) -- \
+                     verify this doesn't hang the session on a permission prompt in headless mode."
+                ),
+                None => eprintln!(
+                    "warning: running '{agent}' with its default unattended-safety setting \
+                     ({}) -- it bypasses safety checks with no human in the loop. Pass --safety \
+                     explicitly to use a different setting.",
+                    adapter.default_safety_description()
+                ),
             }
 
             let (workspace, outcome) =
-                orchestrator.spawn(&task, &permission_mode, |event| print_event(event))?;
+                orchestrator.spawn(kind, &task, safety.as_deref(), |event| print_event(event))?;
 
             println!("workspace {} ({})", workspace.id, workspace.branch);
             println!("  path: {}", workspace.path.display());
@@ -135,7 +152,8 @@ fn main() -> Result<()> {
 /// than something safe to drop silently.
 fn print_event(event: &AgentEvent) {
     match event {
-        AgentEvent::Init { session_id, .. } => println!("[init] session {session_id}"),
+        AgentEvent::Init { session_id } => println!("[init] session {session_id}"),
+        AgentEvent::CoordStatus { name, status } => println!("[coord] {name}: {status}"),
         AgentEvent::AssistantText(text) => println!("[assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[tool] {name} {input}"),
         AgentEvent::Result { .. } => {} // surfaced by the caller as the final outcome instead
