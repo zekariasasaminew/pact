@@ -1,0 +1,16 @@
+[package]
+name = "agentyard-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agentyard"
+path = "src/main.rs"
+
+[dependencies]
+agentyard-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
