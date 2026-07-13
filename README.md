@@ -170,16 +170,51 @@ that boundary without touching adapters or the orchestrator's call site.
 
 ### Headless launch requires bypassing permissions, not a hardening choice
 
-There's no TTY in `-p`/headless mode to answer an interactive permission
-prompt, so *some* non-interactive permission mode is mandatory to avoid
-hanging forever the first time a session hits a permission-gated action --
-of Claude Code's six modes, `bypassPermissions` is the only one that
-can't still hang, since e.g. `acceptEdits` only auto-accepts file edits and
-would still gate an arbitrary Bash call. This is surfaced loudly (a
-warning printed before every launch that uses the default) rather than
-silently baked in, and is an explicit, overridable `--permission-mode` flag
+There's no TTY in headless mode to answer an interactive permission
+prompt, so *some* unattended-safety setting is mandatory for every agent
+CLI, not just Claude Code -- of Claude Code's six permission modes,
+`bypassPermissions` is the only one that can't still hang (`acceptEdits`
+only auto-accepts file edits and would still gate an arbitrary Bash call);
+Copilot CLI's `--allow-all-tools` is a binary its own `--help` calls
+"required for non-interactive mode"; Codex's approval policy needs `never`
+for the same reason. This is surfaced loudly (a warning printed before
+every launch, naming whichever adapter's own default is in effect) rather
+than silently baked in, and `--safety` is an explicit, overridable flag
 precisely because it means an unattended agent bypasses every check with
 no human in the loop.
+
+### One AgentAdapter trait, not one unified safety enum
+
+Phases 0-3 built exactly one adapter (Claude Code) without the
+abstraction; `AgentAdapter` (Phase 4) was introduced once a second and
+third real case existed to generalize against, not designed speculatively
+in advance. The trait deliberately does *not* try to unify each CLI's
+safety/approval vocabulary into one shared enum: Claude Code's
+`--permission-mode` has six values, Copilot CLI's is a binary on/off with
+no gradient at all, and Codex's is two independent axes (`--sandbox`,
+`--ask-for-approval`) with their own value sets. `build_command` takes a
+raw string passed straight through to whichever vocabulary the chosen
+adapter uses, rather than a shared type that would either lose expressiveness
+or need constant extending as a fourth CLI's vocabulary inevitably differs
+again.
+
+What *is* shared is `CoordConfig` -- what to tell an agent CLI about the
+coordination server (name/command/args) is adapter-agnostic, even though
+*how* to hand it over isn't: Claude Code and Copilot CLI both confirmed
+the identical `{"mcpServers": {...}}` JSON-file-plus-flag shape, while
+Codex takes inline `-c mcp_servers.<id>.*` config overrides instead and
+needs no file at all.
+
+Codex's adapter is built from OpenAI's documentation only -- `codex` was
+never installed on the machine this project was built on, so unlike the
+other two, nothing about it has actually been run. That's stated plainly
+in its own module doc comment and in Status below, rather than presented
+as equivalent to the live-verified adapters. One documented risk avoided
+along the way: Codex's normal MCP config mechanism is a
+`$CODEX_HOME/config.toml` file, but `CODEX_HOME` also relocates
+auth/session state, not just config -- pointing it at a per-workspace
+directory would plausibly break headless login on first use. The inline
+`-c` override sidesteps that entirely.
 
 ## Architecture
 
@@ -189,7 +224,7 @@ graph TD
     Core["agentyard-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
     VCS["agentyard-vcs<br/>(PidLock + git worktree lifecycle)"]
     Deps["agentyard-deps<br/>(dependency broker: detect + passthrough + content store)"]
-    Agents["agentyard-agents<br/>(Claude Code adapter done; Codex/Copilot -- Phase 4)"]
+    Agents["agentyard-agents<br/>(AgentAdapter: Claude Code + Copilot CLI live-verified, Codex docs-only)"]
     Coord["agentyard-coord<br/>(leases + messages, its own MCP server process)"]
 
     CLI --> Core
@@ -197,8 +232,8 @@ graph TD
     Core --> Deps
     Core --> Agents
     Deps -.reuses.-> VCS
-    Core -.writes MCP config for.-> Coord
-    Agent2["claude -p (child process)"] -.launches as its own child, over stdio.-> Coord
+    Core -.writes coord config for.-> Coord
+    Agent2["chosen agent CLI (child process)"] -.launches as its own child, over stdio.-> Coord
 ```
 
 `agentyard-deps` reuses `agentyard-vcs`'s `PidLock` directly (generalized
@@ -318,7 +353,7 @@ e.g. `%LOCALAPPDATA%\agentyard\<hash>\state.db` on Windows,
 | 1 | Dependency broker (shared installs) | **Done** |
 | 2 | Claude Code adapter, real headless launch | **Done** |
 | 3 | Coordination MCP server (leases + messages) | **Done** |
-| 4 | Codex + Copilot CLI adapters, polish | Planned |
+| 4 | Copilot CLI adapter (live-verified); Codex adapter (docs-only, not live-verified); `--agent`/`--safety` CLI flags | **Done** (Codex caveat above) |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -372,6 +407,42 @@ works against genuinely different pattern strings, not just identical
 ones. The coordination database was confirmed to land in the relocated
 platform data directory, not the repo-adjacent state tree.
 
+Phase 4 added Copilot CLI, live-verified to the same standard: launch
+flags and MCP config shape confirmed against real invocations, and the
+event schema confirmed by deliberately forcing a tool-call-producing task
+to capture `toolRequests`' real field names rather than guessing (they
+turned out to differ from Claude Code's: `name`/`arguments`, not
+`name`/`input`). A real coordination run against Copilot CLI worked
+end-to-end: `claim_files` called through the generated MCP config,
+`agentyard-coord` reported `connected`, and the exact JSON result written
+back to disk correctly. One more real bug found in the process, the same
+class as Phase 1's: Copilot CLI is *also* a Windows `.cmd` shim, and
+`agentyard-agents`' own process spawning had never gotten the `cmd /C`
+fix Phase 1 applied elsewhere in the codebase -- every Copilot launch was
+silently failing with "program not found" until fixed. The Codex adapter
+was implemented from documentation but could not be run at all (`codex`
+isn't installed on this machine) -- see Design decisions and Known
+limitations.
+
+## Known limitations
+
+- **Codex adapter is unverified.** Built from documentation, never
+  actually launched. Its event parsing doesn't attempt to recognize any
+  specific fields, so the coordination connectivity check and
+  Result-based success detection don't work for it yet -- every line
+  becomes a generic passthrough event instead of guessed-and-possibly-wrong
+  structure.
+- **Process-tree killing on teardown is Windows-only** (`taskkill /F /T`).
+  The Unix equivalent (a process group established via `setsid` at spawn
+  time) isn't implemented -- this project was built and verified entirely
+  on Windows.
+- **No custom dependency-sharing store for plain pip/venv** -- deliberately
+  out of scope (see Design decisions), not an oversight.
+- **Ctrl-C handling is single-shot per process** (see
+  `agentyard_agents::run_and_stream`'s doc comment) -- fine for today's
+  one-agent-per-`spawn` architecture, would need a different design for a
+  future phase supervising several agents concurrently in one process.
+
 ## Usage
 
 ```sh
@@ -379,22 +450,24 @@ cargo build
 
 # from inside (or pass --repo to) a git repository:
 agentyard spawn "implement the thing"
-agentyard spawn "implement the thing" --permission-mode acceptEdits
+agentyard spawn "implement the thing" --agent copilot
+agentyard spawn "implement the thing" --agent claude --safety acceptEdits
 agentyard list
 agentyard teardown <id>
 ```
 
 `spawn` creates the worktree, best-effort prepares dependencies for every
 package manager it detects (pass-through install for ecosystems with their
-own cache, content-store materialization for npm), then launches Claude
-Code headlessly -- with a generated MCP config pointing it at its own
-`agentyard-coord` server, giving the agent `claim_files`/`release_files`/
+own cache, content-store materialization for npm), then launches the
+chosen agent CLI (`--agent claude` by default) headlessly -- with a
+generated coordination config giving it `claim_files`/`release_files`/
 `send_message`/`check_messages` tools automatically, no extra setup
-needed -- and blocks until it finishes, streaming `[init]`/`[assistant]`/
-`[tool]`/`[other]` lines live and printing a final done/failed summary. A
-dependency-prepare failure is logged as a warning, not fatal; so is a
-coordination server that fails to connect (checked against the session's
-init event, not assumed). `--permission-mode` defaults to
-`bypassPermissions` (a warning is printed when that default is in effect)
--- see Design decisions for why headless mode requires *some*
-non-interactive mode rather than this being a hardening choice.
+needed -- and blocks until it finishes, streaming `[init]`/`[coord]`/
+`[assistant]`/`[tool]`/`[other]` lines live and printing a final
+done/failed summary. A dependency-prepare failure is logged as a warning,
+not fatal; so is a coordination server that fails to connect (checked
+against the live event stream, not assumed). `--safety` overrides
+whichever adapter's own unattended-safety default is otherwise used (a
+warning is printed either way) -- see Design decisions for why headless
+mode requires *some* such setting for every adapter, not just Claude
+Code, and why their vocabularies aren't unified into one shared flag.
