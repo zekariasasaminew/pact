@@ -24,7 +24,16 @@ impl Orchestrator {
     pub fn spawn(&self, task: &str) -> Result<Workspace> {
         let workspace = self.workspaces.create_workspace(task)?;
 
-        // Phase 1 will insert: agentyard_deps::prepare(&workspace)?;
+        if let Err(err) = agentyard_deps::prepare(&workspace.path) {
+            // A dependency-prepare failure shouldn't destroy an otherwise
+            // valid workspace -- the agent can still install for itself,
+            // just without the head start.
+            tracing::warn!(
+                "dependency prepare failed for workspace {}: {err:#}",
+                workspace.id
+            );
+        }
+
         // Phase 2 will insert: agentyard_agents::launch(&workspace)?;
 
         Ok(workspace)
