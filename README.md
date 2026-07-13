@@ -286,7 +286,11 @@ targeting the same lockfile hash don't race each other.
 
 `teardown` kills a workspace's live agent process (whole tree, not just the
 tracked PID -- see Status) before removing its worktree, in case it's
-invoked from a different `pact` call than the one blocked on `spawn`.
+invoked from a different `pact` call than the one blocked on `spawn`. It
+also force-deletes the workspace's `pact/<id>` branch by default (`git
+worktree remove` doesn't delete the branch it was created with -- worktree
+removal and branch deletion are independent in git) -- pass `--keep-branch`
+to keep it around for inspection or rebasing.
 
 ### Cross-agent coordination flow
 
@@ -454,6 +458,7 @@ pact spawn "implement the thing" --agent copilot
 pact spawn "implement the thing" --agent claude --safety acceptEdits
 pact list
 pact teardown <id>
+pact teardown <id> --keep-branch  # skip deleting the workspace's branch
 ```
 
 `spawn` creates the worktree, best-effort prepares dependencies for every
