@@ -70,13 +70,39 @@ several child processes at once.
 ### Dependency sharing leans on what already exists
 
 Most package ecosystems already solved global dependency sharing — Cargo,
-Go modules, Maven, uv, and pnpm all use a global content-addressed or
-version-keyed cache by default. The gap is narrower than "no ecosystem
-shares dependencies": it's specifically plain npm (flat, per-project
-`node_modules`) and plain pip/venv. So `agentyard-deps` (Phase 1) detects
-the package manager and passes through to the ecosystem's own cache where
-one already exists well, and only builds its own lockfile-hash-keyed,
-hardlink-with-copy-fallback store for the ecosystems that don't.
+Go modules, Maven, Gradle, uv, pnpm, yarn, poetry, and pipenv all use a
+global content-addressed or version-keyed cache by default. The gap is
+narrower than "no ecosystem shares dependencies": it's specifically plain
+npm (flat, per-project `node_modules`) and plain pip/venv. So
+`agentyard-deps` (Phase 1) detects the package manager and passes through
+to the ecosystem's own cache where one already exists well
+(`passthrough.rs`), and only builds its own lockfile-hash-keyed content
+store for the ecosystem that doesn't (`store.rs`, npm only).
+
+Plain pip/venv was *also* a candidate for a custom store, and was
+deliberately rejected, not deferred by accident: Python venvs aren't
+reliably relocatable (activation scripts, `.pth` files, and console-script
+shebangs can embed absolute paths tied to the original venv), so
+hardlinking `site-packages` into a fresh venv is a correctness risk, not
+just extra engineering — the same category of problem that justified
+spiking jj before committing to it. Since pip already has its own global
+download cache (`~/.cache/pip`) covering the expensive part (network
+fetch), the remaining gap is bounded and left as future work.
+
+**A sharper risk surfaced during an independent plan review before this
+store was built, not after:** a plain *writable* hardlink means every
+workspace's copy is the same underlying file record as the store entry —
+so a package that writes into its own installed files post-install (a
+native build step, a binary downloader, a git-hook installer) would
+silently corrupt every other workspace, present and future, materialized
+from that hash. `ContentStore::materialize` prefers reflink (copy-on-write,
+safe under mutation by construction) and falls back to a hardlink marked
+**read-only** at the destination, not a plain one — turning that failure
+mode loud (the write fails) instead of silent (the store quietly rots).
+One consequence worth knowing: because NTFS (and most filesystems) key
+basic attributes to the underlying file record rather than the individual
+link, marking a hardlink read-only also freezes the canonical store entry
+itself after first use.
 
 ### Signaling scope for v1
 
@@ -104,24 +130,27 @@ same repository.
 graph TD
     CLI["agentyard-cli<br/>(clap binary: spawn / list / teardown)"]
     Core["agentyard-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
-    VCS["agentyard-vcs<br/>(PID-aware lock + git worktree lifecycle)"]
-    Deps["agentyard-deps<br/>(dependency broker -- Phase 1)"]
+    VCS["agentyard-vcs<br/>(PidLock + git worktree lifecycle)"]
+    Deps["agentyard-deps<br/>(dependency broker: detect + passthrough + content store)"]
     Agents["agentyard-agents<br/>(agent CLI adapters -- Phase 2/4)"]
     Coord["agentyard-coord<br/>(file leases + messages, MCP server -- Phase 3)"]
 
     CLI --> Core
     Core --> VCS
-    Core -.Phase 1.-> Deps
+    Core --> Deps
+    Deps -.reuses.-> VCS
     Core -.Phase 2/4.-> Agents
     Agents -.Phase 3.-> Coord
 
-    style Deps stroke-dasharray: 5 5
     style Agents stroke-dasharray: 5 5
     style Coord stroke-dasharray: 5 5
 ```
 
 Dashed boxes are stubbed today (a doc comment describing their future
-role) but not yet implemented — see Status below.
+role) but not yet implemented — see Status below. `agentyard-deps` reuses
+`agentyard-vcs`'s `PidLock` directly (generalized from its original
+git-specific name) to guard concurrent population of a store entry, the
+same protection Phase 0 built for `git worktree` operations.
 
 ### Spawn / teardown flow
 
@@ -129,8 +158,9 @@ role) but not yet implemented — see Status below.
 sequenceDiagram
     participant U as agentyard spawn "<task>"
     participant Core as Orchestrator
-    participant Lock as GitLock
+    participant Lock as PidLock
     participant Git as git worktree
+    participant Deps as agentyard-deps
 
     U->>Core: spawn(task)
     Core->>Lock: acquire (steal if holder PID is dead)
@@ -138,17 +168,22 @@ sequenceDiagram
     Core->>Git: worktree add <path> -b agentyard/<id>
     Git-->>Core: ok
     Core->>Lock: release (on drop)
-    Note over Core: Phase 1 will insert: deps.prepare(workspace)
+    Core->>Deps: prepare(workspace.path)
+    Note over Deps: pnpm/uv/cargo/go/etc: run native install (warms existing cache)
+    Note over Deps: npm: hash lockfile, populate-or-reuse content store, materialize
+    Deps-->>Core: ok (failure here is logged, not fatal)
     Note over Core: Phase 2 will insert: agents.launch(workspace)
     Core-->>U: Workspace { id, path, branch, task }
 ```
 
-The lock exists because git itself races on `.git/config.lock` when
+The git lock exists because git itself races on `.git/config.lock` when
 `git worktree add`/`remove` run concurrently
 ([anthropics/claude-code#34645](https://github.com/anthropics/claude-code/issues/34645)) --
 `agentyard-vcs` serializes what git doesn't safely parallelize on its own,
 and steals locks left behind by a process that died without cleaning up
-(checked via PID liveness, not a timeout guess).
+(checked via PID liveness, not a timeout guess). The same `PidLock` guards
+content-store population in `agentyard-deps`, so two concurrent spawns
+targeting the same lockfile hash don't race each other.
 
 ### State layout
 
@@ -157,9 +192,12 @@ so it never shows up in the main repo's `git status`:
 
 ```
 <repo-parent>/.agentyard-<repo-name>/
-├── locks/git.lock       # PID-aware lock serializing worktree add/remove
-├── meta/<id>.json       # one file per workspace: id, path, branch, task, created_at
-└── workspaces/<id>/     # the actual git worktree for that agent
+├── locks/git.lock              # PID-aware lock serializing worktree add/remove
+├── meta/<id>.json              # one file per workspace: id, path, branch, task, created_at
+├── workspaces/<id>/            # the actual git worktree for that agent
+└── store/npm/<platform>-<hash>/   # populated once per (platform, lockfile) pair,
+    ├── ...                         # materialized (reflink/read-only-hardlink/copy)
+    └── <hash>.lock                 # into every workspace whose lockfile matches
 ```
 
 ## Status
@@ -167,7 +205,7 @@ so it never shows up in the main repo's `git status`:
 | Phase | What | Status |
 |---|---|---|
 | 0 | Workspace lifecycle + the concurrency fix | **Done** |
-| 1 | Dependency broker (shared installs) | Planned |
+| 1 | Dependency broker (shared installs) | **Done** |
 | 2 | Claude Code adapter, real headless launch | Planned |
 | 3 | Coordination MCP server (leases + messages) | Planned |
 | 4 | Codex + Copilot CLI adapters, polish | Planned |
@@ -178,7 +216,18 @@ claude-code#34645), `git worktree list` matched agentyard's own state
 exactly, and `teardown` removed a worktree cleanly with no orphaned
 metadata.
 
-## Usage (Phase 0)
+Phase 1 was verified against a real npm project (a `package.json` depending
+on a small real package): a cold `spawn` ran a real `npm ci` into the
+content store (~9s); a second `spawn` materialized instead of reinstalling
+(~0.5s); `node_modules` resolved correctly (`require` worked) in both; and
+two concurrent spawns racing the *same* lockfile hash both succeeded with
+a single, correctly-populated store entry — no corruption, no partial
+state. One real bug found and fixed along the way: on Windows,
+`std::process::Command` doesn't resolve `npm`/`pnpm`/`yarn`'s `.cmd` shims
+the way a shell does (no `PATHEXT` lookup), so every passthrough call was
+silently failing with "program not found" until routed through `cmd /C`.
+
+## Usage
 
 ```sh
 cargo build
@@ -188,3 +237,9 @@ agentyard spawn "implement the thing"
 agentyard list
 agentyard teardown <id>
 ```
+
+`spawn` creates the worktree, then best-effort prepares dependencies for
+every package manager it detects in the workspace (pass-through install
+for ecosystems with their own cache, content-store materialization for
+npm). A dependency-prepare failure is logged as a warning; it does not
+fail the spawn.
