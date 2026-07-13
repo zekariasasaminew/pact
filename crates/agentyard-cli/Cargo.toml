@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 agentyard-core.workspace = true
+agentyard-agents.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
