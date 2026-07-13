@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 agentyard-vcs.workspace = true
 agentyard-deps.workspace = true
+agentyard-agents.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
