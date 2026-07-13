@@ -1,0 +1,9 @@
+[package]
+name = "agentyard-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentyard-vcs.workspace = true
+anyhow.workspace = true
