@@ -115,6 +115,37 @@ which cuts against the language-agnostic goal, and it's a large amount of
 scope for a v1. It's a plausible future direction once the basic lease/
 message loop is proven, not a v1 requirement.
 
+Leases are advisory by design, not enforced: `claim_files` is granted
+regardless of conflicts it finds, same as prior art. What isn't a minor
+detail is *how* overlap is detected -- two glob patterns can look nothing
+alike as strings and still cover the same files (`src/**/*.rs` vs
+`src/foo.rs`), so `agentyard-coord` expands both patterns against the
+actual files in a workspace and intersects the resulting sets, rather than
+comparing pattern strings. Verified against exactly that case, not just
+identical patterns: one agent claimed `src/*.txt`, a second claimed the
+narrower `src/hello.txt`, and the conflict was correctly detected and
+reported with the specific overlapping file named.
+
+The coordination database is deliberately *not* stored alongside
+per-workspace bookkeeping in `.agentyard-<repo>/` (see State layout) --
+that directory sits one level above every workspace
+(`workspaces/<id>/../..`), and headless launches default to
+`bypassPermissions`, so a careless broad shell command in any one agent's
+workspace could otherwise reach and corrupt coordination state every other
+agent depends on. It now lives under the platform's local data directory
+instead, keyed by a hash of the repo root. Not a hard security boundary --
+an agent's Bash tool can still reach an absolute path -- but it removes the
+realistic risk of stumbling into it by accident via `../..`. Found by
+independent plan review before this was built, not after.
+
+`rmcp` (the official Rust MCP SDK) requires an async runtime. Rather than
+making the whole CLI async for this one server, it runs as its own OS
+process (`agentyard mcp-serve`, launched by the agent CLI itself over
+stdio, not run in-process by the orchestrator), and that subcommand builds
+its own `tokio::Runtime` just for its own lifetime -- `spawn`/`list`/
+`teardown` stay exactly as synchronous as before. Same reasoning as the
+process-supervision decision below.
+
 ### The orchestrator must own workspace creation
 
 A consequence discovered during the jj spike, not an arbitrary choice: this
@@ -159,23 +190,23 @@ graph TD
     VCS["agentyard-vcs<br/>(PidLock + git worktree lifecycle)"]
     Deps["agentyard-deps<br/>(dependency broker: detect + passthrough + content store)"]
     Agents["agentyard-agents<br/>(Claude Code adapter done; Codex/Copilot -- Phase 4)"]
-    Coord["agentyard-coord<br/>(file leases + messages, MCP server -- Phase 3)"]
+    Coord["agentyard-coord<br/>(leases + messages, its own MCP server process)"]
 
     CLI --> Core
     Core --> VCS
     Core --> Deps
     Core --> Agents
     Deps -.reuses.-> VCS
-    Agents -.Phase 3.-> Coord
-
-    style Coord stroke-dasharray: 5 5
+    Core -.writes MCP config for.-> Coord
+    Agent2["claude -p (child process)"] -.launches as its own child, over stdio.-> Coord
 ```
 
-The dashed box is stubbed today (a doc comment describing its future
-role) but not yet implemented — see Status below. `agentyard-deps` reuses
-`agentyard-vcs`'s `PidLock` directly (generalized from its original
-git-specific name) to guard concurrent population of a store entry, the
-same protection Phase 0 built for `git worktree` operations.
+`agentyard-deps` reuses `agentyard-vcs`'s `PidLock` directly (generalized
+from its original git-specific name) to guard concurrent population of a
+store entry, the same protection Phase 0 built for `git worktree`
+operations. `agentyard-coord` is not called in-process by `agentyard-core`
+at all -- the orchestrator only writes the config file that tells the
+agent CLI to launch it itself, over stdio, as its own separate process.
 
 ### Spawn / teardown flow
 
@@ -222,6 +253,36 @@ targeting the same lockfile hash don't race each other.
 tracked PID -- see Status) before removing its worktree, in case it's
 invoked from a different `agentyard` call than the one blocked on `spawn`.
 
+### Cross-agent coordination flow
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A (claude -p)
+    participant Coord as agentyard-coord (mcp-serve)
+    participant DB as state.db
+    participant B as Agent B (claude -p)
+
+    A->>Coord: claim_files(["src/*.txt"])
+    Coord->>DB: INSERT lease (pattern, holder=A, expires_at)
+    Coord-->>A: { granted: true, conflicts: [] }
+    A->>Coord: send_message(to: null, "lease-info", "...")
+    Coord->>DB: INSERT message (from=A, to=NULL)
+
+    B->>Coord: check_messages()
+    Coord->>DB: SELECT WHERE id > B's cursor AND (to=B OR to IS NULL)
+    Coord-->>B: [ {from: A, subject: "lease-info", ...} ]
+    B->>Coord: claim_files(["src/hello.txt"])
+    Coord->>DB: SELECT active leases WHERE holder != B
+    Note over Coord: expand "src/*.txt" (A's lease) and "src/hello.txt" (B's request)<br/>against B's own workspace files, intersect the two sets
+    Coord-->>B: { granted: true, conflicts: [{holder: A, pattern: "src/*.txt", example_files: ["src/hello.txt"]}] }
+```
+
+Each agent is a separate `claude -p` process that launches its own
+`agentyard mcp-serve` as an MCP server over stdio (per its generated
+config); they're not talking to each other directly, or to a shared
+in-process daemon -- `state.db` (SQLite, WAL mode) is the only thing
+actually shared between them.
+
 ### State layout
 
 All state lives as a **sibling** of the repo, not inside its working tree,
@@ -231,12 +292,23 @@ so it never shows up in the main repo's `git status`:
 <repo-parent>/.agentyard-<repo-name>/
 ├── locks/git.lock              # PID-aware lock serializing worktree add/remove
 ├── meta/<id>.json               # id, path, branch, task, created_at, agent_pid
+├── mcp/<id>.json                 # generated --mcp-config file for this workspace
 ├── workspaces/<id>/            # the actual git worktree for that agent
 ├── logs/<id>.jsonl              # raw NDJSON, one line per agent stdout line, as-is
 └── store/npm/<platform>-<hash>/   # populated once per (platform, lockfile) pair,
     ├── ...                         # materialized (reflink/read-only-hardlink/copy)
     └── <hash>.lock                 # into every workspace whose lockfile matches
 ```
+
+The coordination database is the one exception -- deliberately *not* here
+(see Design decisions for why):
+
+```
+<platform-local-data-dir>/agentyard/<sha256(repo_root)[..16]>/state.db
+```
+
+e.g. `%LOCALAPPDATA%\agentyard\<hash>\state.db` on Windows,
+`~/.local/share/agentyard/<hash>/state.db` on Linux.
 
 ## Status
 
@@ -245,7 +317,7 @@ so it never shows up in the main repo's `git status`:
 | 0 | Workspace lifecycle + the concurrency fix | **Done** |
 | 1 | Dependency broker (shared installs) | **Done** |
 | 2 | Claude Code adapter, real headless launch | **Done** |
-| 3 | Coordination MCP server (leases + messages) | Planned |
+| 3 | Coordination MCP server (leases + messages) | **Done** |
 | 4 | Codex + Copilot CLI adapters, polish | Planned |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
@@ -289,6 +361,17 @@ with a retry-then-fall-back-to-direct-removal path for (1)/(2), and
 `taskkill /F /T /PID` (kills the whole descendant tree) for (3). See the
 `agentyard-vcs` commit history for the full writeup.
 
+Phase 3 was verified with two real, concurrent Claude Code sessions in the
+same repo, not a mocked or single-agent test: agent A claimed `src/*.txt`
+and broadcast a message; agent B retrieved that message via
+`check_messages` (confirmed byte-for-byte correct on disk), then claimed
+the narrower, differently-worded `src/hello.txt` and received back the
+correct conflict -- agent A's holder id, its actual pattern, and the
+specific overlapping file -- proving the glob-expansion overlap detection
+works against genuinely different pattern strings, not just identical
+ones. The coordination database was confirmed to land in the relocated
+platform data directory, not the repo-adjacent state tree.
+
 ## Usage
 
 ```sh
@@ -304,10 +387,14 @@ agentyard teardown <id>
 `spawn` creates the worktree, best-effort prepares dependencies for every
 package manager it detects (pass-through install for ecosystems with their
 own cache, content-store materialization for npm), then launches Claude
-Code headlessly and blocks until it finishes, streaming `[init]`/
-`[assistant]`/`[tool]`/`[other]` lines live and printing a final done/failed
-summary. A dependency-prepare failure is logged as a warning, not fatal.
-`--permission-mode` defaults to `bypassPermissions` (a warning is printed
-when that default is in effect) -- see Design decisions for why headless
-mode requires *some* non-interactive mode rather than this being a
-hardening choice.
+Code headlessly -- with a generated MCP config pointing it at its own
+`agentyard-coord` server, giving the agent `claim_files`/`release_files`/
+`send_message`/`check_messages` tools automatically, no extra setup
+needed -- and blocks until it finishes, streaming `[init]`/`[assistant]`/
+`[tool]`/`[other]` lines live and printing a final done/failed summary. A
+dependency-prepare failure is logged as a warning, not fatal; so is a
+coordination server that fails to connect (checked against the session's
+init event, not assumed). `--permission-mode` defaults to
+`bypassPermissions` (a warning is printed when that default is in effect)
+-- see Design decisions for why headless mode requires *some*
+non-interactive mode rather than this being a hardening choice.
