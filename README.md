@@ -124,6 +124,32 @@ CLI's `/fleet`, Claude Code's Task-tool subagents-with-worktrees), because
 that would mean two independent orchestration layers fighting over the
 same repository.
 
+### Process supervision stays synchronous for now
+
+Everything in the codebase is blocking `std::process::Command`, including
+Phase 2's agent launch -- `tokio` was declared as a workspace dependency
+from the initial scaffold but is still unused. Introducing it just for one
+adapter would mean either a half-async codebase or forcing every existing
+blocking call through `spawn_blocking` for no present benefit, since only
+one child process runs per `spawn` today. The seam that will matter is
+structural, not sync-vs-async: process supervision lives entirely behind
+`agentyard_agents::run_and_stream`, so whichever phase first needs to
+supervise several *running* agents concurrently can change what's behind
+that boundary without touching adapters or the orchestrator's call site.
+
+### Headless launch requires bypassing permissions, not a hardening choice
+
+There's no TTY in `-p`/headless mode to answer an interactive permission
+prompt, so *some* non-interactive permission mode is mandatory to avoid
+hanging forever the first time a session hits a permission-gated action --
+of Claude Code's six modes, `bypassPermissions` is the only one that
+can't still hang, since e.g. `acceptEdits` only auto-accepts file edits and
+would still gate an arbitrary Bash call. This is surfaced loudly (a
+warning printed before every launch that uses the default) rather than
+silently baked in, and is an explicit, overridable `--permission-mode` flag
+precisely because it means an unattended agent bypasses every check with
+no human in the loop.
+
 ## Architecture
 
 ```mermaid
@@ -132,21 +158,20 @@ graph TD
     Core["agentyard-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
     VCS["agentyard-vcs<br/>(PidLock + git worktree lifecycle)"]
     Deps["agentyard-deps<br/>(dependency broker: detect + passthrough + content store)"]
-    Agents["agentyard-agents<br/>(agent CLI adapters -- Phase 2/4)"]
+    Agents["agentyard-agents<br/>(Claude Code adapter done; Codex/Copilot -- Phase 4)"]
     Coord["agentyard-coord<br/>(file leases + messages, MCP server -- Phase 3)"]
 
     CLI --> Core
     Core --> VCS
     Core --> Deps
+    Core --> Agents
     Deps -.reuses.-> VCS
-    Core -.Phase 2/4.-> Agents
     Agents -.Phase 3.-> Coord
 
-    style Agents stroke-dasharray: 5 5
     style Coord stroke-dasharray: 5 5
 ```
 
-Dashed boxes are stubbed today (a doc comment describing their future
+The dashed box is stubbed today (a doc comment describing its future
 role) but not yet implemented — see Status below. `agentyard-deps` reuses
 `agentyard-vcs`'s `PidLock` directly (generalized from its original
 git-specific name) to guard concurrent population of a store entry, the
@@ -161,8 +186,9 @@ sequenceDiagram
     participant Lock as PidLock
     participant Git as git worktree
     participant Deps as agentyard-deps
+    participant Agent as claude -p (child process)
 
-    U->>Core: spawn(task)
+    U->>Core: spawn(task, permission_mode)
     Core->>Lock: acquire (steal if holder PID is dead)
     Lock-->>Core: acquired
     Core->>Git: worktree add <path> -b agentyard/<id>
@@ -172,8 +198,15 @@ sequenceDiagram
     Note over Deps: pnpm/uv/cargo/go/etc: run native install (warms existing cache)
     Note over Deps: npm: hash lockfile, populate-or-reuse content store, materialize
     Deps-->>Core: ok (failure here is logged, not fatal)
-    Note over Core: Phase 2 will insert: agents.launch(workspace)
-    Core-->>U: Workspace { id, path, branch, task }
+    Core->>Agent: spawn claude -p ... --output-format stream-json --verbose
+    Agent-->>Core: on_pid(pid) -- persisted immediately, before blocking
+    loop each NDJSON line
+        Agent-->>Core: stdout line
+        Note over Core: raw line appended to logs/<id>.jsonl, then parsed to AgentEvent
+        Core-->>U: on_event(event) -- printed live
+    end
+    Agent-->>Core: process exits
+    Core-->>U: (Workspace, RunOutcome { success, summary })
 ```
 
 The git lock exists because git itself races on `.git/config.lock` when
@@ -185,6 +218,10 @@ and steals locks left behind by a process that died without cleaning up
 content-store population in `agentyard-deps`, so two concurrent spawns
 targeting the same lockfile hash don't race each other.
 
+`teardown` kills a workspace's live agent process (whole tree, not just the
+tracked PID -- see Status) before removing its worktree, in case it's
+invoked from a different `agentyard` call than the one blocked on `spawn`.
+
 ### State layout
 
 All state lives as a **sibling** of the repo, not inside its working tree,
@@ -193,8 +230,9 @@ so it never shows up in the main repo's `git status`:
 ```
 <repo-parent>/.agentyard-<repo-name>/
 ├── locks/git.lock              # PID-aware lock serializing worktree add/remove
-├── meta/<id>.json              # one file per workspace: id, path, branch, task, created_at
+├── meta/<id>.json               # id, path, branch, task, created_at, agent_pid
 ├── workspaces/<id>/            # the actual git worktree for that agent
+├── logs/<id>.jsonl              # raw NDJSON, one line per agent stdout line, as-is
 └── store/npm/<platform>-<hash>/   # populated once per (platform, lockfile) pair,
     ├── ...                         # materialized (reflink/read-only-hardlink/copy)
     └── <hash>.lock                 # into every workspace whose lockfile matches
@@ -206,7 +244,7 @@ so it never shows up in the main repo's `git status`:
 |---|---|---|
 | 0 | Workspace lifecycle + the concurrency fix | **Done** |
 | 1 | Dependency broker (shared installs) | **Done** |
-| 2 | Claude Code adapter, real headless launch | Planned |
+| 2 | Claude Code adapter, real headless launch | **Done** |
 | 3 | Coordination MCP server (leases + messages) | Planned |
 | 4 | Codex + Copilot CLI adapters, polish | Planned |
 
@@ -227,6 +265,30 @@ state. One real bug found and fixed along the way: on Windows,
 the way a shell does (no `PATHEXT` lookup), so every passthrough call was
 silently failing with "program not found" until routed through `cmd /C`.
 
+Phase 2 was verified against a real headless launch: a task requiring an
+actual tool call (write a file with specific content), not a trivial
+text-only one, per review feedback that a no-tool-use test wouldn't
+exercise the important path. Confirmed: the `tool_use` event carried the
+correct file path scoped inside the workspace, the file's contents were
+exactly right, the raw NDJSON log matched what streamed to the terminal,
+and the tool-result echo event (a `"user"`-typed message, previously
+unobserved) came through as `[other]` rather than being silently dropped.
+
+The teardown-while-running path surfaced two real, previously unknown
+Windows bugs, only found by actually killing a genuinely running agent
+mid-task rather than assuming the happy path: (1) killing a process
+doesn't release its handles on its own working directory instantly, so an
+immediate `git worktree remove` raced that cleanup and failed; (2) git
+unregisters a worktree from its metadata *before* deleting the directory,
+so once (1) failed once, retrying `git worktree remove` failed differently
+("is not a working tree") while the directory sat there orphaned; (3)
+killing only the tracked PID wasn't enough at all -- a Bash tool call spawns
+a child shell process, and killing just the parent left that child alive,
+still holding the directory open for the rest of its natural life. Fixed
+with a retry-then-fall-back-to-direct-removal path for (1)/(2), and
+`taskkill /F /T /PID` (kills the whole descendant tree) for (3). See the
+`agentyard-vcs` commit history for the full writeup.
+
 ## Usage
 
 ```sh
@@ -234,12 +296,18 @@ cargo build
 
 # from inside (or pass --repo to) a git repository:
 agentyard spawn "implement the thing"
+agentyard spawn "implement the thing" --permission-mode acceptEdits
 agentyard list
 agentyard teardown <id>
 ```
 
-`spawn` creates the worktree, then best-effort prepares dependencies for
-every package manager it detects in the workspace (pass-through install
-for ecosystems with their own cache, content-store materialization for
-npm). A dependency-prepare failure is logged as a warning; it does not
-fail the spawn.
+`spawn` creates the worktree, best-effort prepares dependencies for every
+package manager it detects (pass-through install for ecosystems with their
+own cache, content-store materialization for npm), then launches Claude
+Code headlessly and blocks until it finishes, streaming `[init]`/
+`[assistant]`/`[tool]`/`[other]` lines live and printing a final done/failed
+summary. A dependency-prepare failure is logged as a warning, not fatal.
+`--permission-mode` defaults to `bypassPermissions` (a warning is printed
+when that default is in effect) -- see Design decisions for why headless
+mode requires *some* non-interactive mode rather than this being a
+hardening choice.
