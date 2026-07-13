@@ -10,3 +10,4 @@ agentyard-deps.workspace = true
 agentyard-agents.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+serde_json.workspace = true
