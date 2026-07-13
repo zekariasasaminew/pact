@@ -440,6 +440,12 @@ limitations.
   The Unix equivalent (a process group established via `setsid` at spawn
   time) isn't implemented -- this project was built and verified entirely
   on Windows.
+- **CI covers cross-platform build + test, not live-agent verification.**
+  Every Phase 0-4 scenario in this README was verified by actually running
+  real agent CLIs on Windows -- CI (GitHub Actions, all three platforms)
+  catches compile/test regressions on macOS/Linux, but re-running those
+  same live scenarios there needs a human, or a cloud agent, with actual
+  access -- neither of which this project has had yet.
 - **No custom dependency-sharing store for plain pip/venv** -- deliberately
   out of scope (see Design decisions), not an oversight.
 - **Ctrl-C handling is single-shot per process** (see
