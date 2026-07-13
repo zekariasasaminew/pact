@@ -1,14 +1,20 @@
-//! Agent CLI adapters (Phase 2: Claude Code; Phase 4: Codex, Copilot CLI).
+//! Agent CLI adapters.
 //!
-//! Each adapter's job is just building the headless launch command for its
-//! CLI (see `claude_code`); actually running it and normalizing its
-//! streamed output is shared, adapter-agnostic machinery (`process`,
-//! `event`), so adding Codex/Copilot in Phase 4 means one new small
-//! `build_command`-shaped module, not touching process supervision.
+//! Each adapter's job is building the headless launch command for its CLI
+//! and parsing its output into the shared `AgentEvent` model (see
+//! `adapter::AgentAdapter`); actually running the process and driving that
+//! parser is adapter-agnostic machinery (`process::run_and_stream`), so
+//! adding an adapter means one new small module, not touching process
+//! supervision. Claude Code and Copilot CLI are both live-verified; Codex
+//! is implemented from documentation only -- see `codex.rs`'s doc comment.
 
-pub mod claude_code;
+mod adapter;
+mod claude_code;
+mod codex;
+mod copilot;
 mod event;
 mod process;
 
+pub use adapter::{adapter, AgentAdapter, AgentKind, CoordConfig};
 pub use event::AgentEvent;
 pub use process::{run_and_stream, RunOutcome};
