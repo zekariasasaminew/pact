@@ -28,6 +28,7 @@ sysinfo = "0.32"
 sha2 = "0.10"
 reflink-copy = "0.1"
 walkdir = "2"
+ctrlc = "3"
 
 agentyard-vcs = { path = "crates/agentyard-vcs" }
 agentyard-deps = { path = "crates/agentyard-deps" }
