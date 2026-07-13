@@ -25,6 +25,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.32"
+sha2 = "0.10"
+reflink-copy = "0.1"
+walkdir = "2"
 
 agentyard-vcs = { path = "crates/agentyard-vcs" }
 agentyard-deps = { path = "crates/agentyard-deps" }
