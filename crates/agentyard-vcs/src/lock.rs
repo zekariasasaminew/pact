@@ -5,19 +5,22 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-/// A serialized, PID-aware lock around `git worktree` operations.
+/// A serialized, PID-aware file lock.
 ///
-/// Git itself races on `.git/config.lock` when `git worktree add`/`remove`
-/// run concurrently (see anthropics/claude-code#34645) -- this lock makes
-/// the orchestrator serialize those calls instead of relying on git's own
-/// (currently unsafe-under-concurrency) locking. If the previous holder's
-/// process has died without cleaning up, the lock is stolen rather than
-/// left stale forever.
-pub struct GitLock {
+/// Originally built because git itself races on `.git/config.lock` when
+/// `git worktree add`/`remove` run concurrently (see
+/// anthropics/claude-code#34645) -- but the mechanism isn't git-specific,
+/// it's just "serialize access to a resource, and don't leave it stuck
+/// locked forever if the holder died." `agentyard-deps` reuses it verbatim
+/// to guard concurrent population of a shared dependency store entry.
+///
+/// If the previous holder's process has died without cleaning up, the lock
+/// is stolen (checked via PID liveness) rather than left stale forever.
+pub struct PidLock {
     path: PathBuf,
 }
 
-impl GitLock {
+impl PidLock {
     pub fn acquire(lock_path: &Path, timeout: Duration) -> Result<Self> {
         let start = Instant::now();
         loop {
@@ -38,7 +41,7 @@ impl GitLock {
                     }
                     if start.elapsed() > timeout {
                         bail!(
-                            "timed out after {:?} waiting for git lock at {}",
+                            "timed out after {:?} waiting for lock at {}",
                             timeout,
                             lock_path.display()
                         );
@@ -75,7 +78,7 @@ impl GitLock {
     }
 }
 
-impl Drop for GitLock {
+impl Drop for PidLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }

@@ -1,6 +1,6 @@
 mod lock;
 
-pub use lock::GitLock;
+pub use lock::PidLock;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -76,7 +76,7 @@ impl WorkspaceManager {
         let path = self.state_dir.join("workspaces").join(&id);
 
         {
-            let _lock = GitLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
+            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
                 .context("acquiring git worktree lock")?;
 
             let output = Command::new("git")
@@ -113,7 +113,7 @@ impl WorkspaceManager {
         let workspace = self.get_workspace(id)?;
 
         {
-            let _lock = GitLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
+            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
                 .context("acquiring git worktree lock")?;
 
             let output = Command::new("git")
