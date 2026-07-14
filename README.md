@@ -266,6 +266,74 @@ pointing it at a per-workspace directory would plausibly break headless
 login on first use. The inline `-c` override sidesteps that entirely, and
 was confirmed to actually connect to and call a real MCP server.
 
+### Real parallel launch: OS threads, not async/tokio
+
+Phase 2 deliberately kept process supervision synchronous, flagging that
+whichever future phase first needed to supervise several agents
+concurrently *in one process* would need to change what's behind
+`pact_agents::run_and_stream`'s boundary. That phase is this one. The
+choice of *how* -- OS threads vs. converting to async/tokio -- was
+researched properly before deciding: two independent passes built the
+strongest case for each side, then rebutted each other's case directly,
+rather than picking the familiar option by default.
+
+**Threads won.** The deciding factor was shape: `spawn-many` runs a fixed,
+small, user-enumerated set of children to completion with combined
+attributed output -- the same shape as Go's `overmind`/`goreman`
+(goroutine-per-process), not the many-tasks-over-few-workers scheduler
+shape that actually justifies `cargo-nextest`'s or Turborepo's tokio use.
+Async's two concrete technical arguments didn't survive rebuttal: a crate
+called `command-group` gives whole subprocess-tree containment (POSIX
+process groups, Windows Job Objects) to plain `std::process::Command`,
+with tokio as an *optional* feature only -- neutralizing the one
+scale-independent advantage async had. The async sketch also had an
+unacknowledged blocking-call-in-executor problem (synchronous log-file
+writes inside an "async" task), and its claim that wrapping single-`spawn`
+in a fresh `Runtime::new()?.block_on(...)` was "free" overstated its own
+precedent (`mcp-serve`'s isolated runtime is a one-off subcommand, not
+every `spawn` invocation). The one surviving async argument -- "pact's
+roadmap includes more adapters and pluggable coordination, pay the async
+cost now" -- was speculative in exactly the way this project has avoided
+elsewhere (`AgentAdapter` was only introduced once a second and third real
+adapter existed, not designed in advance of needing it).
+
+One improvement fell out of this research regardless of which side won:
+`command-group`'s whole-tree containment also closes a real gap the
+*single*-agent Ctrl-C path already had. Before this, interrupting a live
+`pact spawn` only killed the tracked agent process itself via plain
+`Child::kill()` -- a Bash tool call's child shell (and anything *it*
+started) kept running, silently holding the workspace directory open.
+Confirmed directly: killing a `cmd.exe` process group with a running
+grandchild `ping.exe` underneath it took the grandchild down too (see
+`pact-agents/examples/group_kill_check.rs`, a manual Windows-only
+verification harness, not part of CI). `teardown`'s Windows `taskkill /T`
+already had this property; live Ctrl-C during `spawn` did not, until now.
+
+A second improvement, closing part of a documented known limitation:
+since every agent is now spawned via `command_group`'s `process_group(0)`,
+it becomes its own process group leader on Unix, meaning its pgid equals
+its pid. That means the `agent_pid` `pact` already persists to disk (so a
+`teardown` invoked from a *different* process than the one that spawned
+the agent can find it) is, by itself, enough to kill the whole group
+cross-process: `kill(-pid, SIGKILL)`. Implemented in `pact-vcs` from
+documented POSIX semantics and `command_group`'s own source, but --
+per issue #6 -- not yet exercised on real Unix hardware, since this
+project's dev environment is Windows-only. Treat as
+implemented-not-live-verified until that happens.
+
+**What stayed synchronous.** `pact-core`, `pact-vcs`, and `pact-deps` are
+untouched -- no tokio anywhere outside `pact-cli`'s `mcp-serve` runtime and
+`pact-coord`. `Orchestrator::spawn_many` shares one new `Supervisor` (a
+registry of live child process groups plus a single process-wide Ctrl-C
+handler, installed once) across `std::thread::scope`-spawned threads, one
+per task; single-`spawn` creates its own single-use `Supervisor`, so its
+observable behavior -- one handler, one child, installed and torn down
+within one call -- is unchanged. The concurrency this relies on
+(`create_workspace` and `pact_deps::prepare` running from several threads
+at once) already existed and was already verified: it's the same
+`PidLock`-guarded serialization Phase 0 confirmed against 6 concurrent
+`spawn` calls, not new synchronization added for this phase.
+
 ## Architecture
 
 ```mermaid
@@ -408,6 +476,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 2 | Claude Code adapter, real headless launch | **Done** |
 | 3 | Coordination MCP server (leases + messages) | **Done** |
 | 4 | Copilot CLI + Codex adapters (both live-verified); `--agent`/`--safety` CLI flags | **Done** |
+| 5 | Real parallel launch (`spawn-many`) from a single invocation | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -489,23 +558,39 @@ carries no success/failure signal at all). Fixed to use the process's
 actual exit code instead. All three adapters (Claude Code, Copilot CLI,
 Codex) are now live-verified to the same standard.
 
+Phase 5 made `spawn-many` real concurrent launch, not N sequential
+invocations dressed up as one command -- see "Real parallel launch" under
+Design decisions for the threads-vs-async research and decision. Verified
+against real installed CLIs: two concurrent `claude` instances given
+different tasks (interleaved `[claude:0]`/`[claude:1]`-labeled output
+confirming genuine concurrency, ~15s wall-clock for both vs. the ~2x that
+would show if they ran serially), a mixed `claude`+`copilot` batch in one
+invocation, and a direct test of the new whole-process-group kill (killing
+a `cmd.exe` group with a running grandchild `ping.exe` took the grandchild
+down too, which the old single-child `Child::kill()` path could not do).
+Existing single-`spawn` and `teardown` behavior were re-run and confirmed
+unchanged.
+
 ## Known limitations
-- **Process-tree killing on teardown is Windows-only** (`taskkill /F /T`).
-  The Unix equivalent (a process group established via `setsid` at spawn
-  time) isn't implemented -- this project was built and verified entirely
-  on Windows.
+- **The Unix whole-group kill path (both live Ctrl-C and cross-process
+  `teardown`) is implemented but not yet live-verified on real Unix
+  hardware** -- see "Real parallel launch" above. This project's dev
+  environment is Windows-only; the code follows documented POSIX
+  process-group semantics and `command_group`'s own source, but hasn't
+  been exercised on macOS/Linux the way every Windows scenario in this
+  README has. Tracked under issue #6.
 - **CI covers cross-platform build + test, not live-agent verification.**
-  Every Phase 0-4 scenario in this README was verified by actually running
+  Every Phase 0-5 scenario in this README was verified by actually running
   real agent CLIs on Windows -- CI (GitHub Actions, all three platforms)
   catches compile/test regressions on macOS/Linux, but re-running those
   same live scenarios there needs a human, or a cloud agent, with actual
   access -- neither of which this project has had yet.
 - **No custom dependency-sharing store for plain pip/venv** -- deliberately
   out of scope (see Design decisions), not an oversight.
-- **Ctrl-C handling is single-shot per process** (see
-  `pact_agents::run_and_stream`'s doc comment) -- fine for today's
-  one-agent-per-`spawn` architecture, would need a different design for a
-  future phase supervising several agents concurrently in one process.
+- **`spawn-many` applies one `--safety` override to every task in the
+  batch**, not per-task -- consistent with what issue #3's acceptance
+  criteria actually asked for; a plausible follow-up, not built ahead of
+  being needed.
 
 ## Usage
 
@@ -516,6 +601,8 @@ cargo build
 pact spawn "implement the thing"
 pact spawn "implement the thing" --agent copilot
 pact spawn "implement the thing" --agent claude --safety acceptEdits
+pact spawn-many --task claude:"implement X" --task claude:"implement Y"
+pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
 pact list
 pact teardown <id>
 pact teardown <id> --keep-branch  # skip deleting the workspace's branch
@@ -536,3 +623,15 @@ whichever adapter's own unattended-safety default is otherwise used (a
 warning is printed either way) -- see Design decisions for why headless
 mode requires *some* such setting for every adapter, not just Claude
 Code, and why their vocabularies aren't unified into one shared flag.
+
+`spawn-many` runs N of the above concurrently from one invocation --
+repeatable `--task <agent>:<task text>`, one per agent instance you want,
+covering both N instances of the same agent (the primary use case this was
+built for) and a mix of different agents in one batch, since each `--task`
+is an independent, unrelated pair. Every task's output streams live,
+prefixed `[<agent>:<index>]` so interleaved lines from different agents
+stay attributable to their source; a final per-workspace done/failed
+summary prints once every task finishes. Ctrl-C kills every still-running
+child (whole process group, not just the immediate process) before `pact`
+exits. `--safety` applies to every task in the batch uniformly -- see
+Known limitations for why that's not per-task yet.
