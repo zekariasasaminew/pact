@@ -62,6 +62,13 @@ enum Command {
     },
     /// List active agent workspaces
     List,
+    /// Show what an agent has done in a workspace: committed changes on
+    /// its branch (relative to where it forked from) and anything still
+    /// only in its working tree.
+    Diff {
+        /// Workspace id (as shown by `list`)
+        id: String,
+    },
     /// Tear down an agent workspace
     Teardown {
         /// Workspace id (as shown by `list`)
@@ -71,6 +78,13 @@ enum Command {
         /// or rebase the workspace's commits after tearing it down.
         #[arg(long)]
         keep_branch: bool,
+
+        /// Tear down even if the workspace has uncommitted changes,
+        /// discarding them. Without this, `teardown` refuses on a dirty
+        /// workspace -- see `pact diff <id>` to inspect what would be
+        /// lost first.
+        #[arg(long)]
+        force: bool,
     },
     /// Run the coordination MCP server over stdio. Not meant to be invoked
     /// directly -- `spawn` launches this itself (as the agent CLI's own
@@ -206,8 +220,13 @@ fn main() -> Result<()> {
                 println!("no active workspaces");
             }
             for workspace in workspaces {
+                let dirty = match orchestrator.is_dirty(&workspace.id) {
+                    Ok(true) => "dirty",
+                    Ok(false) => "clean",
+                    Err(_) => "unknown", // e.g. workspace directory itself is gone
+                };
                 println!(
-                    "{}  {}  {}",
+                    "{}  {}  {}  [{dirty}]",
                     workspace.id,
                     workspace.branch,
                     workspace.path.display()
@@ -215,8 +234,37 @@ fn main() -> Result<()> {
                 println!("    task: {}", workspace.task);
             }
         }
-        Command::Teardown { id, keep_branch } => {
-            orchestrator.teardown(&id, keep_branch)?;
+        Command::Diff { id } => {
+            let diff = orchestrator.diff(&id)?;
+            println!("workspace {id}: committed on branch (vs. merge-base)");
+            if diff.commit_log.is_empty() {
+                println!("  (no commits on this branch yet)");
+            } else {
+                for line in diff.commit_log.lines() {
+                    println!("  {line}");
+                }
+                for line in diff.committed_summary.lines() {
+                    println!("  {line}");
+                }
+            }
+            println!("workspace {id}: uncommitted (working tree)");
+            if diff.uncommitted_status.is_empty() {
+                println!("  (clean)");
+            } else {
+                for line in diff.uncommitted_status.lines() {
+                    println!("  {line}");
+                }
+                for line in diff.uncommitted_summary.lines() {
+                    println!("  {line}");
+                }
+            }
+        }
+        Command::Teardown {
+            id,
+            keep_branch,
+            force,
+        } => {
+            orchestrator.teardown(&id, keep_branch, force)?;
             println!("removed workspace {id}");
         }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
-use pact_vcs::{Workspace, WorkspaceManager};
+use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
 use anyhow::{Context, Result};
 
 /// Ties together workspace lifecycle (pact-vcs), dependency
@@ -264,9 +264,22 @@ impl Orchestrator {
         self.workspaces.list_workspaces()
     }
 
-    pub fn teardown(&self, id: &str, keep_branch: bool) -> Result<()> {
+    /// Whether a workspace has uncommitted changes -- used by `list` to
+    /// show a per-workspace dirty/clean indicator at a glance.
+    pub fn is_dirty(&self, id: &str) -> Result<bool> {
+        self.workspaces.is_dirty(id)
+    }
+
+    /// A workspace's committed (on-branch) and uncommitted (working-tree)
+    /// changes -- see `pact_vcs::WorkspaceManager::workspace_diff`.
+    pub fn diff(&self, id: &str) -> Result<WorkspaceDiff> {
+        self.workspaces.workspace_diff(id)
+    }
+
+    pub fn teardown(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         // WorkspaceManager::remove_workspace already kills any live agent
-        // process recorded against this workspace before removing it.
-        self.workspaces.remove_workspace(id, keep_branch)
+        // process recorded against this workspace before removing it, and
+        // refuses on uncommitted changes unless `force` is set.
+        self.workspaces.remove_workspace(id, keep_branch, force)
     }
 }
