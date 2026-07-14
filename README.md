@@ -4,6 +4,38 @@ A language-agnostic orchestrator for running multiple AI coding agent CLIs
 (Claude Code, GitHub Copilot CLI, Codex) in parallel on the same repository,
 without them fighting each other.
 
+## Getting started
+
+Download a prebuilt binary -- no Rust toolchain, no MSVC linker/Build
+Tools install required:
+
+```sh
+# macOS (Apple Silicon)
+curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-aarch64-apple-darwin.tar.gz | tar xz
+
+# macOS (Intel)
+curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-apple-darwin.tar.gz | tar xz
+
+# Linux (x86_64)
+curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-unknown-linux-gnu.tar.gz | tar xz
+```
+
+```powershell
+# Windows (x86_64)
+Invoke-WebRequest https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-pc-windows-msvc.zip -OutFile pact.zip
+Expand-Archive pact.zip
+```
+
+Then, from inside (or with `--repo` pointing at) a git repository:
+
+```sh
+./pact spawn "implement the thing"
+```
+
+See [Usage](#usage) below for the full command surface. Building from
+source instead (e.g. to contribute) is covered in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## The problem
 
 Running several coding agents at once on one repo hits three separate kinds
@@ -637,9 +669,11 @@ needing `--force`.
 
 ## Usage
 
-```sh
-cargo build
+Assumes `pact` is on your `PATH` (from a downloaded release) or you're
+running `./target/release/pact` after building from source -- see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
+```sh
 # from inside (or pass --repo to) a git repository:
 pact spawn "implement the thing"
 pact spawn "implement the thing" --agent copilot

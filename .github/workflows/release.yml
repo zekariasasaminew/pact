@@ -1,0 +1,82 @@
+name: Release
+
+# Triggered by pushing a `v*` tag (e.g. `v0.1.0`), not by every push to
+# main -- this is a separate, opt-in pipeline from ci.yml's build+test
+# gate. Builds a prebuilt binary for each of the three platforms CI
+# already covers and attaches them to a GitHub Release, so a first-time
+# user can download and run pact without installing a Rust toolchain or
+# (on Windows) an MSVC linker at all -- see the README's "Getting started"
+# section and issue #5 for why this is the highest-ROI install channel.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_ext: zip
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_ext: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive_ext: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive_ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p pact-cli
+
+      - name: Package (unix)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf "${{ github.workspace }}/pact-${{ matrix.target }}.tar.gz" pact
+
+      - name: Package (windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/pact.exe" -DestinationPath "pact-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pact-${{ matrix.target }}
+          path: pact-${{ matrix.target }}.${{ matrix.archive_ext }}
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
