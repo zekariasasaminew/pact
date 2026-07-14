@@ -131,14 +131,23 @@ pub fn run_and_stream(
         }
     };
 
-    Ok(saw_result.unwrap_or_else(|| RunOutcome {
-        success: false,
-        summary: match status {
-            Some(status) => {
-                format!("process exited ({status}) without emitting a result event")
-            }
-            None => "process was interrupted before emitting a result event".to_string(),
-        },
+    Ok(saw_result.unwrap_or_else(|| {
+        // Not every adapter emits an explicit Result-shaped event -- Codex's
+        // `turn.completed`, confirmed directly, carries no success/failure
+        // signal at all, so it never produces one. Falling back to
+        // `success: false` unconditionally here would misreport every
+        // successful Codex run as a failure; the process's own exit code is
+        // the honest signal when no adapter-level Result was seen.
+        match status {
+            Some(status) => RunOutcome {
+                success: status.success(),
+                summary: format!("process exited ({status}) without emitting a result event"),
+            },
+            None => RunOutcome {
+                success: false,
+                summary: "process was interrupted before emitting a result event".to_string(),
+            },
+        }
     }))
 }
 
