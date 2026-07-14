@@ -399,6 +399,54 @@ explicitly out of scope for this issue, and a thin `accept` that just
 shells out to `git merge`/`cherry-pick` doesn't add enough over doing that
 directly once `diff` has shown what's there.
 
+### Store keying grew two dimensions, and gained a real fallback -- both found by risk analysis, one confirmed by a real failure
+
+The npm content store's original key (`{os}-{arch}-node{major}-{lockfile
+hash}`) had two real gaps, found by working through concrete failure
+scenarios rather than assuming the existing dimensions were enough:
+
+- **npm version wasn't part of the key**, so two workspaces on machines
+  with different globally-installed npm versions, hitting the same
+  lockfile hash, would share a store entry populated by whichever ran
+  first -- even though different npm versions can lay out `node_modules`
+  differently from an identical lockfile. Fixed: npm's own version is now
+  in the key.
+- **libc flavor (Linux only) wasn't part of the key.** Packages that
+  resolve a platform-specific binary via `optionalDependencies` (`esbuild`,
+  `swc`, `sharp`, and others in that exact shape) pick a *different* one
+  for musl (Alpine) vs. glibc (Debian/Ubuntu) despite both reporting the
+  same `os=linux, arch=x86_64` -- a real risk in the common case of mixed
+  Alpine/Debian Docker-based dev environments, not an edge case. Fixed:
+  a `-musl`/`-glibc` suffix, detected via the presence of musl's dynamic
+  linker, is now in the key on Linux.
+
+**The more consequential gap, and the one a real failure confirmed rather
+than just a risk analysis predicting it:** `prepare_npm` previously had a
+fallback to a plain, unshared `npm install` only when there was *no
+lockfile at all* -- if a lockfile existed but store *population* itself
+failed (`npm ci` erroring inside the store's staging directory), the
+error was logged and the workspace was left with no `node_modules` at
+all, not a normal install. Verified live, and this surfaced a genuine,
+previously-unknown failure mode in the process: on Windows, populating a
+store entry for `esbuild` (a package with a postinstall step) failed with
+`ENOENT` spawning `cmd.exe` -- not because `cmd.exe` was missing, but
+because the fully-qualified path exceeded Windows' `MAX_PATH` (260 chars)
+once nested under the store's own (necessarily long, hash-containing) key
+directory inside an already-long state-dir root. `prepare_npm` now
+catches a population failure and falls back to a plain per-workspace
+install (confirmed to succeed where the store population didn't, since
+its path is shorter), logging why -- exactly the "falls back... instead of
+trying to force it" behavior this issue asked for, exercised by a real
+failure rather than a synthetic one.
+
+**On the test matrix:** this project's dev environment is Windows-only
+(confirmed: no APFS/ext4/btrfs access, only one local NTFS volume to test
+against) -- the same honest constraint as issue #6. The cross-filesystem/
+unsupported-FS fallback path (reflink -> hardlink -> plain copy) was
+verified by reading `detect_link_mode`/`link_one`'s logic, not by
+constructing an actual cross-filesystem scenario, since a second real
+filesystem wasn't available to test against here.
+
 ## Architecture
 
 ```mermaid
@@ -543,6 +591,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 4 | Copilot CLI + Codex adapters (both live-verified); `--agent`/`--safety` CLI flags | **Done** |
 | 5 | Real parallel launch (`spawn-many`) from a single invocation | **Done** |
 | 6 | Post-run review (`diff`) + safe teardown (uncommitted-change guard) | **Done** |
+| 7 | Shared npm store: extended keying + populate-failure fallback | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -646,6 +695,17 @@ request, confirmed `diff` shows a real commit an agent made plus a real
 uncommitted file, and confirmed a clean workspace tears down without
 needing `--force`.
 
+Phase 7 extended the npm content store's keying and added a real
+populate-failure fallback -- see "Store keying grew two dimensions" under
+Design decisions. Live-verified with a real package with a postinstall
+step (`esbuild`): confirmed the new key format includes npm's version,
+confirmed a genuine store-population failure (a real Windows `MAX_PATH`
+issue, not a synthetic one) correctly triggered the new fallback to a
+plain per-workspace install, and confirmed the fallback's warning is
+logged (`tracing_subscriber::fmt`'s default writer is stdout, not
+stderr -- worth knowing if you're grepping the wrong stream for it, as
+this session briefly did before checking).
+
 ## Known limitations
 - **The Unix whole-group kill path (both live Ctrl-C and cross-process
   `teardown`) is implemented but not yet live-verified on real Unix
@@ -666,6 +726,20 @@ needing `--force`.
   batch**, not per-task -- consistent with what issue #3's acceptance
   criteria actually asked for; a plausible follow-up, not built ahead of
   being needed.
+- **The npm content store's cross-filesystem/unsupported-FS fallback and
+  APFS/ext4/btrfs behavior are verified by code inspection, not by
+  constructing real cross-filesystem or non-NTFS scenarios** -- this
+  project's dev environment only has one local NTFS volume available.
+  What *was* confirmed on real hardware: store keying, the
+  populate-failure fallback (via a genuine Windows `MAX_PATH` failure, not
+  a synthetic one), and its logging.
+- **Long store-key directory names can push deeply-nested npm package
+  paths over Windows' `MAX_PATH` (260 chars)**, especially under an
+  already-long state-dir root -- confirmed directly (see Phase 7). The
+  populate-failure fallback catches this and falls back to a plain
+  install, so it degrades safely rather than leaving a workspace with no
+  `node_modules`, but the store itself doesn't avoid the failure, only
+  recovers from it.
 
 ## Usage
 

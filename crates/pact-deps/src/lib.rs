@@ -11,6 +11,21 @@
 //! reinstall. Plain pip/venv is intentionally left as passthrough-only --
 //! see `passthrough::run_pip_plain` for why a custom store there was
 //! rejected rather than deferred by accident.
+//!
+//! **A real failure mode found while verifying issue #7's fallback path,
+//! not a synthetic test case:** the store's key (platform/arch/libc/node/
+//! npm version plus a 64-character lockfile hash) makes store-entry paths
+//! meaningfully longer than a plain per-workspace `node_modules` would be.
+//! Confirmed directly on Windows: `npm ci` populating a store entry for a
+//! package with a postinstall step (`esbuild`) failed with `ENOENT`
+//! spawning `cmd.exe` -- not because `cmd.exe` was missing, but because
+//! the fully-qualified path to the file being installed exceeded Windows'
+//! legacy `MAX_PATH` (260 chars) once nested under a long store-key
+//! directory name inside an already-long temp/state-dir root. This is
+//! exactly the class of precondition-not-met failure `prepare_npm`'s
+//! populate-failure fallback (see below) exists for: it was hit for real,
+//! not hypothetically, and the fallback to a plain per-workspace install
+//! (a shorter path) succeeded where the store population didn't.
 
 mod cmdutil;
 mod detect;
@@ -61,7 +76,7 @@ fn prepare_npm(workspace_path: &Path) -> Result<()> {
     let key = format!("{}-{}", platform_key(), hash_file(&lockfile)?);
     let store = ContentStore::new(store_root_for(workspace_path)?)?;
 
-    let entry = store.populate_if_absent(&key, |tmp| {
+    let populated = store.populate_if_absent(&key, |tmp| {
         std::fs::copy(
             workspace_path.join("package.json"),
             tmp.join("package.json"),
@@ -78,7 +93,24 @@ fn prepare_npm(workspace_path: &Path) -> Result<()> {
             );
         }
         Ok(())
-    })?;
+    });
+
+    // A store-population failure (network blip, a native build tool
+    // missing on this specific machine, a registry issue) shouldn't leave
+    // the workspace with no node_modules at all -- fall back to a normal,
+    // unshared install for this one workspace instead, the same as the
+    // no-lockfile path already does. See issue #7's risk analysis: this
+    // was a real gap, not just a hypothetical one.
+    let entry = match populated {
+        Ok(entry) => entry,
+        Err(err) => {
+            tracing::warn!(
+                "populating the shared npm store failed for key '{key}', falling back to a \
+                 normal (unshared) install for this workspace: {err:#}"
+            );
+            return run_plain_npm_install(workspace_path);
+        }
+    };
 
     let node_modules_src = entry.join("node_modules");
     if node_modules_src.exists() {
@@ -109,28 +141,73 @@ fn store_root_for(workspace_path: &Path) -> Result<PathBuf> {
     Ok(state_dir.join("store").join("npm"))
 }
 
-/// Distinguishes store entries by OS, architecture, and Node major version,
-/// since npm packages with native bindings produce non-portable build
-/// artifacts across any of those.
+/// Distinguishes store entries by OS, architecture, libc flavor (Linux
+/// only), Node major version, and npm's own version -- see issue #7's risk
+/// analysis for why each of these, beyond the original os/arch/node-major
+/// set, turned out to matter: npm version because different npm versions
+/// can lay out `node_modules` differently from an identical lockfile, and
+/// libc flavor because packages that resolve a platform-specific binary
+/// via `optionalDependencies` (esbuild, swc, sharp, and others in that
+/// exact shape) pick a *different* one for musl (Alpine) vs. glibc
+/// (Debian/Ubuntu) despite both reporting the same os/arch.
 fn platform_key() -> String {
-    let node_major = cmdutil::run("node", &["--version"], Path::new("."))
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| {
-            s.trim()
-                .trim_start_matches('v')
-                .split('.')
-                .next()
-                .map(str::to_string)
-        })
+    let node_major = cmd_version_part("node", 0)
+        .unwrap_or_else(|| "unknown".to_string());
+    let npm_version = cmd_version_part("npm", -1)
         .unwrap_or_else(|| "unknown".to_string());
     format!(
-        "{}-{}-node{}",
+        "{}-{}{}-node{}-npm{}",
         std::env::consts::OS,
         std::env::consts::ARCH,
-        node_major
+        libc_suffix(),
+        node_major,
+        npm_version
     )
+}
+
+/// Runs `<program> --version` and returns either its first dot-separated
+/// component (`part == 0`, e.g. Node's major version) or the whole trimmed
+/// string (`part == -1`, e.g. npm's full version -- npm has no single
+/// dominant compatibility axis the way Node's major version does, so the
+/// full version is the more honest key component).
+fn cmd_version_part(program: &str, part: i32) -> Option<String> {
+    let output = cmdutil::run(program, &["--version"], Path::new(".")).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim().trim_start_matches('v');
+    if part == -1 {
+        Some(trimmed.to_string())
+    } else {
+        trimmed.split('.').next().map(str::to_string)
+    }
+}
+
+/// Empty on every platform except Linux, where it's `-musl` or `-glibc` --
+/// detected via the presence of a musl dynamic linker, which is how musl
+/// libc (Alpine's default) identifies itself; anything else on Linux is
+/// assumed glibc. Best-effort: if detection is inconclusive, "glibc" is
+/// the safer assumption (it's the overwhelming majority of non-Alpine
+/// Linux), not silently omitting the dimension entirely.
+fn libc_suffix() -> &'static str {
+    if std::env::consts::OS != "linux" {
+        return "";
+    }
+    let is_musl = std::fs::read_dir("/lib")
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("ld-musl-")
+            })
+        })
+        .unwrap_or(false);
+    if is_musl {
+        "-musl"
+    } else {
+        "-glibc"
+    }
 }
 
 fn hash_file(path: &Path) -> Result<String> {
