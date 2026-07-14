@@ -29,7 +29,9 @@ impl AgentAdapter for CodexAdapter {
     /// name -- skips both approval prompts and sandboxing in one flag,
     /// rather than two independent axes as the docs implied.
     fn default_safety_description(&self) -> &'static str {
-        "--dangerously-bypass-approvals-and-sandbox"
+        "--dangerously-bypass-approvals-and-sandbox (can run any shell command and edit any file \
+         with no restriction -- confirmed no safe alternative actually lets it write files at all \
+         in headless mode; see issue #2's investigation)"
     }
 
     /// `safety_override`, if given, is treated as a `--sandbox` value

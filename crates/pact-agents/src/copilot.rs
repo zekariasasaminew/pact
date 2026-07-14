@@ -10,8 +10,16 @@ impl AgentAdapter for CopilotAdapter {
         "pact-coord"
     }
 
+    /// Unlike Claude Code, no confirmed non-hanging alternative exists yet
+    /// (see the README and issue #2's investigation): `--allow-tool` works
+    /// for in-scope actions, but a task needing a tool outside that list
+    /// hangs (confirmed directly, 50s/zero output) rather than denying
+    /// cleanly the way Claude Code's `--allowedTools` does. Until that's
+    /// investigated further, this stays the only working default --
+    /// stated plainly rather than implying parity with Claude Code's
+    /// safer one.
     fn default_safety_description(&self) -> &'static str {
-        "--allow-all-tools"
+        "--allow-all-tools (can run any shell command and edit any file with no restriction)"
     }
 
     /// `--allow-all-tools` has no gradient (unlike Claude Code's six
