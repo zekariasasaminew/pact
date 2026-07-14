@@ -334,6 +334,39 @@ at once) already existed and was already verified: it's the same
 `PidLock`-guarded serialization Phase 0 confirmed against 6 concurrent
 `spawn` calls, not new synchronization added for this phase.
 
+### Teardown refuses on uncommitted changes now -- confirmed it didn't before
+
+This was a real, confirmed data-loss bug, not a hypothetical gap the issue
+speculated about. Reproduced directly: spawned a real workspace, added an
+uncommitted file to it, ran `pact teardown`, and the file was silently
+gone afterward -- no warning, no prompt, nothing. Root cause:
+`pact-vcs::remove_worktree_retrying` always called
+`git worktree remove --force`, which unconditionally bypasses a protection
+git itself already has -- confirmed separately that plain
+`git worktree remove` (no `--force`) refuses outright on that same dirty
+worktree (`fatal: ... contains modified or untracked files, use --force to
+delete it`). Every `pact teardown` had been silently defeating that
+protection since Phase 0.
+
+The fix mirrors git's own convention rather than inventing a new one:
+`teardown` now checks `git status --porcelain` first and refuses by
+default on any uncommitted change, printing exactly what's there; a new
+`--force` flag proceeds anyway. This is deliberately separate from the
+existing `--keep-branch`: working-tree dirt (never committed, not in
+git's object database at all) is the actual unrecoverable-data-loss risk;
+a committed-but-unmerged branch is lower severity, since its tip stays
+reachable via reflog for a while even after `-D`, and `--keep-branch`
+already exists for anyone who wants it kept around deliberately.
+
+`pact diff <id>` (new) and a `[dirty]`/`[clean]` indicator on `list` round
+out the rest of this phase's acceptance criteria -- seeing what an agent
+actually did (both committed-on-branch and still-uncommitted) before
+deciding whether to keep, discard, or manually merge it. `accept`/`reject`
+verbs were deliberately not built: auto-merging multiple agents' output is
+explicitly out of scope for this issue, and a thin `accept` that just
+shells out to `git merge`/`cherry-pick` doesn't add enough over doing that
+directly once `diff` has shown what's there.
+
 ## Architecture
 
 ```mermaid
@@ -477,6 +510,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 3 | Coordination MCP server (leases + messages) | **Done** |
 | 4 | Copilot CLI + Codex adapters (both live-verified); `--agent`/`--safety` CLI flags | **Done** |
 | 5 | Real parallel launch (`spawn-many`) from a single invocation | **Done** |
+| 6 | Post-run review (`diff`) + safe teardown (uncommitted-change guard) | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -571,6 +605,15 @@ down too, which the old single-child `Child::kill()` path could not do).
 Existing single-`spawn` and `teardown` behavior were re-run and confirmed
 unchanged.
 
+Phase 6 fixed a real, confirmed data-loss bug in `teardown` and added
+`diff` -- see "Teardown refuses on uncommitted changes now" under Design
+decisions. Live-verified: reproduced the original bug (an uncommitted file
+silently destroyed by teardown), confirmed the fix refuses and the file
+survives, confirmed `--force` still tears down a dirty workspace on
+request, confirmed `diff` shows a real commit an agent made plus a real
+uncommitted file, and confirmed a clean workspace tears down without
+needing `--force`.
+
 ## Known limitations
 - **The Unix whole-group kill path (both live Ctrl-C and cross-process
   `teardown`) is implemented but not yet live-verified on real Unix
@@ -603,9 +646,11 @@ pact spawn "implement the thing" --agent copilot
 pact spawn "implement the thing" --agent claude --safety acceptEdits
 pact spawn-many --task claude:"implement X" --task claude:"implement Y"
 pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
-pact list
-pact teardown <id>
-pact teardown <id> --keep-branch  # skip deleting the workspace's branch
+pact list                          # shows a [dirty]/[clean] indicator per workspace
+pact diff <id>                      # committed (vs. merge-base) + uncommitted changes
+pact teardown <id>                  # refuses if the workspace has uncommitted changes
+pact teardown <id> --force          # tear down anyway, discarding uncommitted changes
+pact teardown <id> --keep-branch    # skip deleting the workspace's branch
 ```
 
 `spawn` creates the worktree, best-effort prepares dependencies for every
