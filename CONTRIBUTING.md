@@ -1,5 +1,13 @@
 # Contributing to pact
 
+## Good first issues
+
+Issues tagged [`good first issue`](https://github.com/zekariasasaminew/pact/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+are scoped to be finishable in an afternoon, with a specific starting
+point pointed out in each one -- a new package-manager detector, a new
+CLI flag, a diagnostic command, shell completions. Good places to start
+without needing deep familiarity with the whole codebase first.
+
 ## Build from source
 
 Requires a stable Rust toolchain ([rustup.rs](https://rustup.rs)). On
