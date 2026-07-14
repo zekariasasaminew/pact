@@ -4,6 +4,8 @@ A language-agnostic orchestrator for running multiple AI coding agent CLIs
 (Claude Code, GitHub Copilot CLI, Codex) in parallel on the same repository,
 without them fighting each other.
 
+![Two Claude Code agents running in parallel via pact spawn-many, hitting a real teardown safety check](docs/demo.gif)
+
 **[Getting started guide](GETTING_STARTED.md)** -- install to watching two
 agents work in parallel, in under 5 minutes, every command verified
 end-to-end.
@@ -210,7 +212,7 @@ There's no TTY in headless mode to answer an interactive permission
 prompt, so *some* unattended-safety setting is mandatory for every agent
 CLI. What that setting should default to was investigated empirically
 (issue #2), not assumed from docs, and the answer turned out to be
-genuinely different per adapter:
+different per adapter:
 
 - **Claude Code has a real, safer, non-hanging default.** Confirmed
   directly: an explicit `--allowedTools` list (covering file
@@ -298,7 +300,7 @@ and was upgraded to live-verified once it was actually installed and run:
 the documented `--ask-for-approval` flag turned out not to exist, and had
 to be replaced with the confirmed-working bypass flag above. That's the
 concrete reason this project treats "docs-only" and "live-verified" as
-genuinely different claims, not a formality -- the docs were wrong on the
+different claims, not a formality -- the docs were wrong on the
 one flag that mattered most. One risk avoided along the way regardless:
 Codex's normal MCP config mechanism is a `$CODEX_HOME/config.toml` file,
 but `CODEX_HOME` also relocates auth/session state, not just config --
@@ -306,7 +308,7 @@ pointing it at a per-workspace directory would plausibly break headless
 login on first use. The inline `-c` override sidesteps that entirely, and
 was confirmed to actually connect to and call a real MCP server.
 
-### Gemini CLI adapter: real CLI facts, genuinely blocked on live-verification
+### Gemini CLI adapter: real CLI facts, blocked on live-verification
 
 A fourth adapter, built from a real installed `gemini` CLI
 (`@google/gemini-cli` 0.50.0) rather than documentation alone -- but
@@ -318,8 +320,8 @@ that's an identity/credential decision that isn't this project's to make
 autonomously.
 
 What *is* confirmed by actually running the CLI, not guessed from docs:
-`-p`/`-o stream-json` for headless streaming output, and a genuinely
-third MCP-config mechanism among the four adapters -- confirmed by
+`-p`/`-o stream-json` for headless streaming output, and a third
+MCP-config mechanism among the four adapters -- confirmed by
 running `gemini mcp add --scope project` and reading the file it wrote.
 Gemini CLI reads `.gemini/settings.json`, relative to its own working
 directory, automatically; no CLI flag hands it over at all, unlike Claude
@@ -335,7 +337,7 @@ reported it as a clean `failed` outcome using the process's actual exit
 code, the same fallback Codex's missing Result-event schema already
 relies on.
 
-What's genuinely unconfirmed: the streaming JSON event schema (`parse_line`
+What's unconfirmed: the streaming JSON event schema (`parse_line`
 is modeled on the shape common to the other three adapters, deliberately
 defensive -- anything unrecognized surfaces as `Other` rather than being
 dropped, precisely because this guess *will* need correcting once run for
@@ -676,7 +678,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 8 | Cross-workspace conflict detection (`conflicts`, informational) | **Done** |
 | 9 | Gemini CLI adapter | **Built, not live-verified** (no auth available -- see below) |
 | 10 | Pluggable coordination server (`--coord-command`/`--coord-arg`) | **Done** |
-| 11 | First-5-minutes doc | **Done** -- demo GIF blocked, see Known limitations |
+| 11 | First-5-minutes doc + demo GIF | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -705,7 +707,7 @@ and the tool-result echo event (a `"user"`-typed message, previously
 unobserved) came through as `[other]` rather than being silently dropped.
 
 The teardown-while-running path surfaced two real, previously unknown
-Windows bugs, only found by actually killing a genuinely running agent
+Windows bugs, only found by actually killing a running agent
 mid-task rather than assuming the happy path: (1) killing a process
 doesn't release its handles on its own working directory instantly, so an
 immediate `git worktree remove` raced that cleanup and failed; (2) git
@@ -726,7 +728,7 @@ and broadcast a message; agent B retrieved that message via
 the narrower, differently-worded `src/hello.txt` and received back the
 correct conflict -- agent A's holder id, its actual pattern, and the
 specific overlapping file -- proving the glob-expansion overlap detection
-works against genuinely different pattern strings, not just identical
+works against different pattern strings, not just identical
 ones. The coordination database was confirmed to land in the relocated
 platform data directory, not the repo-adjacent state tree.
 
@@ -800,9 +802,9 @@ lease and message, both correctly surfaced as related context in the
 report.
 
 Phase 9 added a fourth adapter, Gemini CLI -- see "Gemini CLI adapter:
-real CLI facts, genuinely blocked on live-verification" under Design
+real CLI facts, blocked on live-verification" under Design
 decisions. Built from a real installed CLI (confirmed flags, and a
-genuinely third MCP-config mechanism, by actually running `gemini mcp
+third MCP-config mechanism, by actually running `gemini mcp
 add` and reading the file it wrote), but not live-verified the way the
 other three adapters are: no Gemini auth is configured in this
 environment. `pact spawn --agent gemini` against a scratch repo confirmed
@@ -819,6 +821,15 @@ command and args instead of `pact mcp-serve`, and the existing
 coordination-status check correctly reported the (deliberately
 nonexistent, for the test) alternative server as failed rather than
 silently accepting it.
+
+Phase 11 shipped `GETTING_STARTED.md` (every command in it re-run and
+confirmed against a real scratch repo before being written down) and
+`docs/demo.gif`. The GIF is rendered from real captured `spawn-many`
+output via a small Pillow script (`docs/render_demo.py`) rather than a
+live terminal-session recording -- the only recording tool available in
+this environment failed outright, and its separate render step produced
+a reproducible content-duplication bug on hand-assembled input. See
+Known limitations for exactly what that tradeoff means.
 
 ## Known limitations
 - **The Unix whole-group kill path has automated CI coverage on real
@@ -866,19 +877,17 @@ silently accepting it.
   API key or Google Cloud auth is configured in this environment. See
   "Gemini CLI adapter" under Design decisions for exactly what was and
   wasn't confirmed. Issue #9 stays open until this changes.
-- **No demo GIF/recording yet.** [GETTING_STARTED.md](GETTING_STARTED.md)
-  was written and every command in it verified end-to-end against real
-  installed agent CLIs. A recorded demo was attempted with real captured
-  `pact spawn-many` output (not fabricated content) using the only
-  terminal-recording tool available in this environment (`terminalizer`,
-  itself flagged deprecated during install) -- its `record` subcommand
-  failed outright on this Windows/Git-Bash setup, and hand-assembling a
-  recording file for its `render` step instead produced a GIF with a
-  reproducible content-duplication rendering bug that persisted across
-  config changes. Shipping a visibly broken demo would cost more launch
-  credibility than having none, so it wasn't included. Tracked under
-  issue #11 -- needs either a different recording tool or a real terminal
-  session on a machine that isn't this one.
+- **The demo GIF (`docs/demo.gif`) is rendered from real captured
+  `pact spawn-many` output, not a live terminal recording.** The only
+  terminal-recording tool available in this environment (`terminalizer`)
+  failed outright on this Windows/Git-Bash setup, and its separate
+  `render` step produced a reproducible content-duplication bug on hand
+  -assembled input. Rendered instead with a small Pillow script
+  (`docs/render_demo.py`) drawing the same real, previously-captured
+  output frame by frame -- accurate to an actual run, just not a literal
+  terminal-session capture. A real recording on a Mac/Linux machine (or
+  with a different tool) would be a strict improvement, not a
+  correctness fix.
 
 ## Usage
 
