@@ -24,9 +24,7 @@ enum Command {
         /// Task/prompt to give the agent
         task: String,
 
-        /// Which agent CLI to launch (claude, copilot, codex). Codex's
-        /// adapter is implemented from documentation only and has not
-        /// been live-tested -- see the README.
+        /// Which agent CLI to launch (claude, copilot, codex).
         #[arg(long, default_value = "claude")]
         agent: String,
 
