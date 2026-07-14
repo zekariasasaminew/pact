@@ -27,3 +27,55 @@ pub async fn serve(repo_root: &Path, agent_id: String, workspace_root: PathBuf) 
     let conn = db::open(repo_root)?;
     server::serve(conn, agent_id, workspace_root).await
 }
+
+/// Every lease (active or already expired) whose glob pattern matches
+/// `file`, as `(pattern, holder)` pairs -- used by `pact-core`'s
+/// cross-workspace conflict detection (issue #8) to show whether a
+/// reported file overlap was one either agent had actually claimed.
+/// Expired leases are included deliberately: for after-the-fact review,
+/// "this was claimed but the lease had lapsed" is still useful context, not
+/// noise to filter out. A plain synchronous open -- no need for `serve`'s
+/// tokio runtime just to run one read query.
+pub fn leases_matching(repo_root: &Path, file: &str) -> Result<Vec<(String, String)>> {
+    let conn = db::open(repo_root)?;
+    let mut stmt = conn.prepare("SELECT pattern, holder FROM leases")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut matches = Vec::new();
+    for row in rows {
+        let (pattern, holder) = row?;
+        if pattern_matches(&pattern, file) {
+            matches.push((pattern, holder));
+        }
+    }
+    Ok(matches)
+}
+
+/// Total messages (broadcast or direct) sent by any agent id in
+/// `agent_ids` -- a coarse "there's relevant coordination history here,
+/// go look" pointer for conflict reports, not a full pairwise transcript.
+pub fn message_count_involving(repo_root: &Path, agent_ids: &[String]) -> Result<usize> {
+    if agent_ids.is_empty() {
+        return Ok(0);
+    }
+    let conn = db::open(repo_root)?;
+    let placeholders = agent_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT COUNT(*) FROM messages WHERE from_agent IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(agent_ids.iter());
+    let count: i64 = stmt.query_row(params, |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+/// Matches a single concrete file path against a glob pattern -- unlike
+/// `leases::expand_glob`, this doesn't need to walk a directory, since the
+/// caller already has a concrete path (from a `git diff`) to test.
+fn pattern_matches(pattern: &str, file: &str) -> bool {
+    globset::GlobBuilder::new(pattern)
+        .literal_separator(false)
+        .build()
+        .map(|g| g.compile_matcher().is_match(file))
+        .unwrap_or(false)
+}

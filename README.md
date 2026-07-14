@@ -447,6 +447,30 @@ verified by reading `detect_link_mode`/`link_one`'s logic, not by
 constructing an actual cross-filesystem scenario, since a second real
 filesystem wasn't available to test against here.
 
+### Cross-workspace conflict detection is informational, not blocking
+
+MCP leases are advisory by design (`claim_files` grants regardless of
+overlap it finds -- see the coordination-flow design decision above), and
+this deliberately extends that same philosophy rather than inventing a
+stricter standard just for this check. `pact conflicts` (and an automatic,
+non-blocking warning before `teardown` removes a workspace) reports files
+touched by more than one active workspace that share a common
+merge-base -- but nothing here blocks anything. Running several agents at
+similar tasks on purpose, then discarding whichever result is worse, is a
+legitimate and common way to use `spawn-many`; blocking teardown on "another
+workspace also touched this file" would fight that workflow instead of
+supporting it. This is separate from `teardown`'s *existing* blocking
+check (issue #4, uncommitted changes) -- that one stays exactly as it was.
+
+Each reported conflict links back to coordination context for free: a
+workspace's id is the same string as its MCP `agent_id`, so any lease
+(active or expired -- a lapsed-but-relevant claim is still useful context,
+not noise to filter) whose glob matched the file, and how many
+coordination messages exist involving the workspaces in question, join
+directly with no new plumbing. Detection itself stays at the file-path
+level, the same restriction the README already states for leases --
+semantic/AST-level analysis is still out of scope for v1.
+
 ## Architecture
 
 ```mermaid
@@ -592,6 +616,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 5 | Real parallel launch (`spawn-many`) from a single invocation | **Done** |
 | 6 | Post-run review (`diff`) + safe teardown (uncommitted-change guard) | **Done** |
 | 7 | Shared npm store: extended keying + populate-failure fallback | **Done** |
+| 8 | Cross-workspace conflict detection (`conflicts`, informational) | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -706,6 +731,14 @@ logged (`tracing_subscriber::fmt`'s default writer is stdout, not
 stderr -- worth knowing if you're grepping the wrong stream for it, as
 this session briefly did before checking).
 
+Phase 8 added cross-workspace conflict detection -- see "Cross-workspace
+conflict detection is informational, not blocking" under Design
+decisions. Live-verified: two real `claude` workspaces forked from the
+same commit, both editing the same file, correctly reported by `pact
+conflicts` and by `teardown`'s pre-removal warning; a real coordination-DB
+lease and message, both correctly surfaced as related context in the
+report.
+
 ## Known limitations
 - **The Unix whole-group kill path (both live Ctrl-C and cross-process
   `teardown`) is implemented but not yet live-verified on real Unix
@@ -756,6 +789,7 @@ pact spawn-many --task claude:"implement X" --task claude:"implement Y"
 pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
 pact list                          # shows a [dirty]/[clean] indicator per workspace
 pact diff <id>                      # committed (vs. merge-base) + uncommitted changes
+pact conflicts                      # files touched by >1 workspace forked from the same commit
 pact teardown <id>                  # refuses if the workspace has uncommitted changes
 pact teardown <id> --force          # tear down anyway, discarding uncommitted changes
 pact teardown <id> --keep-branch    # skip deleting the workspace's branch

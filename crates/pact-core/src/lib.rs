@@ -36,6 +36,21 @@ pub struct SpawnManyOutcome {
     pub result: Result<(Workspace, RunOutcome)>,
 }
 
+/// One file touched by more than one active workspace sharing a common
+/// merge-base -- see `Orchestrator::detect_conflicts` (issue #8).
+pub struct FileConflict {
+    pub file: String,
+    /// At least 2 workspace ids -- every workspace (sharing the same
+    /// merge-base as the others in this conflict) that touched `file`.
+    pub workspace_ids: Vec<String>,
+    /// `(pattern, holder)` pairs from the coordination DB whose glob
+    /// matched `file` -- active or expired.
+    pub related_leases: Vec<(String, String)>,
+    /// Coarse pointer, not a full transcript: how many coordination
+    /// messages exist from any of `workspace_ids`.
+    pub related_message_count: usize,
+}
+
 impl Orchestrator {
     pub fn open(repo_root: impl Into<PathBuf>) -> Result<Self> {
         let repo_root = repo_root.into();
@@ -274,6 +289,74 @@ impl Orchestrator {
     /// changes -- see `pact_vcs::WorkspaceManager::workspace_diff`.
     pub fn diff(&self, id: &str) -> Result<WorkspaceDiff> {
         self.workspaces.workspace_diff(id)
+    }
+
+    /// Reports files touched by more than one active workspace, among
+    /// workspaces that share a common merge-base (i.e. forked from the
+    /// same point in history) -- see issue #8. Informational only, same
+    /// as MCP leases being advisory: nothing here blocks anything, it just
+    /// surfaces overlap that would otherwise only become visible when a
+    /// user tries to reconcile worktrees by hand. Each conflict is
+    /// enriched with any coordination-DB lease that matched the file
+    /// (active or expired -- lapsed-but-relevant context still counts) and
+    /// a coarse related-message count, since a workspace's id is the same
+    /// string as its MCP `agent_id`, making that join direct.
+    pub fn detect_conflicts(&self) -> Result<Vec<FileConflict>> {
+        let workspaces = self.workspaces.list_workspaces()?;
+
+        let mut by_base: std::collections::HashMap<String, Vec<(String, Vec<String>)>> =
+            std::collections::HashMap::new();
+        for workspace in &workspaces {
+            match self.workspaces.workspace_changes(&workspace.id) {
+                Ok(changes) if !changes.merge_base.is_empty() => {
+                    by_base
+                        .entry(changes.merge_base)
+                        .or_default()
+                        .push((workspace.id.clone(), changes.files));
+                }
+                Ok(_) => {} // no merge-base found -- not comparable to anything
+                Err(err) => tracing::warn!(
+                    "could not compute changes for workspace {}: {err:#}",
+                    workspace.id
+                ),
+            }
+        }
+
+        let mut conflicts = Vec::new();
+        for group in by_base.into_values() {
+            if group.len() < 2 {
+                continue;
+            }
+            let mut file_to_workspaces: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for (id, files) in &group {
+                for file in files {
+                    file_to_workspaces
+                        .entry(file.clone())
+                        .or_default()
+                        .push(id.clone());
+                }
+            }
+            for (file, workspace_ids) in file_to_workspaces {
+                if workspace_ids.len() < 2 {
+                    continue;
+                }
+                let related_leases =
+                    pact_coord::leases_matching(&self.repo_root, &file).unwrap_or_default();
+                let related_message_count =
+                    pact_coord::message_count_involving(&self.repo_root, &workspace_ids)
+                        .unwrap_or(0);
+                conflicts.push(FileConflict {
+                    file,
+                    workspace_ids,
+                    related_leases,
+                    related_message_count,
+                });
+            }
+        }
+
+        conflicts.sort_by(|a, b| a.file.cmp(&b.file));
+        Ok(conflicts)
     }
 
     pub fn teardown(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {

@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
-use pact_core::{Orchestrator, SpawnManyTask};
+use pact_core::{FileConflict, Orchestrator, SpawnManyTask};
 
 #[derive(Parser)]
 #[command(name = "pact", about = "Orchestrate parallel AI coding agent workspaces")]
@@ -69,6 +69,10 @@ enum Command {
         /// Workspace id (as shown by `list`)
         id: String,
     },
+    /// Report files touched by more than one active workspace that forked
+    /// from the same point in history. Informational only -- nothing here
+    /// blocks anything, same as MCP leases being advisory.
+    Conflicts,
     /// Tear down an agent workspace
     Teardown {
         /// Workspace id (as shown by `list`)
@@ -259,11 +263,34 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Conflicts => {
+            let conflicts = orchestrator.detect_conflicts()?;
+            print_conflicts(&conflicts);
+        }
         Command::Teardown {
             id,
             keep_branch,
             force,
         } => {
+            // Computed *before* removal -- workspace_changes needs the
+            // branch, which teardown deletes. Informational only: this
+            // never blocks the teardown itself, only warns.
+            match orchestrator.detect_conflicts() {
+                Ok(all) => {
+                    let relevant: Vec<_> = all
+                        .into_iter()
+                        .filter(|c| c.workspace_ids.iter().any(|w| w == &id))
+                        .collect();
+                    if !relevant.is_empty() {
+                        eprintln!(
+                            "warning: workspace {id} shares changes with another active workspace:"
+                        );
+                        print_conflicts(&relevant);
+                    }
+                }
+                Err(err) => tracing::warn!("could not check for cross-workspace conflicts: {err:#}"),
+            }
+
             orchestrator.teardown(&id, keep_branch, force)?;
             println!("removed workspace {id}");
         }
@@ -271,6 +298,32 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Prints a cross-workspace conflict report -- shared by the standalone
+/// `conflicts` command and the informational warning `teardown` prints
+/// before removing a workspace that shares changes with another.
+fn print_conflicts(conflicts: &[FileConflict]) {
+    if conflicts.is_empty() {
+        println!("no cross-workspace conflicts found");
+        return;
+    }
+    for conflict in conflicts {
+        println!(
+            "  {} -- touched by workspaces: {}",
+            conflict.file,
+            conflict.workspace_ids.join(", ")
+        );
+        for (pattern, holder) in &conflict.related_leases {
+            println!("    lease: '{pattern}' held by {holder}");
+        }
+        if conflict.related_message_count > 0 {
+            println!(
+                "    {} related coordination message(s) -- see the message log for context",
+                conflict.related_message_count
+            );
+        }
+    }
 }
 
 /// Parses one `--task <agent>:<text>` argument, splitting on the *first*

@@ -848,6 +848,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pact-agents",
+ "pact-coord",
  "pact-deps",
  "pact-vcs",
  "serde_json",

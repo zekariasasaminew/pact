@@ -45,6 +45,18 @@ pub struct WorkspaceDiff {
     pub uncommitted_summary: String,
 }
 
+/// A workspace's merge-base and the flat set of files it has touched since
+/// -- see `WorkspaceManager::workspace_changes`.
+#[derive(Debug, Clone)]
+pub struct WorkspaceChanges {
+    /// Empty if no merge-base could be found (e.g. unrelated history) --
+    /// callers should treat that as "not comparable" rather than as a
+    /// merge-base of the empty string.
+    pub merge_base: String,
+    /// Forward-slash-normalized relative paths, deduplicated and sorted.
+    pub files: Vec<String>,
+}
+
 /// Owns the lifecycle of git-worktree-backed agent workspaces for one repo.
 /// State (locks, worktree metadata, and the worktrees themselves) lives as a
 /// sibling of the repo, not inside its working tree, so it never shows up in
@@ -274,6 +286,55 @@ impl WorkspaceManager {
         })
     }
 
+    /// The merge-base a workspace's branch forked from, plus the set of
+    /// files it has touched since -- both committed on the branch and
+    /// still only in its working tree. Used to detect cross-workspace file
+    /// overlap (issue #8): two workspaces sharing the same merge-base
+    /// forked from a comparable point in history, so any file both of them
+    /// touched is worth surfacing, without needing semantic/AST-level
+    /// analysis -- file-path overlap is the same restriction the MCP
+    /// lease layer already accepts.
+    pub fn workspace_changes(&self, id: &str) -> Result<WorkspaceChanges> {
+        let workspace = self.get_workspace(id)?;
+
+        let merge_base_out = Command::new("git")
+            .args(["merge-base", "HEAD", &workspace.branch])
+            .current_dir(&self.repo_root)
+            .output()
+            .context("failed to spawn `git merge-base`")?;
+        let merge_base = String::from_utf8_lossy(&merge_base_out.stdout).trim().to_string();
+
+        let mut files = std::collections::BTreeSet::new();
+
+        if !merge_base.is_empty() {
+            let committed = run_git_text(
+                &self.repo_root,
+                &[
+                    "diff",
+                    "--name-only",
+                    &format!("{merge_base}..{}", workspace.branch),
+                ],
+            )?;
+            for line in committed.lines() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    files.insert(line.replace('\\', "/"));
+                }
+            }
+        }
+
+        for line in self.dirty_status(&workspace.path)?.lines() {
+            if let Some(path) = parse_porcelain_path(line) {
+                files.insert(path);
+            }
+        }
+
+        Ok(WorkspaceChanges {
+            merge_base,
+            files: files.into_iter().collect(),
+        })
+    }
+
     /// Best-effort: a failure to delete the branch (e.g. it was already
     /// removed, or checked out somewhere else) shouldn't fail the whole
     /// teardown -- the worktree is already gone at this point, which is
@@ -448,6 +509,23 @@ fn run_git_text(dir: &std::path::Path, args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("failed to spawn `git {}`", args.join(" ")))?;
     Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+}
+
+/// Extracts the file path from one `git status --porcelain` line (format:
+/// two status chars, a space, then the path -- or, for a rename,
+/// `orig -> new`, where only the new path matters here).
+fn parse_porcelain_path(line: &str) -> Option<String> {
+    let rest = line.get(3..)?;
+    let path = match rest.find(" -> ") {
+        Some(idx) => &rest[idx + 4..],
+        None => rest,
+    };
+    let path = path.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.replace('\\', "/"))
+    }
 }
 
 fn short_id() -> String {
