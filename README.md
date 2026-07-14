@@ -922,3 +922,27 @@ summary prints once every task finishes. Ctrl-C kills every still-running
 child (whole process group, not just the immediate process) before `pact`
 exits. `--safety` applies to every task in the batch uniformly -- see
 Known limitations for why that's not per-task yet.
+
+## Privacy
+
+**pact collects and sends no telemetry of any kind.** No usage data,
+error reports, or version pings leave your machine as a result of running
+`pact` itself (what the agent CLIs you launch through it -- Claude Code,
+Copilot CLI, Codex, Gemini CLI -- send to their own providers is between
+you and them, unrelated to pact).
+
+This was a deliberate decision, not an oversight (issue #14), ranked
+explicitly: always-on telemetry was rejected outright as a bad trust
+tradeoff for a tool that already asks you to run agents with broad shell
+and file access inside your own repos. Opt-in telemetry was considered
+and set aside for now, specifically because it would mean standing up
+real infrastructure (an endpoint to receive it) to answer a product
+question -- "how is this actually being used" -- that doesn't have a real
+user base to ask yet. Building that ahead of need would be the same kind
+of premature engineering this project has avoided elsewhere (see Design
+decisions). This isn't permanent: if usage data would answer a real
+question after a real launch, opt-in (an explicit first-run prompt,
+an extremely conservative payload -- version/OS/arch only, nothing about
+your repo or tasks --, a `PACT_NO_TELEMETRY=1` escape hatch, and the exact
+payload published here) is the shape it would take. Nothing like that
+exists today.
