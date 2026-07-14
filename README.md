@@ -821,13 +821,21 @@ nonexistent, for the test) alternative server as failed rather than
 silently accepting it.
 
 ## Known limitations
-- **The Unix whole-group kill path (both live Ctrl-C and cross-process
-  `teardown`) is implemented but not yet live-verified on real Unix
-  hardware** -- see "Real parallel launch" above. This project's dev
-  environment is Windows-only; the code follows documented POSIX
-  process-group semantics and `command_group`'s own source, but hasn't
-  been exercised on macOS/Linux the way every Windows scenario in this
-  README has. Tracked under issue #6.
+- **The Unix whole-group kill path has automated CI coverage on real
+  Linux/macOS runners, but no live-agent verification.**
+  `crates/pact-agents/tests/group_kill.rs` runs on every push on all
+  three CI platforms (not just Windows) and confirms the actual
+  mechanism -- spawn via `process_group(0)`, kill the group, confirm a
+  grandchild process died too -- works on real Linux and macOS, not
+  just in theory. `pact-vcs`'s cross-process `teardown` kill uses the
+  identical POSIX mechanism (same `process_group(0)` at spawn time, same
+  kill-by-group-id), so this test covers it by equivalence, not a
+  separate direct test. What's still unverified: a real agent CLI's own
+  process tree (a Bash tool spawning a child shell, the way Phase 0
+  found the original Windows gap) dying correctly on real Unix hardware
+  -- that specific scenario needs real agent-CLI access on Mac/Linux,
+  which this project's dev environment doesn't have. Tracked under
+  issue #6.
 - **CI covers cross-platform build + test, not live-agent verification.**
   Every Phase 0-5 scenario in this README was verified by actually running
   real agent CLIs on Windows -- CI (GitHub Actions, all three platforms)
