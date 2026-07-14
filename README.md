@@ -176,8 +176,12 @@ CLI, not just Claude Code -- of Claude Code's six permission modes,
 `bypassPermissions` is the only one that can't still hang (`acceptEdits`
 only auto-accepts file edits and would still gate an arbitrary Bash call);
 Copilot CLI's `--allow-all-tools` is a binary its own `--help` calls
-"required for non-interactive mode"; Codex's approval policy needs `never`
-for the same reason. This is surfaced loudly (a warning printed before
+"required for non-interactive mode"; Codex needs
+`--dangerously-bypass-approvals-and-sandbox` -- confirmed directly that
+`--sandbox workspace-write` alone still refuses to write files headlessly
+(the agent reports back "approvals are disabled" and gives up rather than
+hanging, which is a good failure mode, just not a working one). This is
+surfaced loudly (a warning printed before
 every launch, naming whichever adapter's own default is in effect) rather
 than silently baked in, and `--safety` is an explicit, overridable flag
 precisely because it means an unattended agent bypasses every check with
@@ -191,30 +195,36 @@ third real case existed to generalize against, not designed speculatively
 in advance. The trait deliberately does *not* try to unify each CLI's
 safety/approval vocabulary into one shared enum: Claude Code's
 `--permission-mode` has six values, Copilot CLI's is a binary on/off with
-no gradient at all, and Codex's is two independent axes (`--sandbox`,
-`--ask-for-approval`) with their own value sets. `build_command` takes a
-raw string passed straight through to whichever vocabulary the chosen
-adapter uses, rather than a shared type that would either lose expressiveness
-or need constant extending as a fourth CLI's vocabulary inevitably differs
-again.
+no gradient at all, and Codex's real, confirmed shape turned out to be one
+all-or-nothing flag (`--dangerously-bypass-approvals-and-sandbox`) rather
+than the two independent `--sandbox`/`--ask-for-approval` axes OpenAI's
+docs implied -- `--ask-for-approval` doesn't exist in the installed
+version's `codex exec --help` at all. `build_command` takes a raw string
+passed straight through to whichever vocabulary the chosen adapter uses,
+rather than a shared type that would either lose expressiveness or need
+constant extending as a fourth CLI's vocabulary inevitably differs again.
 
 What *is* shared is `CoordConfig` -- what to tell an agent CLI about the
 coordination server (name/command/args) is adapter-agnostic, even though
 *how* to hand it over isn't: Claude Code and Copilot CLI both confirmed
 the identical `{"mcpServers": {...}}` JSON-file-plus-flag shape, while
 Codex takes inline `-c mcp_servers.<id>.*` config overrides instead and
-needs no file at all.
+needs no file at all -- confirmed working end-to-end, including a real
+`claim_files` call through this project's own coordination server.
 
-Codex's adapter is built from OpenAI's documentation only -- `codex` was
-never installed on the machine this project was built on, so unlike the
-other two, nothing about it has actually been run. That's stated plainly
-in its own module doc comment and in Status below, rather than presented
-as equivalent to the live-verified adapters. One documented risk avoided
-along the way: Codex's normal MCP config mechanism is a
-`$CODEX_HOME/config.toml` file, but `CODEX_HOME` also relocates
-auth/session state, not just config -- pointing it at a per-workspace
-directory would plausibly break headless login on first use. The inline
-`-c` override sidesteps that entirely.
+Codex's adapter was initially built from OpenAI's documentation alone (the
+machine this project was first built on didn't have `codex` installed),
+and was upgraded to live-verified once it was actually installed and run:
+the documented `--ask-for-approval` flag turned out not to exist, and had
+to be replaced with the confirmed-working bypass flag above. That's the
+concrete reason this project treats "docs-only" and "live-verified" as
+genuinely different claims, not a formality -- the docs were wrong on the
+one flag that mattered most. One risk avoided along the way regardless:
+Codex's normal MCP config mechanism is a `$CODEX_HOME/config.toml` file,
+but `CODEX_HOME` also relocates auth/session state, not just config --
+pointing it at a per-workspace directory would plausibly break headless
+login on first use. The inline `-c` override sidesteps that entirely, and
+was confirmed to actually connect to and call a real MCP server.
 
 ## Architecture
 
@@ -224,7 +234,7 @@ graph TD
     Core["pact-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
     VCS["pact-vcs<br/>(PidLock + git worktree lifecycle)"]
     Deps["pact-deps<br/>(dependency broker: detect + passthrough + content store)"]
-    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI live-verified, Codex docs-only)"]
+    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex, all live-verified)"]
     Coord["pact-coord<br/>(leases + messages, its own MCP server process)"]
 
     CLI --> Core
@@ -357,7 +367,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 1 | Dependency broker (shared installs) | **Done** |
 | 2 | Claude Code adapter, real headless launch | **Done** |
 | 3 | Coordination MCP server (leases + messages) | **Done** |
-| 4 | Copilot CLI adapter (live-verified); Codex adapter (docs-only, not live-verified); `--agent`/`--safety` CLI flags | **Done** (Codex caveat above) |
+| 4 | Copilot CLI + Codex adapters (both live-verified); `--agent`/`--safety` CLI flags | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -424,18 +434,22 @@ class as Phase 1's: Copilot CLI is *also* a Windows `.cmd` shim, and
 `pact-agents`' own process spawning had never gotten the `cmd /C`
 fix Phase 1 applied elsewhere in the codebase -- every Copilot launch was
 silently failing with "program not found" until fixed. The Codex adapter
-was implemented from documentation but could not be run at all (`codex`
-isn't installed on this machine) -- see Design decisions and Known
-limitations.
+was initially implemented from documentation only (`codex` wasn't
+installed on this machine at the time) and was later upgraded to
+live-verified once it was actually installed and run: the documented
+`--ask-for-approval` flag doesn't exist in the real CLI, real end-to-end
+behavior (including a genuine `claim_files` MCP call through this
+project's own coordination server, returning the correct JSON) required
+`--dangerously-bypass-approvals-and-sandbox` instead, and a related bug
+was found and fixed along the way -- `process::run_and_stream`'s fallback
+outcome hardcoded `success: false` whenever an adapter didn't emit an
+explicit Result-shaped event, which silently mislabeled every successful
+Codex run as failed (Codex's `turn.completed` event, confirmed directly,
+carries no success/failure signal at all). Fixed to use the process's
+actual exit code instead. All three adapters (Claude Code, Copilot CLI,
+Codex) are now live-verified to the same standard.
 
 ## Known limitations
-
-- **Codex adapter is unverified.** Built from documentation, never
-  actually launched. Its event parsing doesn't attempt to recognize any
-  specific fields, so the coordination connectivity check and
-  Result-based success detection don't work for it yet -- every line
-  becomes a generic passthrough event instead of guessed-and-possibly-wrong
-  structure.
 - **Process-tree killing on teardown is Windows-only** (`taskkill /F /T`).
   The Unix equivalent (a process group established via `setsid` at spawn
   time) isn't implemented -- this project was built and verified entirely
