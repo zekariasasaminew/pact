@@ -168,24 +168,64 @@ structural, not sync-vs-async: process supervision lives entirely behind
 supervise several *running* agents concurrently can change what's behind
 that boundary without touching adapters or the orchestrator's call site.
 
-### Headless launch requires bypassing permissions, not a hardening choice
+### Headless safety defaults differ by adapter -- verified, not assumed
 
 There's no TTY in headless mode to answer an interactive permission
 prompt, so *some* unattended-safety setting is mandatory for every agent
-CLI, not just Claude Code -- of Claude Code's six permission modes,
-`bypassPermissions` is the only one that can't still hang (`acceptEdits`
-only auto-accepts file edits and would still gate an arbitrary Bash call);
-Copilot CLI's `--allow-all-tools` is a binary its own `--help` calls
-"required for non-interactive mode"; Codex needs
-`--dangerously-bypass-approvals-and-sandbox` -- confirmed directly that
-`--sandbox workspace-write` alone still refuses to write files headlessly
-(the agent reports back "approvals are disabled" and gives up rather than
-hanging, which is a good failure mode, just not a working one). This is
-surfaced loudly (a warning printed before
-every launch, naming whichever adapter's own default is in effect) rather
-than silently baked in, and `--safety` is an explicit, overridable flag
-precisely because it means an unattended agent bypasses every check with
-no human in the loop.
+CLI. What that setting should default to was investigated empirically
+(issue #2), not assumed from docs, and the answer turned out to be
+genuinely different per adapter:
+
+- **Claude Code has a real, safer, non-hanging default.** Confirmed
+  directly: an explicit `--allowedTools` list (covering file
+  read/write/edit/search plus the VCS and package-manager commands
+  `pact-deps` already knows how to prepare -- `git`, `npm`, `pnpm`,
+  `yarn`, `cargo`, `go`, `pip`, `uv`, `mvn`, `gradle`), combined with
+  Claude Code's own baseline permission mode (not `bypassPermissions`),
+  makes an out-of-scope tool call get **denied cleanly and immediately**
+  rather than hang -- the agent adapts and keeps working with whatever it
+  *is* allowed to do. This is `pact`'s default for Claude Code now.
+  Earlier documentation here claimed no mode short of `bypassPermissions`
+  could avoid hanging; that was right about permission-mode alone, but
+  incomplete -- it's specifically an explicit tool allowlist that unlocks
+  safe non-interactive denial, independent of which permission mode is
+  active.
+- **Copilot CLI and Codex don't have a confirmed safe-and-functional
+  alternative, so they keep their bypass-flag defaults.** Copilot CLI's
+  `--allow-tool` works for in-scope actions, but confirmed directly: a
+  task needing a tool outside that list **hangs** (not a clean deny) --
+  its non-interactive mode doesn't have the same auto-deny fallback
+  Claude Code's does. Codex's `--sandbox workspace-write` alone doesn't
+  hang, but it also can't write files at all in headless mode, which
+  defeats the point of running it. Shipping either as a "safer default"
+  without that being true would repeat exactly the mistake found and
+  fixed in the Codex adapter (documentation presented as fact, unverified)
+  -- so both keep `--allow-all-tools` /
+  `--dangerously-bypass-approvals-and-sandbox` for now, stated plainly as
+  a real, asymmetric gap rather than smoothed over.
+
+Every launch prints a warning naming exactly what the adapter's active
+setting permits (not just which flag string is in effect), and `--safety`
+is an explicit, overridable flag either way -- see "What can an agent
+actually do to my machine?" below.
+
+### What can an agent actually do to my machine?
+
+- **Claude Code (default)**: read/write/edit files anywhere in its
+  workspace, and run `git`/`npm`/`pnpm`/`yarn`/`cargo`/`go`/`pip`/`uv`/
+  `mvn`/`gradle` commands. Anything else (an arbitrary shell command, a
+  tool outside that list) is denied automatically -- the agent will work
+  around the denial rather than stall.
+- **Copilot CLI (default) and Codex (default)**: can run *any* shell
+  command and edit *any* file the OS-level user running `pact` can reach,
+  with no restriction. This is not a hardening choice -- it's the only
+  configuration either adapter has been confirmed to actually get work
+  done with in headless mode. Treat a Copilot CLI or Codex workspace with
+  the same trust you'd give a script you ran with your own full user
+  permissions, because that's effectively what it has.
+- All three: `--safety <value>` overrides the default in that adapter's
+  own vocabulary (Claude Code's `--permission-mode` values, Codex's
+  `--sandbox` values; Copilot CLI has no gradient to override).
 
 ### One AgentAdapter trait, not one unified safety enum
 
