@@ -4,6 +4,10 @@ A language-agnostic orchestrator for running multiple AI coding agent CLIs
 (Claude Code, GitHub Copilot CLI, Codex) in parallel on the same repository,
 without them fighting each other.
 
+**[Getting started guide](GETTING_STARTED.md)** -- install to watching two
+agents work in parallel, in under 5 minutes, every command verified
+end-to-end.
+
 ## Getting started
 
 Download a prebuilt binary -- no Rust toolchain, no MSVC linker/Build
@@ -672,6 +676,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 8 | Cross-workspace conflict detection (`conflicts`, informational) | **Done** |
 | 9 | Gemini CLI adapter | **Built, not live-verified** (no auth available -- see below) |
 | 10 | Pluggable coordination server (`--coord-command`/`--coord-arg`) | **Done** |
+| 11 | First-5-minutes doc | **Done** -- demo GIF blocked, see Known limitations |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -853,6 +858,19 @@ silently accepting it.
   API key or Google Cloud auth is configured in this environment. See
   "Gemini CLI adapter" under Design decisions for exactly what was and
   wasn't confirmed. Issue #9 stays open until this changes.
+- **No demo GIF/recording yet.** [GETTING_STARTED.md](GETTING_STARTED.md)
+  was written and every command in it verified end-to-end against real
+  installed agent CLIs. A recorded demo was attempted with real captured
+  `pact spawn-many` output (not fabricated content) using the only
+  terminal-recording tool available in this environment (`terminalizer`,
+  itself flagged deprecated during install) -- its `record` subcommand
+  failed outright on this Windows/Git-Bash setup, and hand-assembling a
+  recording file for its `render` step instead produced a GIF with a
+  reproducible content-duplication rendering bug that persisted across
+  config changes. Shipping a visibly broken demo would cost more launch
+  credibility than having none, so it wasn't included. Tracked under
+  issue #11 -- needs either a different recording tool or a real terminal
+  session on a machine that isn't this one.
 
 ## Usage
 
