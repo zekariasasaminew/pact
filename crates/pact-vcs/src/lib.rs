@@ -265,10 +265,22 @@ impl WorkspaceManager {
 /// rest of its life -- which made every subsequent `git worktree remove`
 /// and even a plain `remove_dir_all` fail with "used by another process."
 /// On Windows, `taskkill /T` terminates the full descendant tree in one
-/// call, which is what actually fixed it. The Unix equivalent (a process
-/// group killed via `setsid` at spawn time) isn't implemented yet since
-/// this hasn't been exercised outside Windows -- tracked as a known gap,
-/// not silently assumed to be fine.
+/// call, which is what actually fixed it.
+///
+/// The Unix equivalent works because `pact-agents::run_and_stream` spawns
+/// every agent process via `command_group`'s `group_spawn` (added for
+/// issue #3's concurrent Ctrl-C handling), which calls `process_group(0)`
+/// -- making the child its own process group leader, so its pgid equals
+/// its pid. That means the *already-recorded* `agent_pid` (persisted to
+/// disk, readable from a totally different `pact` process than the one
+/// that spawned it) is sufficient on its own to kill the whole group:
+/// `kill(-pid, SIGKILL)` targets every process in that group, descendants
+/// included, without needing to persist a separate pgid. Implemented from
+/// documented POSIX process-group semantics and command_group's own source
+/// (see `pact-agents::supervisor`), but -- per issue #6 -- not yet
+/// exercised on real Unix hardware, since this project's dev environment
+/// is Windows-only; treat as implemented-not-live-verified until that
+/// happens.
 fn kill_if_alive(workspace: &Workspace) {
     let Some(pid) = workspace.agent_pid else {
         return;
@@ -285,8 +297,14 @@ fn kill_if_alive(workspace: &Workspace) {
         let _ = Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .output();
-    } else if let Some(process) = sys.process(sys_pid) {
-        process.kill();
+    } else {
+        #[cfg(unix)]
+        unsafe {
+            // Negative PID targets the whole process group -- see the doc
+            // comment above for why the group id and the recorded pid are
+            // the same number here.
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
     }
 
     // Wait for the OS to actually reap it -- killing a process doesn't

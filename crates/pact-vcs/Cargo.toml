@@ -11,3 +11,4 @@ serde_json.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 sysinfo.workspace = true
+libc = "0.2.186"
