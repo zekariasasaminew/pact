@@ -5,35 +5,62 @@ use crate::event::AgentEvent;
 
 pub struct ClaudeCodeAdapter;
 
+/// Common safe operations covering every ecosystem `pact-deps` already
+/// knows how to prepare -- file read/write/edit/search, plus the VCS and
+/// package-manager commands a coding task actually needs. Not
+/// user-configurable yet (see the README's Known limitations); the point
+/// for now is proving the mechanism, which is genuinely safer than the old
+/// bypass-everything default, not claiming this exact list is final.
+const DEFAULT_ALLOWED_TOOLS: &str =
+    "Read Write Edit Glob Grep Bash(git *) Bash(npm *) Bash(pnpm *) Bash(yarn *) Bash(cargo *) Bash(go *) Bash(pip *) Bash(uv *) Bash(mvn *) Bash(gradle *)";
+
 impl AgentAdapter for ClaudeCodeAdapter {
     fn coord_server_name(&self) -> &'static str {
         "pact-coord"
     }
 
+    /// Not `bypassPermissions` -- confirmed directly that an explicit
+    /// `--allowedTools` list makes Claude Code deny an out-of-scope tool
+    /// call cleanly and immediately in headless mode, rather than hang
+    /// waiting for an approval prompt no TTY can answer. `bypassPermissions`
+    /// alone was the *documented* fix for the hang; this is a real,
+    /// verified safer alternative that isn't all-or-nothing.
     fn default_safety_description(&self) -> &'static str {
-        "--permission-mode bypassPermissions"
+        "--allowedTools (curated safe operations, no full permission bypass)"
     }
 
     /// `mcp_config` is rendered to a `{"mcpServers": {...}}` JSON file and
     /// passed via `--mcp-config` -- confirmed against the real CLI: a
     /// malformed config is rejected with a loud error before the session
     /// starts, so getting the file wrong is never a silent no-op.
+    ///
+    /// `--allowedTools` is always passed (harmless alongside an explicit
+    /// `--permission-mode` override too, including `bypassPermissions`
+    /// itself). `safety_override`, when given, is passed as a raw
+    /// `--permission-mode` value same as before; when absent, no
+    /// `--permission-mode` flag is passed at all -- confirmed that Claude
+    /// Code's own baseline default mode, combined with the allowlist, is
+    /// what produces the clean-deny-not-hang behavior this default relies
+    /// on.
     fn build_command(
         &self,
         task: &str,
         safety_override: Option<&str>,
         coord: Option<&CoordConfig>,
     ) -> (String, Vec<String>) {
-        let permission_mode = safety_override.unwrap_or("bypassPermissions");
         let mut args = vec![
             "-p".to_string(),
             task.to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--verbose".to_string(),
-            "--permission-mode".to_string(),
-            permission_mode.to_string(),
+            "--allowedTools".to_string(),
+            DEFAULT_ALLOWED_TOOLS.to_string(),
         ];
+        if let Some(mode) = safety_override {
+            args.push("--permission-mode".to_string());
+            args.push(mode.to_string());
+        }
         if let Some(coord) = coord {
             if crate::adapter::write_mcp_json_config(&coord.config_path, coord).is_ok() {
                 args.push("--mcp-config".to_string());
@@ -137,4 +164,26 @@ fn parse_assistant(value: &Value) -> AgentEvent {
     }
 
     AgentEvent::Other(value.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_omits_permission_mode_but_includes_allowlist() {
+        let (program, args) = ClaudeCodeAdapter.build_command("do the thing", None, None);
+        assert_eq!(program, "claude");
+        assert!(args.contains(&"--allowedTools".to_string()));
+        assert!(!args.contains(&"--permission-mode".to_string()));
+    }
+
+    #[test]
+    fn override_adds_explicit_permission_mode_alongside_allowlist() {
+        let (_, args) =
+            ClaudeCodeAdapter.build_command("do the thing", Some("bypassPermissions"), None);
+        assert!(args.contains(&"--allowedTools".to_string()));
+        let mode_idx = args.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(args[mode_idx + 1], "bypassPermissions");
+    }
 }
