@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
-use pact_core::Orchestrator;
+use pact_core::{Orchestrator, SpawnManyTask};
 
 #[derive(Parser)]
 #[command(name = "pact", about = "Orchestrate parallel AI coding agent workspaces")]
@@ -36,6 +36,27 @@ enum Command {
         /// adapter's own unattended-safety setting -- see the README for
         /// why that default differs by adapter (Claude Code has a real
         /// safer default; Copilot CLI and Codex don't yet).
+        #[arg(long)]
+        safety: Option<String>,
+    },
+    /// Create N isolated agent workspaces and run N agent CLIs in them
+    /// concurrently, streaming their combined output live with each line
+    /// attributed to its source. Existing single-`spawn` behavior and CLI
+    /// surface are unchanged -- this is an entirely separate command, not
+    /// an alternate mode of `spawn`.
+    SpawnMany {
+        /// One task per agent to run, repeatable: `--task <agent>:<text>`,
+        /// e.g. `--task claude:"fix the bug" --task claude:"write tests"`
+        /// (N instances of the same agent) or `--task copilot:"..."` mixed
+        /// in (different agents), whichever the caller wants. Split on the
+        /// first `:` only, so task text itself may contain colons.
+        #[arg(long = "task", required = true)]
+        tasks: Vec<String>,
+
+        /// Same raw safety/approval override as `spawn --safety`, applied
+        /// to every task in this batch -- see `spawn`'s help for the
+        /// per-adapter vocabulary. Per-task safety overrides aren't
+        /// supported in this first cut (see `pact-core::SpawnManyTask`).
         #[arg(long)]
         safety: Option<String>,
     },
@@ -112,8 +133,7 @@ fn main() -> Result<()> {
                 ),
             }
 
-            let (workspace, outcome) =
-                orchestrator.spawn(kind, &task, safety.as_deref(), |event| print_event(event))?;
+            let (workspace, outcome) = orchestrator.spawn(kind, &task, safety.as_deref(), print_event)?;
 
             println!("workspace {} ({})", workspace.id, workspace.branch);
             println!("  path: {}", workspace.path.display());
@@ -122,6 +142,63 @@ fn main() -> Result<()> {
                 if outcome.success { "done" } else { "failed" },
                 outcome.summary
             );
+        }
+        Command::SpawnMany { tasks, safety } => {
+            let specs = tasks
+                .iter()
+                .map(|raw| parse_task_spec(raw))
+                .collect::<Result<Vec<_>>>()?;
+
+            let mut warned_agents = std::collections::HashSet::new();
+            for (kind, agent_name) in specs.iter().map(|(k, _, name)| (*k, name.clone())) {
+                if !warned_agents.insert(kind) {
+                    continue;
+                }
+                let adapter = pact_agents::adapter(kind);
+                match &safety {
+                    Some(s) => eprintln!(
+                        "warning: running '{agent_name}' with an explicit safety override ({s}) -- \
+                         verify this doesn't hang the session on a permission prompt in headless mode."
+                    ),
+                    None => eprintln!(
+                        "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
+                         Pass --safety explicitly to use a different setting.",
+                        adapter.default_safety_description()
+                    ),
+                }
+            }
+
+            let batch: Vec<SpawnManyTask> = specs
+                .into_iter()
+                .map(|(agent, task, _)| SpawnManyTask { agent, task })
+                .collect();
+
+            let results = orchestrator.spawn_many(batch, safety.as_deref(), |index, agent, event| {
+                print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event);
+            });
+
+            let mut any_failed = false;
+            for outcome in &results {
+                match &outcome.result {
+                    Ok((workspace, run)) => {
+                        println!("workspace {} ({})", workspace.id, workspace.branch);
+                        println!("  path: {}", workspace.path.display());
+                        println!(
+                            "  {}: {}",
+                            if run.success { "done" } else { "failed" },
+                            run.summary
+                        );
+                        any_failed |= !run.success;
+                    }
+                    Err(err) => {
+                        println!("task #{}: failed before/during launch: {err:#}", outcome.index);
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
+            }
         }
         Command::List => {
             let workspaces = orchestrator.list()?;
@@ -146,6 +223,53 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parses one `--task <agent>:<text>` argument, splitting on the *first*
+/// `:` only so task text itself may freely contain colons (e.g.
+/// `claude:implement X: handle the edge case`). Returns the parsed
+/// `AgentKind`, the raw task text, and the original agent name (for
+/// warning messages, which want the user's own spelling).
+fn parse_task_spec(raw: &str) -> Result<(AgentKind, String, String)> {
+    let (agent_name, task) = raw.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("--task '{raw}' must be in the form <agent>:<task text>, e.g. claude:\"fix the bug\"")
+    })?;
+    if task.trim().is_empty() {
+        bail!("--task '{raw}' has empty task text after the ':'");
+    }
+    let kind = AgentKind::parse(agent_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, or codex)"
+        )
+    })?;
+    Ok((kind, task.to_string(), agent_name.to_string()))
+}
+
+fn agent_label(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude",
+        AgentKind::Copilot => "copilot",
+        AgentKind::Codex => "codex",
+    }
+}
+
+/// Same event formatting as `print_event`, prefixed with `label` so N
+/// interleaved concurrent agents' output stays attributable. No extra
+/// locking beyond what `println!`'s own internal `Stdout` lock already
+/// gives per call -- each event here becomes one complete line written in
+/// one call, so concurrent threads' lines interleave at line granularity,
+/// never mid-line.
+fn print_event_labeled(label: &str, event: &AgentEvent) {
+    match event {
+        AgentEvent::Init { session_id } => println!("[{label}] [init] session {session_id}"),
+        AgentEvent::CoordStatus { name, status } => {
+            println!("[{label}] [coord] {name}: {status}")
+        }
+        AgentEvent::AssistantText(text) => println!("[{label}] [assistant] {text}"),
+        AgentEvent::ToolUse { name, input } => println!("[{label}] [tool] {name} {input}"),
+        AgentEvent::Result { .. } => {}
+        AgentEvent::Other(value) => println!("[{label}] [other] {value}"),
+    }
 }
 
 /// Prints one streamed agent event. `Other` is deliberately not skipped --

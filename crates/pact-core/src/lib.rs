@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome};
+use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
 use pact_vcs::{Workspace, WorkspaceManager};
 use anyhow::{Context, Result};
 
@@ -10,6 +10,30 @@ use anyhow::{Context, Result};
 pub struct Orchestrator {
     workspaces: WorkspaceManager,
     repo_root: PathBuf,
+}
+
+/// One (agent, task) pair to run as part of a `spawn_many` batch. A
+/// separate, explicit `safety_override` per task (rather than one shared
+/// across the whole batch) is deliberately not supported in this first cut
+/// -- issue #3's acceptance criteria don't call for it, and `--safety`'s
+/// existing single-spawn meaning (an adapter-vocabulary override) already
+/// applies uniformly per invocation; extending it per-task is a plausible
+/// follow-up, not something to speculatively build now.
+pub struct SpawnManyTask {
+    pub agent: AgentKind,
+    pub task: String,
+}
+
+/// The outcome of one task within a `spawn_many` batch. `result` is `Err`
+/// if workspace creation, dependency prep wiring, or the agent process
+/// itself failed outright (including a panic inside that task's thread,
+/// converted here rather than left to poison the whole batch) -- as
+/// opposed to the agent *running* but reporting failure, which is a
+/// successful `Ok` carrying `RunOutcome { success: false, .. }`.
+pub struct SpawnManyOutcome {
+    pub index: usize,
+    pub agent: AgentKind,
+    pub result: Result<(Workspace, RunOutcome)>,
 }
 
 impl Orchestrator {
@@ -57,8 +81,96 @@ impl Orchestrator {
     /// `AgentAdapter::build_command`); if `None`, the adapter's own
     /// unattended-safety default is used and should be warned about by the
     /// caller (see `AgentAdapter::default_safety_description`).
+    ///
+    /// Creates its own single-use `Supervisor` -- this call's Ctrl-C
+    /// handling is exactly what it was before `spawn_many` existed, just
+    /// routed through the same shared mechanism spawn_many uses for N
+    /// concurrent children instead of a bare function.
     pub fn spawn(
         &self,
+        agent: AgentKind,
+        task: &str,
+        safety_override: Option<&str>,
+        on_event: impl FnMut(&AgentEvent),
+    ) -> Result<(Workspace, RunOutcome)> {
+        let supervisor = Supervisor::new();
+        self.spawn_with_supervisor(&supervisor, agent, task, safety_override, on_event)
+    }
+
+    /// Runs every `(agent, task)` pair in `tasks` concurrently, one
+    /// `std::thread` each, sharing one `Supervisor` so a single Ctrl-C
+    /// kills every still-running child at once. `on_event` receives each
+    /// task's batch index alongside its event so the caller can attribute
+    /// interleaved output back to its source; it's called from whichever
+    /// task's thread produced the event, so it must be `Sync`.
+    ///
+    /// `workspaces: &WorkspaceManager` (via `self`) has no interior
+    /// mutability beyond what `create_workspace` already serializes with
+    /// `PidLock` -- the same concurrency Phase 0 verified against 6
+    /// simultaneous `spawn` calls -- so sharing `&self` across scoped
+    /// threads here doesn't need any new synchronization of its own.
+    pub fn spawn_many(
+        &self,
+        tasks: Vec<SpawnManyTask>,
+        safety_override: Option<&str>,
+        on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
+    ) -> Vec<SpawnManyOutcome> {
+        let supervisor = Supervisor::new();
+        std::thread::scope(|scope| {
+            // Index and agent are captured here, outside the closure's
+            // return value, specifically so a panic (which loses whatever
+            // the closure would have returned) still leaves enough to
+            // attribute the failure to the right task below.
+            let handles: Vec<(usize, AgentKind, _)> = tasks
+                .iter()
+                .enumerate()
+                .map(|(index, spec)| {
+                    let supervisor = &supervisor;
+                    let on_event = &on_event;
+                    let handle = scope.spawn(move || {
+                        self.spawn_with_supervisor(
+                            supervisor,
+                            spec.agent,
+                            &spec.task,
+                            safety_override,
+                            |event| on_event(index, &spec.agent, event),
+                        )
+                    });
+                    (index, spec.agent, handle)
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|(index, agent, handle)| {
+                    let result = match handle.join() {
+                        Ok(result) => result,
+                        Err(panic) => {
+                            // A panic in one task's thread must not lose
+                            // the other tasks' results -- surface it as
+                            // this task's own failure instead of
+                            // propagating out of spawn_many entirely.
+                            let message = panic
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| panic.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "agent task thread panicked".to_string());
+                            Err(anyhow::anyhow!("agent task thread panicked: {message}"))
+                        }
+                    };
+                    SpawnManyOutcome {
+                        index,
+                        agent,
+                        result,
+                    }
+                })
+                .collect()
+        })
+    }
+
+    fn spawn_with_supervisor(
+        &self,
+        supervisor: &Supervisor,
         agent: AgentKind,
         task: &str,
         safety_override: Option<&str>,
@@ -101,6 +213,7 @@ impl Orchestrator {
         let id = workspace.id.clone();
         let mut coord_seen = false;
         let outcome = pact_agents::run_and_stream(
+            supervisor,
             &program,
             &args,
             &workspace.path,
