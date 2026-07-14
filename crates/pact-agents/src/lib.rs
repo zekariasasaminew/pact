@@ -13,6 +13,7 @@ mod claude_code;
 mod codex;
 mod copilot;
 mod event;
+mod gemini;
 mod process;
 mod supervisor;
 

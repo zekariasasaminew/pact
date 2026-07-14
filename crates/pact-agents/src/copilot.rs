@@ -38,6 +38,7 @@ impl AgentAdapter for CopilotAdapter {
         task: &str,
         _safety_override: Option<&str>,
         coord: Option<&CoordConfig>,
+        _workspace_path: &std::path::Path,
     ) -> (String, Vec<String>) {
         let mut args = vec![
             "-p".to_string(),

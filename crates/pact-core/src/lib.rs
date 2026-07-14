@@ -217,7 +217,8 @@ impl Orchestrator {
             }
         };
 
-        let (program, args) = adapter.build_command(task, safety_override, coord.as_ref());
+        let (program, args) =
+            adapter.build_command(task, safety_override, coord.as_ref(), &workspace.path);
         let log_path = self
             .workspaces
             .state_dir()

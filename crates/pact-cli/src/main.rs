@@ -24,7 +24,7 @@ enum Command {
         /// Task/prompt to give the agent
         task: String,
 
-        /// Which agent CLI to launch (claude, copilot, codex).
+        /// Which agent CLI to launch (claude, copilot, codex, gemini).
         #[arg(long, default_value = "claude")]
         agent: String,
 
@@ -136,7 +136,7 @@ fn main() -> Result<()> {
             safety,
         } => {
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
-                anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, or codex)")
+                anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, codex, or gemini)")
             })?;
             let adapter = pact_agents::adapter(kind);
             match &safety {
@@ -340,7 +340,7 @@ fn parse_task_spec(raw: &str) -> Result<(AgentKind, String, String)> {
     }
     let kind = AgentKind::parse(agent_name).ok_or_else(|| {
         anyhow::anyhow!(
-            "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, or codex)"
+            "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, codex, or gemini)"
         )
     })?;
     Ok((kind, task.to_string(), agent_name.to_string()))
@@ -351,6 +351,7 @@ fn agent_label(kind: AgentKind) -> &'static str {
         AgentKind::Claude => "claude",
         AgentKind::Copilot => "copilot",
         AgentKind::Codex => "codex",
+        AgentKind::Gemini => "gemini",
     }
 }
 

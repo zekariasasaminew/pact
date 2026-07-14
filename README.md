@@ -248,16 +248,20 @@ actually do to my machine?" below.
   `mvn`/`gradle` commands. Anything else (an arbitrary shell command, a
   tool outside that list) is denied automatically -- the agent will work
   around the denial rather than stall.
-- **Copilot CLI (default) and Codex (default)**: can run *any* shell
-  command and edit *any* file the OS-level user running `pact` can reach,
-  with no restriction. This is not a hardening choice -- it's the only
-  configuration either adapter has been confirmed to actually get work
-  done with in headless mode. Treat a Copilot CLI or Codex workspace with
-  the same trust you'd give a script you ran with your own full user
-  permissions, because that's effectively what it has.
-- All three: `--safety <value>` overrides the default in that adapter's
+- **Copilot CLI (default), Codex (default), and Gemini CLI (default)**:
+  can run *any* shell command and edit *any* file the OS-level user
+  running `pact` can reach, with no restriction. This is not a hardening
+  choice -- it's the only configuration confirmed to actually get work
+  done in headless mode for Copilot CLI and Codex; for Gemini CLI it's
+  the only thing that could be *stated with confidence* won't hang,
+  since this environment has no Gemini auth configured to actually test
+  a safer mode against (see the Gemini adapter section below). Treat any
+  of these three with the same trust you'd give a script you ran with
+  your own full user permissions, because that's effectively what it has.
+- All four: `--safety <value>` overrides the default in that adapter's
   own vocabulary (Claude Code's `--permission-mode` values, Codex's
-  `--sandbox` values; Copilot CLI has no gradient to override).
+  `--sandbox` values, Gemini CLI's `--approval-mode` values; Copilot CLI
+  has no gradient to override).
 
 ### One AgentAdapter trait, not one unified safety enum
 
@@ -297,6 +301,47 @@ but `CODEX_HOME` also relocates auth/session state, not just config --
 pointing it at a per-workspace directory would plausibly break headless
 login on first use. The inline `-c` override sidesteps that entirely, and
 was confirmed to actually connect to and call a real MCP server.
+
+### Gemini CLI adapter: real CLI facts, genuinely blocked on live-verification
+
+A fourth adapter, built from a real installed `gemini` CLI
+(`@google/gemini-cli` 0.50.0) rather than documentation alone -- but
+**not live-verified against a real authenticated session**, because this
+environment has no Gemini API key or Google Cloud auth configured, and
+`gemini -p "..."` fails immediately with `Please set an Auth method...`.
+Completing a Google OAuth login on the user's behalf wasn't attempted --
+that's an identity/credential decision that isn't this project's to make
+autonomously.
+
+What *is* confirmed by actually running the CLI, not guessed from docs:
+`-p`/`-o stream-json` for headless streaming output, and a genuinely
+third MCP-config mechanism among the four adapters -- confirmed by
+running `gemini mcp add --scope project` and reading the file it wrote.
+Gemini CLI reads `.gemini/settings.json`, relative to its own working
+directory, automatically; no CLI flag hands it over at all, unlike Claude
+Code/Copilot CLI's file-plus-flag shape or Codex's inline `-c` overrides.
+The file's shape is identical to Claude Code/Copilot CLI's
+`{"mcpServers": {...}}` (the same `write_mcp_json_config` helper works
+unchanged), just written to a different, fixed path. Confirmed
+end-to-end short of authentication: a real `pact spawn --agent gemini`
+run against a scratch repo correctly wrote the MCP config into the
+workspace before launching, and `gemini` failed with its own real auth
+error (exit code 41) rather than pact hanging or crashing -- `pact`
+reported it as a clean `failed` outcome using the process's actual exit
+code, the same fallback Codex's missing Result-event schema already
+relies on.
+
+What's genuinely unconfirmed: the streaming JSON event schema (`parse_line`
+is modeled on the shape common to the other three adapters, deliberately
+defensive -- anything unrecognized surfaces as `Other` rather than being
+dropped, precisely because this guess *will* need correcting once run for
+real) and whether a safer approval mode hangs in headless mode the way
+Copilot CLI's does or denies cleanly the way Claude Code's does. Default
+safety is `--approval-mode yolo` -- not claimed as a verified safer
+option, the same honest category Copilot CLI and Codex are already in.
+This adapter stays open as issue #9 rather than closed, until it can
+actually be run against a real session and upgraded to live-verified the
+same way Codex was.
 
 ### Real parallel launch: OS threads, not async/tokio
 
@@ -479,7 +524,7 @@ graph TD
     Core["pact-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
     VCS["pact-vcs<br/>(PidLock + git worktree lifecycle)"]
     Deps["pact-deps<br/>(dependency broker: detect + passthrough + content store)"]
-    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex, all live-verified)"]
+    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex live-verified, Gemini CLI not yet)"]
     Coord["pact-coord<br/>(leases + messages, its own MCP server process)"]
 
     CLI --> Core
@@ -617,6 +662,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 6 | Post-run review (`diff`) + safe teardown (uncommitted-change guard) | **Done** |
 | 7 | Shared npm store: extended keying + populate-failure fallback | **Done** |
 | 8 | Cross-workspace conflict detection (`conflicts`, informational) | **Done** |
+| 9 | Gemini CLI adapter | **Built, not live-verified** (no auth available -- see below) |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -739,6 +785,18 @@ conflicts` and by `teardown`'s pre-removal warning; a real coordination-DB
 lease and message, both correctly surfaced as related context in the
 report.
 
+Phase 9 added a fourth adapter, Gemini CLI -- see "Gemini CLI adapter:
+real CLI facts, genuinely blocked on live-verification" under Design
+decisions. Built from a real installed CLI (confirmed flags, and a
+genuinely third MCP-config mechanism, by actually running `gemini mcp
+add` and reading the file it wrote), but not live-verified the way the
+other three adapters are: no Gemini auth is configured in this
+environment. `pact spawn --agent gemini` against a scratch repo confirmed
+the MCP config is written correctly and that a real auth failure is
+reported as a clean `failed` outcome (not a hang or a crash), but the
+streaming event schema and the safety-default hang-vs-deny question stay
+unconfirmed. Issue #9 stays open rather than closed until that changes.
+
 ## Known limitations
 - **The Unix whole-group kill path (both live Ctrl-C and cross-process
   `teardown`) is implemented but not yet live-verified on real Unix
@@ -773,6 +831,10 @@ report.
   install, so it degrades safely rather than leaving a workspace with no
   `node_modules`, but the store itself doesn't avoid the failure, only
   recovers from it.
+- **The Gemini CLI adapter is built, not live-verified** -- no Gemini
+  API key or Google Cloud auth is configured in this environment. See
+  "Gemini CLI adapter" under Design decisions for exactly what was and
+  wasn't confirmed. Issue #9 stays open until this changes.
 
 ## Usage
 
@@ -784,6 +846,7 @@ running `./target/release/pact` after building from source -- see
 # from inside (or pass --repo to) a git repository:
 pact spawn "implement the thing"
 pact spawn "implement the thing" --agent copilot
+pact spawn "implement the thing" --agent gemini  # built, not live-verified -- see Known limitations
 pact spawn "implement the thing" --agent claude --safety acceptEdits
 pact spawn-many --task claude:"implement X" --task claude:"implement Y"
 pact spawn-many --task claude:"implement X" --task copilot:"implement Y"

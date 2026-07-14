@@ -54,6 +54,7 @@ impl AgentAdapter for CodexAdapter {
         task: &str,
         safety_override: Option<&str>,
         coord: Option<&CoordConfig>,
+        _workspace_path: &std::path::Path,
     ) -> (String, Vec<String>) {
         let mut args = vec!["exec".to_string(), task.to_string(), "--json".to_string()];
         match safety_override {
@@ -189,7 +190,12 @@ mod tests {
             args: vec!["mcp-serve".to_string(), r"--workspace".to_string()],
             config_path: std::path::PathBuf::new(),
         };
-        let (program, args) = CodexAdapter.build_command("do the thing", None, Some(&coord));
+        let (program, args) = CodexAdapter.build_command(
+            "do the thing",
+            None,
+            Some(&coord),
+            std::path::Path::new("/tmp/workspace"),
+        );
         assert_eq!(program, "codex");
 
         let command_arg = args
@@ -213,19 +219,34 @@ mod tests {
 
     #[test]
     fn build_command_omits_mcp_overrides_when_no_coord_config() {
-        let (_, args) = CodexAdapter.build_command("do the thing", None, None);
+        let (_, args) = CodexAdapter.build_command(
+            "do the thing",
+            None,
+            None,
+            std::path::Path::new("/tmp/workspace"),
+        );
         assert!(!args.iter().any(|a| a.contains("mcp_servers")));
     }
 
     #[test]
     fn default_safety_uses_bypass_flag() {
-        let (_, args) = CodexAdapter.build_command("do the thing", None, None);
+        let (_, args) = CodexAdapter.build_command(
+            "do the thing",
+            None,
+            None,
+            std::path::Path::new("/tmp/workspace"),
+        );
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     }
 
     #[test]
     fn safety_override_maps_to_sandbox_flag() {
-        let (_, args) = CodexAdapter.build_command("do the thing", Some("read-only"), None);
+        let (_, args) = CodexAdapter.build_command(
+            "do the thing",
+            Some("read-only"),
+            None,
+            std::path::Path::new("/tmp/workspace"),
+        );
         assert!(args.contains(&"--sandbox".to_string()));
         assert!(args.contains(&"read-only".to_string()));
         assert!(!args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));

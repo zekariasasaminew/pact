@@ -47,6 +47,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         task: &str,
         safety_override: Option<&str>,
         coord: Option<&CoordConfig>,
+        _workspace_path: &std::path::Path,
     ) -> (String, Vec<String>) {
         let mut args = vec![
             "-p".to_string(),
@@ -172,7 +173,12 @@ mod tests {
 
     #[test]
     fn default_omits_permission_mode_but_includes_allowlist() {
-        let (program, args) = ClaudeCodeAdapter.build_command("do the thing", None, None);
+        let (program, args) = ClaudeCodeAdapter.build_command(
+            "do the thing",
+            None,
+            None,
+            std::path::Path::new("/tmp/workspace"),
+        );
         assert_eq!(program, "claude");
         assert!(args.contains(&"--allowedTools".to_string()));
         assert!(!args.contains(&"--permission-mode".to_string()));
@@ -180,8 +186,12 @@ mod tests {
 
     #[test]
     fn override_adds_explicit_permission_mode_alongside_allowlist() {
-        let (_, args) =
-            ClaudeCodeAdapter.build_command("do the thing", Some("bypassPermissions"), None);
+        let (_, args) = ClaudeCodeAdapter.build_command(
+            "do the thing",
+            Some("bypassPermissions"),
+            None,
+            std::path::Path::new("/tmp/workspace"),
+        );
         assert!(args.contains(&"--allowedTools".to_string()));
         let mode_idx = args.iter().position(|a| a == "--permission-mode").unwrap();
         assert_eq!(args[mode_idx + 1], "bypassPermissions");

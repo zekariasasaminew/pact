@@ -43,12 +43,16 @@ pub trait AgentAdapter {
     /// adapter's own safety/approval vocabulary (Claude Code's
     /// `--permission-mode` values, Codex's `--ask-for-approval` values,
     /// etc.) -- these vocabularies don't share a common enum, so no
-    /// attempt is made to unify them into one.
+    /// attempt is made to unify them into one. `workspace_path` exists for
+    /// the rare adapter (Gemini CLI) whose MCP config isn't handed over
+    /// via a flag at all, but read from a fixed path relative to its own
+    /// working directory -- every other adapter ignores it.
     fn build_command(
         &self,
         task: &str,
         safety_override: Option<&str>,
         coord: Option<&CoordConfig>,
+        workspace_path: &Path,
     ) -> (String, Vec<String>);
 
     /// Parses one raw output line into zero or more normalized events.
@@ -60,6 +64,10 @@ pub enum AgentKind {
     Claude,
     Copilot,
     Codex,
+    /// Built from a real installed CLI but not live-verified against a
+    /// real authenticated session -- see `gemini.rs`'s doc comment and
+    /// issue #9.
+    Gemini,
 }
 
 impl AgentKind {
@@ -68,6 +76,7 @@ impl AgentKind {
             "claude" => Some(Self::Claude),
             "copilot" => Some(Self::Copilot),
             "codex" => Some(Self::Codex),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -78,6 +87,7 @@ pub fn adapter(kind: AgentKind) -> Box<dyn AgentAdapter> {
         AgentKind::Claude => Box::new(crate::claude_code::ClaudeCodeAdapter),
         AgentKind::Copilot => Box::new(crate::copilot::CopilotAdapter),
         AgentKind::Codex => Box::new(crate::codex::CodexAdapter),
+        AgentKind::Gemini => Box::new(crate::gemini::GeminiAdapter),
     }
 }
 
