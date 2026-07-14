@@ -1,12 +1,14 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use command_group::CommandGroup;
 
 use crate::event::AgentEvent;
+use crate::supervisor::Supervisor;
 
 /// How an agent process run ended.
 #[derive(Debug, Clone)]
@@ -25,14 +27,12 @@ pub struct RunOutcome {
 /// lets a `teardown` invoked from a different process find and kill a
 /// still-running agent.
 ///
-/// Installs a process-wide Ctrl-C handler that kills the child before
-/// letting the interrupt terminate `pact` itself. This is a
-/// single-shot design: it assumes at most one call to `run_and_stream` is
-/// active per process, matching today's blocking one-agent-per-`spawn`
-/// architecture. A future phase that supervises several agents
-/// concurrently *in one process* will need a different signal-handling
-/// strategy (e.g. a shared registry of live children), not another call
-/// to this function.
+/// `supervisor` is where this child's whole process group is registered so
+/// a shared, process-wide Ctrl-C handler can kill it -- see
+/// `Supervisor`'s doc comment. Single-`spawn` and `spawn-many` both go
+/// through this function unchanged; only whether the caller hands it a
+/// freshly-created, single-use `Supervisor` or one shared across several
+/// concurrent calls differs.
 ///
 /// stderr is drained on its own thread into the same log file (prefixed
 /// `[stderr] `) rather than left inherited or piped-but-undrained --
@@ -45,7 +45,9 @@ pub struct RunOutcome {
 /// `assistant.message` events can carry both response text and one or more
 /// tool calls in the same line; Claude Code's schema happens to be
 /// one-event-per-line, but this function doesn't assume that of anyone).
+#[allow(clippy::too_many_arguments)] // each parameter documented above; a params struct would only add indirection for a single internal call site
 pub fn run_and_stream(
+    supervisor: &Supervisor,
     program: &str,
     args: &[String],
     cwd: &Path,
@@ -84,17 +86,24 @@ pub fn run_and_stream(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .group_spawn()
         .with_context(|| format!("failed to spawn `{program}`"))?;
 
     let pid = child.id();
     on_pid(pid);
 
-    let stdout = child.stdout.take().context("child had no stdout pipe")?;
-    let stderr = child.stderr.take().context("child had no stderr pipe")?;
+    let stdout = child
+        .inner()
+        .stdout
+        .take()
+        .context("child had no stdout pipe")?;
+    let stderr = child
+        .inner()
+        .stderr
+        .take()
+        .context("child had no stderr pipe")?;
 
-    let child = Arc::new(Mutex::new(Some(child)));
-    install_ctrlc_handler(Arc::clone(&child));
+    let slot = supervisor.register(child);
 
     let stderr_log = Arc::clone(&log);
     let stderr_thread = std::thread::spawn(move || {
@@ -123,12 +132,9 @@ pub fn run_and_stream(
 
     let _ = stderr_thread.join();
 
-    let status = {
-        let mut guard = child.lock().expect("child mutex poisoned");
-        match guard.take() {
-            Some(mut c) => Some(c.wait().context("waiting for agent process to exit")?),
-            None => None, // already reaped by the ctrlc handler
-        }
+    let status = match supervisor.take(slot) {
+        Some(mut c) => Some(c.wait().context("waiting for agent process to exit")?),
+        None => None, // already reaped by the ctrlc handler
     };
 
     Ok(saw_result.unwrap_or_else(|| {
@@ -149,22 +155,4 @@ pub fn run_and_stream(
             },
         }
     }))
-}
-
-fn install_ctrlc_handler(child: Arc<Mutex<Option<Child>>>) {
-    let result = ctrlc::set_handler(move || {
-        if let Ok(mut guard) = child.lock() {
-            if let Some(mut c) = guard.take() {
-                tracing::info!("Ctrl-C received: killing agent process");
-                let _ = c.kill();
-            }
-        }
-        std::process::exit(130);
-    });
-    if let Err(err) = result {
-        // Not fatal -- e.g. a handler is already installed by an outer
-        // caller. The agent process just won't be killed on Ctrl-C in
-        // that case.
-        tracing::warn!("could not install Ctrl-C handler: {err}");
-    }
 }

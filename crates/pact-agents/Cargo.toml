@@ -9,3 +9,4 @@ anyhow.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 ctrlc.workspace = true
+command-group = "5.0.1"

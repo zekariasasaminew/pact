@@ -55,7 +55,7 @@ pub trait AgentAdapter {
     fn parse_line(&self, line: &str) -> Vec<AgentEvent>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentKind {
     Claude,
     Copilot,

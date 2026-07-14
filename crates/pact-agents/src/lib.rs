@@ -14,7 +14,9 @@ mod codex;
 mod copilot;
 mod event;
 mod process;
+mod supervisor;
 
 pub use adapter::{adapter, AgentAdapter, AgentKind, CoordConfig};
 pub use event::AgentEvent;
 pub use process::{run_and_stream, RunOutcome};
+pub use supervisor::Supervisor;
