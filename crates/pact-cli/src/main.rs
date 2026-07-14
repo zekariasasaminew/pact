@@ -31,11 +31,11 @@ enum Command {
         /// Raw safety/approval override passed straight through to the
         /// chosen agent's own vocabulary: Claude Code's --permission-mode
         /// values (acceptEdits, bypassPermissions, ...), Codex's
-        /// --ask-for-approval values (never, on-request, untrusted).
-        /// Ignored by Copilot CLI, which has no gradient. Defaults to
-        /// each adapter's own unattended-safety setting -- see the README
-        /// for why headless mode requires *some* such setting regardless
-        /// of adapter, not just for Claude Code.
+        /// --sandbox values (read-only, workspace-write, danger-full-access).
+        /// Ignored by Copilot CLI, which has no gradient. Defaults to each
+        /// adapter's own unattended-safety setting -- see the README for
+        /// why that default differs by adapter (Claude Code has a real
+        /// safer default; Copilot CLI and Codex don't yet).
         #[arg(long)]
         safety: Option<String>,
     },
@@ -106,9 +106,8 @@ fn main() -> Result<()> {
                      verify this doesn't hang the session on a permission prompt in headless mode."
                 ),
                 None => eprintln!(
-                    "warning: running '{agent}' with its default unattended-safety setting \
-                     ({}) -- it bypasses safety checks with no human in the loop. Pass --safety \
-                     explicitly to use a different setting.",
+                    "warning: running '{agent}' unattended with no human in the loop, using: {}. \
+                     Pass --safety explicitly to use a different setting.",
                     adapter.default_safety_description()
                 ),
             }
