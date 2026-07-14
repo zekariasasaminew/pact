@@ -24,6 +24,17 @@ pub struct SpawnManyTask {
     pub task: String,
 }
 
+/// Points the generated MCP coordination config at an alternative command
+/// instead of `pact mcp-serve` -- see issue #10. Pact does no protocol
+/// translation: whatever this points at must speak the same tool contract
+/// pact-coord defines (`claim_files`/`release_files`/`send_message`/
+/// `check_messages`) on its own. Absent, every workspace gets today's
+/// default (pact's own binary, unchanged).
+pub struct CoordServerOverride {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
 /// The outcome of one task within a `spawn_many` batch. `result` is `Err`
 /// if workspace creation, dependency prep wiring, or the agent process
 /// itself failed outright (including a panic inside that task's thread,
@@ -61,17 +72,36 @@ impl Orchestrator {
     }
 
     /// Builds the (adapter-agnostic) description of the coordination
-    /// server for `pact mcp-serve` to be launched with. What each
-    /// adapter *does* with this (a JSON file passed via a flag, or inline
-    /// config overrides) is up to it -- see `AgentAdapter::build_command`.
-    fn coord_config(&self, workspace: &Workspace, server_name: &str) -> Result<CoordConfig> {
-        let self_exe =
-            std::env::current_exe().context("resolving pact's own executable path")?;
+    /// server for the agent CLI to launch. What each adapter *does* with
+    /// this (a JSON file passed via a flag, or inline config overrides) is
+    /// up to it -- see `AgentAdapter::build_command`. Defaults to `pact
+    /// mcp-serve`; `coord_override`, if given, points at an alternative
+    /// command/args instead (see `CoordServerOverride`, issue #10) --
+    /// pact does no protocol translation, it just tells the agent CLI to
+    /// launch something else instead of itself.
+    fn coord_config(
+        &self,
+        workspace: &Workspace,
+        server_name: &str,
+        coord_override: Option<&CoordServerOverride>,
+    ) -> Result<CoordConfig> {
         let config_path = self
             .workspaces
             .state_dir()
             .join("mcp")
             .join(format!("{}.json", workspace.id));
+
+        if let Some(over) = coord_override {
+            return Ok(CoordConfig {
+                server_name: server_name.to_string(),
+                command: over.command.clone(),
+                args: over.args.clone(),
+                config_path,
+            });
+        }
+
+        let self_exe =
+            std::env::current_exe().context("resolving pact's own executable path")?;
         Ok(CoordConfig {
             server_name: server_name.to_string(),
             command: self_exe.to_string_lossy().to_string(),
@@ -106,10 +136,18 @@ impl Orchestrator {
         agent: AgentKind,
         task: &str,
         safety_override: Option<&str>,
+        coord_override: Option<&CoordServerOverride>,
         on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let supervisor = Supervisor::new();
-        self.spawn_with_supervisor(&supervisor, agent, task, safety_override, on_event)
+        self.spawn_with_supervisor(
+            &supervisor,
+            agent,
+            task,
+            safety_override,
+            coord_override,
+            on_event,
+        )
     }
 
     /// Runs every `(agent, task)` pair in `tasks` concurrently, one
@@ -128,6 +166,7 @@ impl Orchestrator {
         &self,
         tasks: Vec<SpawnManyTask>,
         safety_override: Option<&str>,
+        coord_override: Option<&CoordServerOverride>,
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Vec<SpawnManyOutcome> {
         let supervisor = Supervisor::new();
@@ -148,6 +187,7 @@ impl Orchestrator {
                             spec.agent,
                             &spec.task,
                             safety_override,
+                            coord_override,
                             |event| on_event(index, &spec.agent, event),
                         )
                     });
@@ -189,6 +229,7 @@ impl Orchestrator {
         agent: AgentKind,
         task: &str,
         safety_override: Option<&str>,
+        coord_override: Option<&CoordServerOverride>,
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let workspace = self.workspaces.create_workspace(task)?;
@@ -205,7 +246,7 @@ impl Orchestrator {
         }
 
         let coord_name = adapter.coord_server_name();
-        let coord = match self.coord_config(&workspace, coord_name) {
+        let coord = match self.coord_config(&workspace, coord_name, coord_override) {
             Ok(c) => Some(c),
             Err(err) => {
                 tracing::warn!(

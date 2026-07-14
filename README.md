@@ -516,6 +516,14 @@ directly with no new plumbing. Detection itself stays at the file-path
 level, the same restriction the README already states for leases --
 semantic/AST-level analysis is still out of scope for v1.
 
+### Coordination server is pluggable at the command level, not protocol-compatible with anything specific
+
+Evaluated first, per this issue's own framing, whether pluggability was worth building at all: MCP Agent Mail (the prior art cited elsewhere in this README, running at 40-50 concurrent agents) has its own tool shapes, not literally pact-coord's `claim_files`/`release_files`/`send_message`/`check_messages` contract -- so "plug in MCP Agent Mail" was never actually one config flag away, and building a translation layer between differing MCP tool shapes for a scaling problem nobody's confirmed hitting yet (this project hasn't soft-launched -- see issue #12) would be exactly the kind of premature abstraction avoided elsewhere in this codebase (`AgentAdapter` was only generalized once a second and third real adapter existed).
+
+What *was* worth doing: today, the coordination server's command was hardcoded to pact's own binary with no way to override it at all, even for someone willing to speak pact-coord's exact contract themselves (a hardened or custom reimplementation of the same lease/message API). `spawn`/`spawn-many --coord-command <path> --coord-arg <arg>` (repeatable) now override what gets written into the generated MCP config -- confirmed end-to-end: the resulting `{"mcpServers": {...}}` file correctly carried the overridden command/args instead of `pact mcp-serve`, and the existing coordination-status warning correctly reported the (deliberately nonexistent, for the test) alternative server as `failed` rather than silently accepting it. Pact does zero protocol translation either way -- whatever this points at must speak pact-coord's contract on its own.
+
+**What the built-in server provides, for anyone evaluating an alternative:** advisory glob-based file leases with TTL expiry, a threaded message log (broadcast or direct), SQLite+WAL storage, verified with two real concurrent agents (see Phase 3). **What it doesn't:** no confirmed ceiling anywhere near MCP Agent Mail's cited 40-50-concurrent-agent scale (also, to be clear, no confirmed *failure* at that scale either -- just untested), no semantic/AST-level conflict analysis (deliberately out of scope for v1), no enforcement (leases are advisory by design, not locks).
+
 ## Architecture
 
 ```mermaid
@@ -663,6 +671,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 7 | Shared npm store: extended keying + populate-failure fallback | **Done** |
 | 8 | Cross-workspace conflict detection (`conflicts`, informational) | **Done** |
 | 9 | Gemini CLI adapter | **Built, not live-verified** (no auth available -- see below) |
+| 10 | Pluggable coordination server (`--coord-command`/`--coord-arg`) | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -797,6 +806,15 @@ reported as a clean `failed` outcome (not a hang or a crash), but the
 streaming event schema and the safety-default hang-vs-deny question stay
 unconfirmed. Issue #9 stays open rather than closed until that changes.
 
+Phase 10 made the coordination server's command pluggable -- see
+"Coordination server is pluggable at the command level" under Design
+decisions. Live-verified: a real `spawn` with `--coord-command`/
+`--coord-arg` produced a generated MCP config carrying the overridden
+command and args instead of `pact mcp-serve`, and the existing
+coordination-status check correctly reported the (deliberately
+nonexistent, for the test) alternative server as failed rather than
+silently accepting it.
+
 ## Known limitations
 - **The Unix whole-group kill path (both live Ctrl-C and cross-process
   `teardown`) is implemented but not yet live-verified on real Unix
@@ -848,6 +866,7 @@ pact spawn "implement the thing"
 pact spawn "implement the thing" --agent copilot
 pact spawn "implement the thing" --agent gemini  # built, not live-verified -- see Known limitations
 pact spawn "implement the thing" --agent claude --safety acceptEdits
+pact spawn "implement the thing" --coord-command /path/to/alt-coord --coord-arg --some-flag
 pact spawn-many --task claude:"implement X" --task claude:"implement Y"
 pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
 pact list                          # shows a [dirty]/[clean] indicator per workspace

@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
-use pact_core::{FileConflict, Orchestrator, SpawnManyTask};
+use pact_core::{CoordServerOverride, FileConflict, Orchestrator, SpawnManyTask};
 
 #[derive(Parser)]
 #[command(name = "pact", about = "Orchestrate parallel AI coding agent workspaces")]
@@ -38,6 +38,19 @@ enum Command {
         /// safer default; Copilot CLI and Codex don't yet).
         #[arg(long)]
         safety: Option<String>,
+
+        /// Point the generated MCP coordination config at this command
+        /// instead of launching `pact mcp-serve` -- see issue #10. Pact
+        /// does no protocol translation: whatever this points at must
+        /// speak pact-coord's own tool contract (claim_files/
+        /// release_files/send_message/check_messages) on its own.
+        #[arg(long)]
+        coord_command: Option<String>,
+
+        /// Argument for --coord-command, repeatable. Ignored if
+        /// --coord-command isn't given.
+        #[arg(long = "coord-arg")]
+        coord_args: Vec<String>,
     },
     /// Create N isolated agent workspaces and run N agent CLIs in them
     /// concurrently, streaming their combined output live with each line
@@ -59,6 +72,15 @@ enum Command {
         /// supported in this first cut (see `pact-core::SpawnManyTask`).
         #[arg(long)]
         safety: Option<String>,
+
+        /// Same coordination-server override as `spawn --coord-command`,
+        /// applied to every task in this batch.
+        #[arg(long)]
+        coord_command: Option<String>,
+
+        /// Argument for --coord-command, repeatable.
+        #[arg(long = "coord-arg")]
+        coord_args: Vec<String>,
     },
     /// List active agent workspaces
     List,
@@ -134,6 +156,8 @@ fn main() -> Result<()> {
             task,
             agent,
             safety,
+            coord_command,
+            coord_args,
         } => {
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
                 anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, codex, or gemini)")
@@ -150,8 +174,18 @@ fn main() -> Result<()> {
                     adapter.default_safety_description()
                 ),
             }
+            let coord_override = coord_command.map(|command| CoordServerOverride {
+                command,
+                args: coord_args,
+            });
 
-            let (workspace, outcome) = orchestrator.spawn(kind, &task, safety.as_deref(), print_event)?;
+            let (workspace, outcome) = orchestrator.spawn(
+                kind,
+                &task,
+                safety.as_deref(),
+                coord_override.as_ref(),
+                print_event,
+            )?;
 
             println!("workspace {} ({})", workspace.id, workspace.branch);
             println!("  path: {}", workspace.path.display());
@@ -161,7 +195,12 @@ fn main() -> Result<()> {
                 outcome.summary
             );
         }
-        Command::SpawnMany { tasks, safety } => {
+        Command::SpawnMany {
+            tasks,
+            safety,
+            coord_command,
+            coord_args,
+        } => {
             let specs = tasks
                 .iter()
                 .map(|raw| parse_task_spec(raw))
@@ -191,9 +230,19 @@ fn main() -> Result<()> {
                 .map(|(agent, task, _)| SpawnManyTask { agent, task })
                 .collect();
 
-            let results = orchestrator.spawn_many(batch, safety.as_deref(), |index, agent, event| {
-                print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event);
+            let coord_override = coord_command.map(|command| CoordServerOverride {
+                command,
+                args: coord_args,
             });
+
+            let results = orchestrator.spawn_many(
+                batch,
+                safety.as_deref(),
+                coord_override.as_ref(),
+                |index, agent, event| {
+                    print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event);
+                },
+            );
 
             let mut any_failed = false;
             for outcome in &results {
