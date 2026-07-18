@@ -4,6 +4,8 @@ use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
 use anyhow::{Context, Result};
 
+pub use pact_vcs::{MergedWorkspace, MergeReport, SkippedWorkspace};
+
 /// Ties together workspace lifecycle (pact-vcs), dependency
 /// materialization (pact-deps), and agent launch (pact-agents)
 /// behind one stable interface.
@@ -338,6 +340,17 @@ impl Orchestrator {
     /// workspace was already clean.
     pub fn commit_all(&self, id: &str) -> Result<bool> {
         self.workspaces.commit_all(id)
+    }
+
+    /// Closes the loop from "N dirty workspaces" to "one clean integration
+    /// branch" -- see `pact_vcs::WorkspaceManager::merge_all`.
+    pub fn merge_all(
+        &self,
+        ids: Option<&[String]>,
+        target_branch: Option<&str>,
+        dry_run: bool,
+    ) -> Result<MergeReport> {
+        self.workspaces.merge_all(ids, target_branch, dry_run)
     }
 
     /// Reports files touched by more than one active workspace, among

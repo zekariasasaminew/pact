@@ -12,3 +12,6 @@ uuid.workspace = true
 tracing.workspace = true
 sysinfo.workspace = true
 libc = "0.2.186"
+
+[dev-dependencies]
+uuid.workspace = true

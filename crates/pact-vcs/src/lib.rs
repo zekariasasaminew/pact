@@ -2,7 +2,7 @@ mod lock;
 
 pub use lock::PidLock;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +26,17 @@ pub struct Workspace {
     /// it before removing the worktree out from under it.
     #[serde(default)]
     pub agent_pid: Option<u32>,
+    /// The repo root's `HEAD` at the moment this workspace's worktree was
+    /// created -- i.e. the commit its branch actually forked from. Recorded
+    /// so `merge_all`'s moving-base check has a real value to compare
+    /// against later, rather than recomputing `merge-base` against
+    /// whatever HEAD happens to be *at merge time* (which can't tell
+    /// "moved forward normally" apart from "no longer part of this
+    /// branch's history at all"). `#[serde(default)]` so workspace metadata
+    /// persisted before this field existed still deserializes -- callers
+    /// treat an empty string as "unknown, can't check".
+    #[serde(default)]
+    pub base_commit: String,
 }
 
 /// What an agent has actually done in one workspace, split into the
@@ -55,6 +66,51 @@ pub struct WorkspaceChanges {
     pub merge_base: String,
     /// Forward-slash-normalized relative paths, deduplicated and sorted.
     pub files: Vec<String>,
+}
+
+/// One workspace whose branch was merged cleanly into the integration
+/// branch during `merge_all`.
+#[derive(Debug, Clone)]
+pub struct MergedWorkspace {
+    pub id: String,
+    pub branch: String,
+}
+
+/// One workspace `merge_all` left out, and why -- either a real merge
+/// conflict, or the moving-base check refusing it. Never blocks the rest of
+/// the batch; see `MergeReport`.
+#[derive(Debug, Clone)]
+pub struct SkippedWorkspace {
+    pub id: String,
+    pub branch: String,
+    pub reason: String,
+}
+
+/// The result of one `WorkspaceManager::merge_all` run -- see that method's
+/// doc comment for the phases that produce this.
+#[derive(Debug, Clone)]
+pub struct MergeReport {
+    pub target_branch: String,
+    /// The repo HEAD every merged/skipped/planned workspace was compared
+    /// against.
+    pub base_commit: String,
+    /// Populated only for a real run (`dry_run: false`): workspaces whose
+    /// branch actually got merged into `target_branch`, in the order they
+    /// were merged.
+    pub merged: Vec<MergedWorkspace>,
+    /// Workspaces left out either by the moving-base check (real and
+    /// dry runs both) or by a genuine merge conflict (real runs only).
+    pub skipped: Vec<SkippedWorkspace>,
+    /// Populated only for `--dry-run`: the merge order that *would* be
+    /// used, after sequencing and the moving-base check, without any git
+    /// state actually being touched.
+    pub planned: Vec<String>,
+    pub dry_run: bool,
+}
+
+enum MergeOutcome {
+    Merged,
+    Conflict { files: Vec<String> },
 }
 
 /// Owns the lifecycle of git-worktree-backed agent workspaces for one repo.
@@ -111,9 +167,15 @@ impl WorkspaceManager {
         let branch = format!("pact/{id}");
         let path = self.state_dir.join("workspaces").join(&id);
 
-        {
+        let base_commit = {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
                 .context("acquiring git worktree lock")?;
+
+            // Captured under the same lock as `worktree add` immediately
+            // below, so this is exactly the commit the new branch forks
+            // from -- not a value that could race against a concurrent
+            // `pact spawn` moving HEAD in between the two calls.
+            let base_commit = run_git_text(&self.repo_root, &["rev-parse", "HEAD"])?;
 
             let output = Command::new("git")
                 .args(["worktree", "add"])
@@ -129,7 +191,9 @@ impl WorkspaceManager {
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
-        } // lock released here
+
+            base_commit
+        }; // lock released here
 
         let workspace = Workspace {
             id: id.clone(),
@@ -138,6 +202,7 @@ impl WorkspaceManager {
             task: task.to_string(),
             created_at: now_unix(),
             agent_pid: None,
+            base_commit,
         };
 
         std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&workspace)?)
@@ -475,6 +540,247 @@ impl WorkspaceManager {
 
         Ok(true)
     }
+
+    /// Closes the loop from "N workspaces are dirty" to "one clean
+    /// integration branch" (see the trial report this is built against: 9
+    /// of 10 manual merges failed on a shared barrel file, and strict-mode
+    /// git blocked every merge after the first conflict). Never touches the
+    /// repo's own checkout -- everything happens in a throwaway worktree,
+    /// same isolation model as agent workspaces themselves, so this is safe
+    /// to run regardless of what branch (or branch-protection rules) the
+    /// main checkout has.
+    ///
+    /// Phases, all best-effort (one workspace's failure never blocks
+    /// another's): (1) auto-commit every selected workspace via
+    /// `commit_all`; (2) moving-base check -- refuse a workspace whose
+    /// recorded `base_commit` is no longer an ancestor of current HEAD, so
+    /// merging never silently assumes a fork point that isn't real anymore
+    /// (e.g. HEAD was reset since the workspace was created); (3) sequence
+    /// the rest smallest-changeset-first, on the theory that landing small
+    /// compatible changes before a large one reduces cascade conflicts; (4)
+    /// merge each into a fresh `target_branch` (default `pact/merged-<id>`)
+    /// one at a time, skipping (not aborting the whole run on) a real
+    /// conflict.
+    ///
+    /// `ids`, if given, restricts the run to those workspaces instead of
+    /// every active one. `dry_run` runs phases 1-3 (auto-commit still
+    /// happens -- see its own doc comment for why that's always safe to
+    /// call) but stops before touching git state for the actual merge,
+    /// returning the planned order instead.
+    pub fn merge_all(
+        &self,
+        ids: Option<&[String]>,
+        target_branch: Option<&str>,
+        dry_run: bool,
+    ) -> Result<MergeReport> {
+        let mut selected: Vec<Workspace> = match ids {
+            Some(ids) => ids.iter().map(|id| self.get_workspace(id)).collect::<Result<_>>()?,
+            None => self.list_workspaces()?,
+        };
+        if selected.is_empty() {
+            bail!("no active workspaces to merge");
+        }
+
+        let head = run_git_text(&self.repo_root, &["rev-parse", "HEAD"])?;
+        if head.is_empty() {
+            bail!("could not resolve current HEAD in {}", self.repo_root.display());
+        }
+
+        for workspace in &selected {
+            if let Err(err) = self.commit_all(&workspace.id) {
+                tracing::warn!(
+                    "workspace {}: failed to auto-commit before merge, leaving it out: {err:#}",
+                    workspace.id
+                );
+            }
+        }
+
+        let mut skipped = Vec::new();
+        selected.retain(|workspace| {
+            if workspace.base_commit.is_empty() {
+                tracing::warn!(
+                    "workspace {} has no recorded base commit (created before this check \
+                     existed) -- skipping the moving-base check for it",
+                    workspace.id
+                );
+                return true;
+            }
+            match self.is_ancestor(&workspace.base_commit, &head) {
+                Ok(true) => true,
+                Ok(false) => {
+                    skipped.push(SkippedWorkspace {
+                        id: workspace.id.clone(),
+                        branch: workspace.branch.clone(),
+                        reason: format!(
+                            "base commit {} is no longer part of this branch's history -- \
+                             was it reset or rebased since this workspace was created?",
+                            short_sha(&workspace.base_commit)
+                        ),
+                    });
+                    false
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "workspace {}: could not verify base ancestry, allowing it through: {err:#}",
+                        workspace.id
+                    );
+                    true
+                }
+            }
+        });
+
+        // Smallest changeset first -- a workspace whose changes can't be
+        // sized (e.g. `workspace_changes` failed) sorts last rather than
+        // being dropped, so a bug in sizing never silently excludes it.
+        let mut sized: Vec<(usize, Workspace)> = selected
+            .into_iter()
+            .map(|w| {
+                let n = self
+                    .workspace_changes(&w.id)
+                    .map(|c| c.files.len())
+                    .unwrap_or(usize::MAX);
+                (n, w)
+            })
+            .collect();
+        sized.sort_by_key(|(n, _)| *n);
+
+        let branch_name = target_branch
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("pact/merged-{}", short_id()));
+
+        if dry_run {
+            return Ok(MergeReport {
+                target_branch: branch_name,
+                base_commit: head,
+                merged: Vec::new(),
+                skipped,
+                planned: sized.into_iter().map(|(_, w)| w.id).collect(),
+                dry_run: true,
+            });
+        }
+
+        let integration_path = self
+            .state_dir
+            .join("integration")
+            .join(branch_name.replace('/', "-"));
+
+        {
+            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
+                .context("acquiring git worktree lock")?;
+            let output = Command::new("git")
+                .args(["worktree", "add"])
+                .arg(&integration_path)
+                .args(["-b", &branch_name, &head])
+                .current_dir(&self.repo_root)
+                .output()
+                .context("failed to spawn `git worktree add` for the integration branch")?;
+            if !output.status.success() {
+                bail!(
+                    "failed to create integration branch '{branch_name}':\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        let mut merged = Vec::new();
+        for (_, workspace) in sized {
+            match self.merge_branch_into(&integration_path, &workspace.branch)? {
+                MergeOutcome::Merged => merged.push(MergedWorkspace {
+                    id: workspace.id,
+                    branch: workspace.branch,
+                }),
+                MergeOutcome::Conflict { files } => skipped.push(SkippedWorkspace {
+                    id: workspace.id,
+                    branch: workspace.branch,
+                    reason: format!("merge conflict in: {}", files.join(", ")),
+                }),
+            }
+        }
+
+        {
+            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
+                .context("acquiring git worktree lock")?;
+            // keep_branch semantics: the worktree was only ever scaffolding
+            // to run `git merge` in -- the branch it built up is the actual
+            // result and must survive this call.
+            self.remove_worktree_retrying(&integration_path)?;
+        }
+
+        Ok(MergeReport {
+            target_branch: branch_name,
+            base_commit: head,
+            merged,
+            skipped,
+            planned: Vec::new(),
+            dry_run: false,
+        })
+    }
+
+    /// `true` if `ancestor` is still part of `descendant`'s history --
+    /// i.e. `merge_all`'s recorded base commit for a workspace hasn't been
+    /// reset/rebased away since. `git merge-base --is-ancestor` exits
+    /// non-zero for "not an ancestor", which is a normal, expected outcome
+    /// here, not a spawn/IO failure -- so this returns `Ok(false)` for that
+    /// case rather than treating a non-zero exit as an error.
+    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let output = Command::new("git")
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .current_dir(&self.repo_root)
+            .output()
+            .context("failed to spawn `git merge-base --is-ancestor`")?;
+        Ok(output.status.success())
+    }
+
+    /// Merges `branch` into whatever's checked out in `worktree_path`
+    /// (always the throwaway integration worktree, never the repo's own
+    /// checkout). On conflict, aborts the in-progress merge before
+    /// returning so the worktree is clean for the *next* workspace's merge
+    /// attempt -- one conflicted workspace must not poison the rest of the
+    /// batch.
+    fn merge_branch_into(&self, worktree_path: &Path, branch: &str) -> Result<MergeOutcome> {
+        let output = Command::new("git")
+            .args(["merge", "--no-edit", branch])
+            .current_dir(worktree_path)
+            .output()
+            .with_context(|| format!("failed to spawn `git merge {branch}`"))?;
+        if output.status.success() {
+            return Ok(MergeOutcome::Merged);
+        }
+
+        let status = self.dirty_status(worktree_path)?;
+        let files: Vec<String> = status
+            .lines()
+            .filter(|line| {
+                matches!(
+                    line.get(0..2),
+                    Some("UU") | Some("AA") | Some("DD") | Some("AU") | Some("UA") | Some("UD") | Some("DU")
+                )
+            })
+            .filter_map(parse_porcelain_path)
+            .collect();
+
+        let abort = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(worktree_path)
+            .output();
+        if let Ok(abort) = abort {
+            if !abort.status.success() {
+                tracing::warn!(
+                    "`git merge --abort` in {} failed after a conflict on branch '{branch}': {}",
+                    worktree_path.display(),
+                    String::from_utf8_lossy(&abort.stderr)
+                );
+            }
+        }
+
+        Ok(MergeOutcome::Conflict {
+            files: if files.is_empty() {
+                vec![String::from_utf8_lossy(&output.stderr).trim().to_string()]
+            } else {
+                files
+            },
+        })
+    }
 }
 
 /// Builds a commit subject (and, for multi-line/long task text, a body) from
@@ -603,6 +909,13 @@ fn parse_porcelain_path(line: &str) -> Option<String> {
 
 fn short_id() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
+/// First 12 chars of a commit sha for a human-readable report line --
+/// doesn't assume the input is exactly 40 chars (already-short input, e.g.
+/// from a test, is returned as-is).
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
 }
 
 fn now_unix() -> u64 {

@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
-use pact_core::{CoordServerOverride, FileConflict, Orchestrator, SpawnManyTask};
+use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, SpawnManyTask};
 
 #[derive(Parser)]
 #[command(name = "pact", about = "Orchestrate parallel AI coding agent workspaces")]
@@ -107,6 +107,28 @@ enum Command {
     /// from the same point in history. Informational only -- nothing here
     /// blocks anything, same as MCP leases being advisory.
     Conflicts,
+    /// Merge every (or a chosen set of) active workspace onto a fresh
+    /// integration branch. Auto-commits each workspace first, refuses any
+    /// whose base commit is no longer part of this branch's history, then
+    /// merges smallest-changeset-first, skipping (not aborting on) real
+    /// conflicts. Never touches the repo's own checkout -- the result is a
+    /// new local branch (default `pact/merged-<id>`); pushing it or opening
+    /// a PR is a separate, deliberate step you take yourself.
+    MergeAll {
+        /// Restrict the merge to these workspace ids (as shown by `list`),
+        /// repeatable. Defaults to every active workspace.
+        #[arg(long = "id")]
+        ids: Vec<String>,
+
+        /// Name for the resulting branch. Defaults to `pact/merged-<id>`.
+        #[arg(long)]
+        into: Option<String>,
+
+        /// Show the planned merge order (after sequencing and the
+        /// moving-base check) without touching any git state.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Tear down an agent workspace
     Teardown {
         /// Workspace id (as shown by `list`)
@@ -353,6 +375,14 @@ fn main() -> Result<()> {
             let conflicts = orchestrator.detect_conflicts()?;
             print_conflicts(&conflicts);
         }
+        Command::MergeAll { ids, into, dry_run } => {
+            let ids = if ids.is_empty() { None } else { Some(ids) };
+            let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), dry_run)?;
+            print_merge_report(&report);
+            if !report.skipped.is_empty() {
+                std::process::exit(1);
+            }
+        }
         Command::Teardown {
             id,
             keep_branch,
@@ -384,6 +414,37 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Prints a `merge-all` report -- the merge order/outcome for a real run,
+/// or just the planned order for `--dry-run` (see `MergeReport::dry_run`).
+fn print_merge_report(report: &MergeReport) {
+    if report.dry_run {
+        println!("dry run: would merge onto '{}' from {}", report.target_branch, short(&report.base_commit));
+        println!("  planned order:");
+        for id in &report.planned {
+            println!("    {id}");
+        }
+    } else {
+        println!("merged onto '{}' from {}", report.target_branch, short(&report.base_commit));
+        if report.merged.is_empty() {
+            println!("  (nothing merged cleanly)");
+        }
+        for workspace in &report.merged {
+            println!("  merged  {} ({})", workspace.id, workspace.branch);
+        }
+    }
+
+    if !report.skipped.is_empty() {
+        println!("skipped -- needs a human:");
+        for workspace in &report.skipped {
+            println!("  {} ({}): {}", workspace.id, workspace.branch, workspace.reason);
+        }
+    }
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
 }
 
 /// Prints a cross-workspace conflict report -- shared by the standalone
