@@ -273,6 +273,19 @@ fn main() -> Result<()> {
                 .map(|(agent, task, _)| SpawnManyTask { agent, task })
                 .collect();
 
+            let overlaps = pact_core::predict_task_overlap(&batch);
+            if !overlaps.is_empty() {
+                eprintln!(
+                    "warning: {} of your tasks look like they'll touch the same file(s) -- \
+                     expect a merge conflict there unless you separate that work:",
+                    overlaps.iter().map(|o| o.task_indices.len()).sum::<usize>()
+                );
+                for overlap in &overlaps {
+                    let indices: Vec<String> = overlap.task_indices.iter().map(|i| i.to_string()).collect();
+                    eprintln!("  '{}' -- mentioned by tasks #{}", overlap.token, indices.join(", #"));
+                }
+            }
+
             let coord_override = coord_command.map(|command| CoordServerOverride {
                 command,
                 args: coord_args,

@@ -64,6 +64,77 @@ pub struct FileConflict {
     pub related_message_count: usize,
 }
 
+/// One file-like token mentioned in more than one task's text within the
+/// same `spawn_many` batch -- "Weaver": the prevention half of the
+/// conflict-avoidance story (see the merge-all design notes). Pure text
+/// analysis, no agent spawned, run *before* anything is spawned at all, on
+/// the theory that decomposition-time prevention is cheaper and more
+/// reliable than any amount of post-hoc merge cleverness -- this is a
+/// heuristic prediction, not a guarantee: it never blocks `spawn_many`, it
+/// only gives the caller something to warn about (same "informational,
+/// nothing here blocks anything" posture `Orchestrator::detect_conflicts`
+/// already established for git-level overlap).
+pub struct PredictedOverlap {
+    pub token: String,
+    /// Indices into the `spawn_many` task list (0-based) whose text
+    /// mentioned `token`. Always at least 2 entries.
+    pub task_indices: Vec<usize>,
+}
+
+/// Scans every task's text for file-path-like tokens and reports any token
+/// mentioned by two or more tasks -- e.g. 5 of 10 tasks each saying "export
+/// it from `src/index.ts`" predicts exactly the conflict the pact v0.2
+/// trial report hit. Deliberately conservative about false negatives, not
+/// false positives: missing a real overlap just means this specific
+/// prediction isn't caught (no worse than not running this at all), while
+/// an occasional false-positive token (e.g. "next.js" read as a file) costs
+/// nothing worse than one harmless extra line in a warning.
+pub fn predict_task_overlap(tasks: &[SpawnManyTask]) -> Vec<PredictedOverlap> {
+    let mut token_to_tasks: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, task) in tasks.iter().enumerate() {
+        for token in extract_file_tokens(&task.task) {
+            token_to_tasks.entry(token).or_default().push(index);
+        }
+    }
+
+    let mut overlaps: Vec<PredictedOverlap> = token_to_tasks
+        .into_iter()
+        .filter(|(_, indices)| indices.len() >= 2)
+        .map(|(token, task_indices)| PredictedOverlap { token, task_indices })
+        .collect();
+    overlaps.sort_by(|a, b| a.token.cmp(&b.token));
+    overlaps
+}
+
+/// Splits `task` on whitespace and common surrounding punctuation, keeping
+/// whichever chunks look like a file path (see `looks_like_file_path`).
+fn extract_file_tokens(task: &str) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    for word in task.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | ':' | '`')) {
+        let trimmed = word.trim_matches(|c: char| matches!(c, '.' | '!' | '?'));
+        if looks_like_file_path(trimmed) {
+            tokens.insert(trimmed.to_string());
+        }
+    }
+    tokens
+}
+
+/// A conservative, regex-free "does this look like a file path" check: ends
+/// in a short alphanumeric extension after the last `.`, with a non-empty
+/// stem made of path-ish characters. Not a real path grammar -- see
+/// `predict_task_overlap`'s doc comment for why that's an acceptable
+/// tradeoff here.
+fn looks_like_file_path(s: &str) -> bool {
+    let Some(dot) = s.rfind('.') else { return false };
+    let ext = &s[dot + 1..];
+    if ext.is_empty() || ext.len() > 5 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let stem = &s[..dot];
+    !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
+}
+
 impl Orchestrator {
     pub fn open(repo_root: impl Into<PathBuf>) -> Result<Self> {
         let repo_root = repo_root.into();
@@ -427,5 +498,66 @@ impl Orchestrator {
         // process recorded against this workspace before removing it, and
         // refuses on uncommitted changes unless `force` is set.
         self.workspaces.remove_workspace(id, keep_branch, force)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(agent: AgentKind, text: &str) -> SpawnManyTask {
+        SpawnManyTask { agent, task: text.to_string() }
+    }
+
+    #[test]
+    fn predict_task_overlap_finds_shared_barrel_file() {
+        let tasks = vec![
+            task(AgentKind::Claude, "add chunk.ts and export it from src/index.ts"),
+            task(AgentKind::Claude, "add omit.ts and export it from src/index.ts"),
+            task(AgentKind::Claude, "add pick.ts, no barrel export needed"),
+        ];
+        let overlaps = predict_task_overlap(&tasks);
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0].token, "src/index.ts");
+        assert_eq!(overlaps[0].task_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn predict_task_overlap_empty_when_nothing_shared() {
+        let tasks = vec![
+            task(AgentKind::Claude, "add chunk.ts"),
+            task(AgentKind::Claude, "add omit.ts"),
+        ];
+        assert!(predict_task_overlap(&tasks).is_empty());
+    }
+
+    #[test]
+    fn predict_task_overlap_ignores_a_file_mentioned_only_once() {
+        let tasks = vec![
+            task(AgentKind::Claude, "refactor src/index.ts entirely"),
+            task(AgentKind::Claude, "add omit.ts, unrelated"),
+        ];
+        assert!(predict_task_overlap(&tasks).is_empty());
+    }
+
+    #[test]
+    fn looks_like_file_path_accepts_plausible_paths() {
+        assert!(looks_like_file_path("chunk.ts"));
+        assert!(looks_like_file_path("src/index.ts"));
+        assert!(looks_like_file_path("package.json"));
+    }
+
+    #[test]
+    fn looks_like_file_path_rejects_plain_words_and_sentence_punctuation() {
+        assert!(!looks_like_file_path("docs"));
+        assert!(!looks_like_file_path(""));
+        assert!(!looks_like_file_path("index"));
+    }
+
+    #[test]
+    fn extract_file_tokens_trims_trailing_sentence_punctuation() {
+        let tokens = extract_file_tokens("please update src/index.ts.");
+        assert!(tokens.contains("src/index.ts"));
+        assert!(!tokens.contains("src/index.ts."));
     }
 }
