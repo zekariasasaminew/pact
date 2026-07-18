@@ -1,10 +1,31 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
 use anyhow::{Context, Result};
 
-pub use pact_vcs::{MergedWorkspace, MergeReport, SkippedWorkspace};
+pub use pact_vcs::{ArbiterResolver, MergedWorkspace, MergeReport, SkippedWorkspace};
+
+/// Configuration for the Arbiter fallback resolver -- the "verified" half
+/// of pact's conflict story (see the merge-all design notes): a one-shot
+/// headless agent proposes a resolution for a file the mechanical/semantic
+/// auto-resolution in `merge_all` couldn't handle, but that resolution is
+/// only ever accepted if `test_cmd` then passes in the same worktree.
+/// Entirely opt-in -- `Orchestrator::merge_all` with `arbiter: None` never
+/// spawns an extra agent or spends anything beyond what `spawn_many`
+/// already would.
+pub struct ArbiterConfig {
+    pub agent: AgentKind,
+    pub safety_override: Option<String>,
+    /// Shell command run (via `cmd /C` on Windows, `sh -c` elsewhere) in the
+    /// worktree after the agent finishes -- a non-zero exit means the
+    /// resolution is rejected and the merge falls back to a reported
+    /// conflict exactly as if Arbiter hadn't run. There is deliberately no
+    /// "skip verification if no test command is configured" path: a
+    /// resolution nothing verified isn't something `merge_all` will accept.
+    pub test_cmd: String,
+}
 
 /// Ties together workspace lifecycle (pact-vcs), dependency
 /// materialization (pact-deps), and agent launch (pact-agents)
@@ -414,15 +435,104 @@ impl Orchestrator {
     }
 
     /// Closes the loop from "N dirty workspaces" to "one clean integration
-    /// branch" -- see `pact_vcs::WorkspaceManager::merge_all`.
+    /// branch" -- see `pact_vcs::WorkspaceManager::merge_all`. `arbiter`, if
+    /// given, is wired in as pact-vcs's `ArbiterResolver` hook -- pact-vcs
+    /// itself has no dependency on `pact-agents`, so this is the one place
+    /// that bridges "a file mechanical/semantic resolution couldn't handle"
+    /// to "actually spawn an agent to look at it."
     pub fn merge_all(
         &self,
         ids: Option<&[String]>,
         target_branch: Option<&str>,
         union_globs: &[String],
+        arbiter: Option<&ArbiterConfig>,
         dry_run: bool,
     ) -> Result<MergeReport> {
-        self.workspaces.merge_all(ids, target_branch, union_globs, dry_run)
+        let resolver = |worktree_path: &Path, task_text: &str, files: &[String]| -> Vec<String> {
+            self.run_arbiter(arbiter.expect("resolver only invoked when arbiter is Some"), worktree_path, task_text, files)
+        };
+        let resolver_ref: Option<&ArbiterResolver<'_>> = if arbiter.is_some() { Some(&resolver) } else { None };
+        self.workspaces.merge_all(ids, target_branch, union_globs, resolver_ref, dry_run)
+    }
+
+    /// Invokes the Arbiter fallback for one workspace's still-unresolved
+    /// conflicted files: a one-shot headless agent is given the conflicting
+    /// file(s) (git's own `<<<<<<<`/`=======`/`>>>>>>>` markers still in
+    /// place) and the conflicting workspace's task text, asked to resolve
+    /// them in place. The result is accepted only if (a) no conflict
+    /// markers remain, (b) the files stage cleanly, and (c)
+    /// `config.test_cmd` then exits successfully in the same worktree --
+    /// any failure at any step returns an empty list, and the caller
+    /// (pact-vcs) aborts the whole merge attempt exactly as if this were
+    /// never called. Never partially accepted.
+    fn run_arbiter(&self, config: &ArbiterConfig, worktree_path: &Path, task_text: &str, files: &[String]) -> Vec<String> {
+        let prompt = build_arbiter_prompt(task_text, files);
+        let adapter = pact_agents::adapter(config.agent);
+        let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
+
+        let log_path = worktree_path.join(".pact-arbiter.jsonl");
+        let supervisor = Supervisor::new();
+        let outcome = pact_agents::run_and_stream(
+            &supervisor,
+            &program,
+            &args,
+            worktree_path,
+            &log_path,
+            |line| adapter.parse_line(line),
+            |_event| {},
+            |_pid| {},
+        );
+        let _ = std::fs::remove_file(&log_path);
+
+        match outcome {
+            Ok(run) if run.success => {}
+            Ok(run) => {
+                tracing::warn!("arbiter agent reported failure resolving {files:?}: {}", run.summary);
+                return Vec::new();
+            }
+            Err(err) => {
+                tracing::warn!("arbiter agent failed to run for {files:?}: {err:#}");
+                return Vec::new();
+            }
+        }
+
+        // The agent's own reported success isn't trusted on its own --
+        // conflict markers left behind mean it didn't actually finish, no
+        // matter what it said.
+        for file in files {
+            let Ok(content) = std::fs::read_to_string(worktree_path.join(file)) else {
+                tracing::warn!("arbiter: could not re-read {file} after the agent ran");
+                return Vec::new();
+            };
+            if content.contains("<<<<<<<") || content.contains("=======") || content.contains(">>>>>>>") {
+                tracing::warn!("arbiter left conflict markers in {file}, not accepting its resolution");
+                return Vec::new();
+            }
+        }
+
+        for file in files {
+            let add = Command::new("git").args(["add", "--", file]).current_dir(worktree_path).output();
+            if !matches!(add, Ok(ref o) if o.status.success()) {
+                tracing::warn!("arbiter: failed to stage {file} after resolution");
+                return Vec::new();
+            }
+        }
+
+        match run_shell(worktree_path, &config.test_cmd) {
+            Ok(true) => files.to_vec(),
+            Ok(false) => {
+                tracing::warn!(
+                    "arbiter's resolution for {files:?} failed the test command ('{}') -- not \
+                     accepting it",
+                    config.test_cmd
+                );
+                Vec::new()
+            }
+            Err(err) => {
+                tracing::warn!("failed to run the arbiter test command '{}': {err:#}", config.test_cmd);
+                Vec::new()
+            }
+        }
     }
 
     /// Reports files touched by more than one active workspace, among
@@ -501,6 +611,44 @@ impl Orchestrator {
     }
 }
 
+/// Builds the Arbiter agent's task text: the conflicting workspace's own
+/// task, the exact files it's being asked to edit (and nothing else), and
+/// an explicit instruction not to run `git` itself -- pact stages and
+/// verifies the result afterward, not the agent.
+fn build_arbiter_prompt(task_text: &str, files: &[String]) -> String {
+    format!(
+        "You are resolving a real git merge conflict left behind by pact's `merge-all`. \
+         The change being merged in came from this task:\n\n{task_text}\n\n\
+         It conflicts with work already merged from other agents. Git has left standard \
+         conflict markers (<<<<<<<, =======, >>>>>>>) in the following file(s), which is the \
+         directory you are working in right now: {}. \
+         Resolve every conflict marker in these files so the result reflects the intent of BOTH \
+         sides -- do not just pick one side and discard the other unless they are truly \
+         incompatible. Do not edit, create, or delete any file outside this list. Do not run any \
+         `git` command yourself -- pact stages and verifies your result afterward.",
+        files.join(", ")
+    )
+}
+
+/// Runs `cmd` as a shell command in `dir` (`cmd /C` on Windows, `sh -c`
+/// elsewhere), returning whether it exited successfully.
+fn run_shell(dir: &Path, cmd: &str) -> Result<bool> {
+    let mut command = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    let output = command
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("failed to spawn arbiter test command '{cmd}'"))?;
+    Ok(output.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +707,24 @@ mod tests {
         let tokens = extract_file_tokens("please update src/index.ts.");
         assert!(tokens.contains("src/index.ts"));
         assert!(!tokens.contains("src/index.ts."));
+    }
+
+    #[test]
+    fn build_arbiter_prompt_includes_task_and_files_and_forbids_git() {
+        let prompt = build_arbiter_prompt(
+            "add chunk.ts export",
+            &["src/index.ts".to_string(), "package.json".to_string()],
+        );
+        assert!(prompt.contains("add chunk.ts export"));
+        assert!(prompt.contains("src/index.ts"));
+        assert!(prompt.contains("package.json"));
+        assert!(prompt.contains("Do not run any `git` command"));
+    }
+
+    #[test]
+    fn run_shell_reports_success_and_failure() {
+        let dir = std::env::temp_dir();
+        assert!(run_shell(&dir, if cfg!(windows) { "exit 0" } else { "true" }).unwrap());
+        assert!(!run_shell(&dir, if cfg!(windows) { "exit 1" } else { "false" }).unwrap());
     }
 }

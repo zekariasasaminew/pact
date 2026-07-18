@@ -133,7 +133,7 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, false).unwrap();
 
     let merged_ids: Vec<&str> = report.merged.iter().map(|w| w.id.as_str()).collect();
     assert!(merged_ids.contains(&a.id.as_str()), "expected {} (well-separated append) to always merge cleanly", a.id);
@@ -213,7 +213,7 @@ fn merge_all_dry_run_touches_no_git_state() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], true).unwrap();
+    let report = manager.merge_all(None, None, &[], None, true).unwrap();
 
     assert!(report.dry_run);
     assert!(report.merged.is_empty(), "dry run must not actually merge anything");
@@ -245,7 +245,7 @@ fn merge_all_skips_workspace_whose_base_is_no_longer_an_ancestor() {
     // second, unrelated repo.
     run_git(&repo, &["commit", "--amend", "-q", "--allow-empty", "-m", "init (amended)"]);
 
-    let report = manager.merge_all(None, None, &[], false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, false).unwrap();
 
     assert!(report.merged.is_empty(), "workspace with a moved base must not be merged");
     assert_eq!(report.skipped.len(), 1);
@@ -282,7 +282,7 @@ fn merge_all_auto_resolves_package_json_dependency_conflict() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, false).unwrap();
 
     assert_eq!(report.skipped.len(), 0, "expected both to merge via JSON-aware auto-resolution, got skipped={:?}", report.skipped);
     assert_eq!(report.merged.len(), 2);
@@ -319,7 +319,7 @@ fn merge_all_union_resolves_matched_file_conflict() {
     std::fs::write(b.path.join("src/barrel.ts"), "export {};\nexport * from './omit';\n").unwrap();
 
     let report = manager
-        .merge_all(None, None, &["src/barrel.ts".to_string()], false)
+        .merge_all(None, None, &["src/barrel.ts".to_string()], None, false)
         .unwrap();
 
     assert_eq!(report.skipped.len(), 0, "expected both to merge via --union, got skipped={:?}", report.skipped);
@@ -361,12 +361,102 @@ fn merge_all_never_auto_resolves_lockfiles_even_with_matching_union_glob() {
     // Even with an explicit --union match on the lockfile, NEVER_AUTO_RESOLVE
     // must win -- a real conflict here always stays a real conflict.
     let report = manager
-        .merge_all(None, None, &["package-lock.json".to_string()], false)
+        .merge_all(None, None, &["package-lock.json".to_string()], None, false)
         .unwrap();
 
     assert_eq!(report.merged.len(), 1, "expected exactly one of the two to merge cleanly");
     assert_eq!(report.skipped.len(), 1, "expected the other to stay a real, unresolved conflict");
     assert!(report.skipped[0].reason.contains("merge conflict"));
+
+    cleanup(&repo);
+}
+
+#[test]
+fn merge_all_accepts_a_stub_arbiter_resolution() {
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let c = manager.create_workspace("bump L1 to 100").unwrap();
+    std::fs::write(
+        c.path.join("src/index.ts"),
+        "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
+         export const L4 = 4;\nexport const L5 = 5;\n",
+    )
+    .unwrap();
+    let d = manager.create_workspace("bump L1 to 200").unwrap();
+    std::fs::write(
+        d.path.join("src/index.ts"),
+        "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\
+         export const L4 = 4;\nexport const L5 = 5;\n",
+    )
+    .unwrap();
+
+    // Stands in for pact-core's real Arbiter closure (which would spawn an
+    // agent and run a test command) -- proves the wiring end to end
+    // (unresolved files reach the closure, its resolution gets staged and
+    // committed, `arbiter_resolved` is reported) without spawning a real,
+    // billed agent.
+    let resolver = |worktree_path: &Path, _task_text: &str, files: &[String]| -> Vec<String> {
+        for file in files {
+            std::fs::write(
+                worktree_path.join(file),
+                "export const L1 = 999;\nexport const L2 = 2;\nexport const L3 = 3;\n\
+                 export const L4 = 4;\nexport const L5 = 5;\n",
+            )
+            .unwrap();
+            let add = Command::new("git").args(["add", "--", file]).current_dir(worktree_path).output();
+            assert!(matches!(add, Ok(o) if o.status.success()));
+        }
+        files.to_vec()
+    };
+
+    let report = manager.merge_all(None, None, &[], Some(&resolver), false).unwrap();
+
+    assert_eq!(report.skipped.len(), 0, "expected the stub arbiter to resolve the conflict, got skipped={:?}", report.skipped);
+    assert_eq!(report.merged.len(), 2);
+    let arbiter_resolved_count = report
+        .merged
+        .iter()
+        .filter(|w| w.arbiter_resolved.iter().any(|f| f == "src/index.ts"))
+        .count();
+    assert_eq!(arbiter_resolved_count, 1, "expected exactly one merge to have needed the arbiter");
+
+    let content = show(&repo, &format!("{}:src/index.ts", report.target_branch));
+    assert!(content.contains("export const L1 = 999;"));
+
+    cleanup(&repo);
+}
+
+#[test]
+fn merge_all_still_aborts_when_arbiter_declines() {
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let c = manager.create_workspace("bump L1 to 100").unwrap();
+    std::fs::write(
+        c.path.join("src/index.ts"),
+        "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
+         export const L4 = 4;\nexport const L5 = 5;\n",
+    )
+    .unwrap();
+    let d = manager.create_workspace("bump L1 to 200").unwrap();
+    std::fs::write(
+        d.path.join("src/index.ts"),
+        "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\
+         export const L4 = 4;\nexport const L5 = 5;\n",
+    )
+    .unwrap();
+
+    // A "verification failed" stub -- e.g. its test command didn't pass --
+    // always declines regardless of input. The merge must still be aborted
+    // and reported as a real conflict, exactly as if Arbiter weren't
+    // configured at all.
+    let resolver = |_worktree_path: &Path, _task_text: &str, _files: &[String]| -> Vec<String> { Vec::new() };
+
+    let report = manager.merge_all(None, None, &[], Some(&resolver), false).unwrap();
+
+    assert_eq!(report.merged.len(), 1, "expected exactly one of the two to merge cleanly");
+    assert_eq!(report.skipped.len(), 1, "expected the other to stay a real conflict when arbiter declines");
 
     cleanup(&repo);
 }

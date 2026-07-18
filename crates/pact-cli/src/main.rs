@@ -137,6 +137,27 @@ enum Command {
         /// no flag needed, and lockfiles are never auto-resolved.
         #[arg(long = "union")]
         union: Vec<String>,
+
+        /// Enables the Arbiter fallback: for any file mechanical/semantic
+        /// resolution still can't handle, a one-shot agent proposes a fix,
+        /// accepted only if this command then exits successfully in the
+        /// same worktree (e.g. "npm test", "cargo test"). Presence of this
+        /// flag is what turns Arbiter on at all -- omit it and merge-all
+        /// behaves exactly as before, no extra agent ever spawned or
+        /// billed.
+        #[arg(long = "test-cmd")]
+        test_cmd: Option<String>,
+
+        /// Which agent CLI Arbiter should use. Ignored unless --test-cmd
+        /// is set.
+        #[arg(long = "arbiter-agent", default_value = "claude")]
+        arbiter_agent: String,
+
+        /// Same raw safety/approval override as `spawn --safety`, applied
+        /// to the Arbiter agent specifically. Ignored unless --test-cmd is
+        /// set.
+        #[arg(long = "arbiter-safety")]
+        arbiter_safety: Option<String>,
     },
     /// Tear down an agent workspace
     Teardown {
@@ -397,9 +418,24 @@ fn main() -> Result<()> {
             let conflicts = orchestrator.detect_conflicts()?;
             print_conflicts(&conflicts);
         }
-        Command::MergeAll { ids, into, dry_run, union } => {
+        Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
-            let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), &union, dry_run)?;
+            let arbiter = match test_cmd {
+                Some(test_cmd) => {
+                    let agent = AgentKind::parse(&arbiter_agent).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, or gemini)"
+                        )
+                    })?;
+                    Some(pact_core::ArbiterConfig {
+                        agent,
+                        safety_override: arbiter_safety,
+                        test_cmd,
+                    })
+                }
+                None => None,
+            };
+            let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), &union, arbiter.as_ref(), dry_run)?;
             print_merge_report(&report);
             if !report.skipped.is_empty() {
                 std::process::exit(1);
@@ -456,6 +492,9 @@ fn print_merge_report(report: &MergeReport) {
             println!("  merged  {} ({})", workspace.id, workspace.branch);
             if !workspace.auto_resolved.is_empty() {
                 println!("          auto-resolved: {}", workspace.auto_resolved.join(", "));
+            }
+            if !workspace.arbiter_resolved.is_empty() {
+                println!("          arbiter-resolved (agent + tests verified): {}", workspace.arbiter_resolved.join(", "));
             }
         }
     }

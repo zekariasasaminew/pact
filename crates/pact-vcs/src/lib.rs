@@ -81,6 +81,13 @@ pub struct MergedWorkspace {
     /// kind of thing a user should be able to double-check. Empty for a
     /// workspace that merged with no conflicts at all.
     pub auto_resolved: Vec<String>,
+    /// Files resolved by the Arbiter fallback (an agent's proposed
+    /// resolution, accepted only after the caller's test command passed in
+    /// the same worktree) -- kept separate from `auto_resolved` since this
+    /// carries a meaningfully different trust level: a verified AI-proposed
+    /// resolution, not a deterministic rule. Always empty unless Arbiter
+    /// was configured for this run.
+    pub arbiter_resolved: Vec<String>,
 }
 
 /// One workspace `merge_all` left out, and why -- either a real merge
@@ -116,9 +123,29 @@ pub struct MergeReport {
 }
 
 enum MergeOutcome {
-    Merged { auto_resolved: Vec<String> },
-    Conflict { files: Vec<String> },
+    Merged {
+        auto_resolved: Vec<String>,
+        arbiter_resolved: Vec<String>,
+    },
+    Conflict {
+        files: Vec<String>,
+    },
 }
+
+/// A hook `merge_all`'s caller can supply to attempt further resolution of
+/// files the mechanical/semantic auto-resolution (`try_auto_resolve`)
+/// couldn't handle -- see "Arbiter" in the design notes. Deliberately a
+/// plain closure, not a concrete type: `pact-vcs` has no dependency on
+/// `pact-agents` and shouldn't need one just to leave a slot for "maybe
+/// spawn an AI agent here" -- the caller (pact-core, which does depend on
+/// pact-agents) builds the actual agent-invoking closure and is entirely
+/// responsible for what "resolved" means, including any verification (e.g.
+/// running a test command) before it reports a file as resolved. Given
+/// `(worktree_path, the workspace's task text, the still-unresolved
+/// conflicted files)`, returns exactly the subset it resolved and staged
+/// (`git add`) itself; pact-vcs treats anything not in that list as still
+/// conflicted and aborts the merge exactly as if this hook didn't exist.
+pub type ArbiterResolver<'a> = dyn Fn(&Path, &str, &[String]) -> Vec<String> + 'a;
 
 /// package.json's dependency-ish top-level keys -- the only part of the
 /// file `try_resolve_package_json` will touch. A conflict anywhere else in
@@ -607,6 +634,7 @@ impl WorkspaceManager {
         ids: Option<&[String]>,
         target_branch: Option<&str>,
         union_globs: &[String],
+        arbiter: Option<&ArbiterResolver<'_>>,
         dry_run: bool,
     ) -> Result<MergeReport> {
         let mut selected: Vec<Workspace> = match ids {
@@ -720,11 +748,12 @@ impl WorkspaceManager {
 
         let mut merged = Vec::new();
         for (_, workspace) in sized {
-            match self.merge_branch_into(&integration_path, &workspace.branch, union_globs)? {
-                MergeOutcome::Merged { auto_resolved } => merged.push(MergedWorkspace {
+            match self.merge_branch_into(&integration_path, &workspace.branch, union_globs, arbiter, &workspace.task)? {
+                MergeOutcome::Merged { auto_resolved, arbiter_resolved } => merged.push(MergedWorkspace {
                     id: workspace.id,
                     branch: workspace.branch,
                     auto_resolved,
+                    arbiter_resolved,
                 }),
                 MergeOutcome::Conflict { files } => skipped.push(SkippedWorkspace {
                     id: workspace.id,
@@ -783,6 +812,8 @@ impl WorkspaceManager {
         worktree_path: &Path,
         branch: &str,
         union_globs: &[String],
+        arbiter: Option<&ArbiterResolver<'_>>,
+        task_text: &str,
     ) -> Result<MergeOutcome> {
         let output = Command::new("git")
             .args(["merge", "--no-edit", branch])
@@ -790,7 +821,7 @@ impl WorkspaceManager {
             .output()
             .with_context(|| format!("failed to spawn `git merge {branch}`"))?;
         if output.status.success() {
-            return Ok(MergeOutcome::Merged { auto_resolved: Vec::new() });
+            return Ok(MergeOutcome::Merged { auto_resolved: Vec::new(), arbiter_resolved: Vec::new() });
         }
 
         let status = self.dirty_status(worktree_path)?;
@@ -834,6 +865,20 @@ impl WorkspaceManager {
             }
         }
 
+        // Anything the mechanical/semantic rules above couldn't handle gets
+        // one more shot from the caller-supplied Arbiter hook, if any --
+        // see `ArbiterResolver`'s doc comment for why pact-vcs trusts its
+        // return value outright (verification, if any, already happened
+        // inside the closure).
+        let mut arbiter_resolved = Vec::new();
+        if !unresolved.is_empty() {
+            if let Some(resolve) = arbiter {
+                let resolved_by_arbiter = resolve(worktree_path, task_text, &unresolved);
+                unresolved.retain(|file| !resolved_by_arbiter.contains(file));
+                arbiter_resolved = resolved_by_arbiter;
+            }
+        }
+
         if unresolved.is_empty() {
             let commit = Command::new("git")
                 .args(["commit", "--no-edit"])
@@ -841,7 +886,7 @@ impl WorkspaceManager {
                 .output()
                 .context("failed to spawn `git commit` after auto-resolving a merge")?;
             if commit.status.success() {
-                return Ok(MergeOutcome::Merged { auto_resolved });
+                return Ok(MergeOutcome::Merged { auto_resolved, arbiter_resolved });
             }
             tracing::warn!(
                 "auto-resolved every conflicted file for branch '{branch}' but `git commit` \
