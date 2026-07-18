@@ -74,6 +74,13 @@ pub struct WorkspaceChanges {
 pub struct MergedWorkspace {
     pub id: String,
     pub branch: String,
+    /// Files that had a real merge conflict but were resolved automatically
+    /// (package.json dependency-block merge, or a `--union` match) rather
+    /// than by git's plain 3-way merge -- surfaced explicitly rather than
+    /// folded silently into "merged", since auto-resolution is exactly the
+    /// kind of thing a user should be able to double-check. Empty for a
+    /// workspace that merged with no conflicts at all.
+    pub auto_resolved: Vec<String>,
 }
 
 /// One workspace `merge_all` left out, and why -- either a real merge
@@ -109,9 +116,37 @@ pub struct MergeReport {
 }
 
 enum MergeOutcome {
-    Merged,
+    Merged { auto_resolved: Vec<String> },
     Conflict { files: Vec<String> },
 }
+
+/// package.json's dependency-ish top-level keys -- the only part of the
+/// file `try_resolve_package_json` will touch. A conflict anywhere else in
+/// the file (scripts, version, name, ...) is left as a real conflict, same
+/// as before this existed.
+const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+];
+
+/// Basenames pact never attempts to auto-resolve, even under `--union` --
+/// generated files with integrity hashes or resolved dependency graphs,
+/// where a naive line-level merge is very likely to silently produce a
+/// corrupt result. A real conflict here always stays a real conflict for a
+/// human (or a regenerate step) to handle.
+const NEVER_AUTO_RESOLVE: &[&str] = &[
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "Gemfile.lock",
+    "poetry.lock",
+    "composer.lock",
+    "Pipfile.lock",
+    "go.sum",
+];
 
 /// Owns the lifecycle of git-worktree-backed agent workspaces for one repo.
 /// State (locks, worktree metadata, and the worktrees themselves) lives as a
@@ -571,6 +606,7 @@ impl WorkspaceManager {
         &self,
         ids: Option<&[String]>,
         target_branch: Option<&str>,
+        union_globs: &[String],
         dry_run: bool,
     ) -> Result<MergeReport> {
         let mut selected: Vec<Workspace> = match ids {
@@ -684,10 +720,11 @@ impl WorkspaceManager {
 
         let mut merged = Vec::new();
         for (_, workspace) in sized {
-            match self.merge_branch_into(&integration_path, &workspace.branch)? {
-                MergeOutcome::Merged => merged.push(MergedWorkspace {
+            match self.merge_branch_into(&integration_path, &workspace.branch, union_globs)? {
+                MergeOutcome::Merged { auto_resolved } => merged.push(MergedWorkspace {
                     id: workspace.id,
                     branch: workspace.branch,
+                    auto_resolved,
                 }),
                 MergeOutcome::Conflict { files } => skipped.push(SkippedWorkspace {
                     id: workspace.id,
@@ -733,24 +770,36 @@ impl WorkspaceManager {
 
     /// Merges `branch` into whatever's checked out in `worktree_path`
     /// (always the throwaway integration worktree, never the repo's own
-    /// checkout). On conflict, aborts the in-progress merge before
-    /// returning so the worktree is clean for the *next* workspace's merge
-    /// attempt -- one conflicted workspace must not poison the rest of the
-    /// batch.
-    fn merge_branch_into(&self, worktree_path: &Path, branch: &str) -> Result<MergeOutcome> {
+    /// checkout). On a real conflict, tries the semantic-narrow
+    /// auto-resolution rules (`try_auto_resolve`) on each conflicted file
+    /// before giving up: if *every* conflicted file resolves, the merge is
+    /// completed with a commit instead of aborted. If any file is left
+    /// over, the whole merge is aborted (so the worktree is clean for the
+    /// *next* workspace's attempt -- one conflicted workspace must not
+    /// poison the rest of the batch) and reported as a real conflict, same
+    /// as before this existed.
+    fn merge_branch_into(
+        &self,
+        worktree_path: &Path,
+        branch: &str,
+        union_globs: &[String],
+    ) -> Result<MergeOutcome> {
         let output = Command::new("git")
             .args(["merge", "--no-edit", branch])
             .current_dir(worktree_path)
             .output()
             .with_context(|| format!("failed to spawn `git merge {branch}`"))?;
         if output.status.success() {
-            return Ok(MergeOutcome::Merged);
+            return Ok(MergeOutcome::Merged { auto_resolved: Vec::new() });
         }
 
         let status = self.dirty_status(worktree_path)?;
-        let files: Vec<String> = status
+        let conflicted_files: Vec<String> = status
             .lines()
             .filter(|line| {
+                // Unmerged-path porcelain codes -- the ones `git merge`
+                // actually leaves behind on conflict, as opposed to e.g. a
+                // plain modified/added entry.
                 matches!(
                     line.get(0..2),
                     Some("UU") | Some("AA") | Some("DD") | Some("AU") | Some("UA") | Some("UD") | Some("DU")
@@ -759,6 +808,54 @@ impl WorkspaceManager {
             .filter_map(parse_porcelain_path)
             .collect();
 
+        if conflicted_files.is_empty() {
+            // `git merge` failed but left no unmerged paths -- not a
+            // content conflict (e.g. a dirty-worktree refusal), nothing for
+            // auto-resolution to work with.
+            self.abort_merge(worktree_path, branch);
+            return Ok(MergeOutcome::Conflict {
+                files: vec![String::from_utf8_lossy(&output.stderr).trim().to_string()],
+            });
+        }
+
+        let mut unresolved = Vec::new();
+        let mut auto_resolved = Vec::new();
+        for file in &conflicted_files {
+            match self.try_auto_resolve(worktree_path, file, union_globs) {
+                Ok(true) => auto_resolved.push(file.clone()),
+                Ok(false) => unresolved.push(file.clone()),
+                Err(err) => {
+                    tracing::warn!(
+                        "auto-resolve attempt on '{file}' (branch '{branch}') failed, leaving it \
+                         conflicted: {err:#}"
+                    );
+                    unresolved.push(file.clone());
+                }
+            }
+        }
+
+        if unresolved.is_empty() {
+            let commit = Command::new("git")
+                .args(["commit", "--no-edit"])
+                .current_dir(worktree_path)
+                .output()
+                .context("failed to spawn `git commit` after auto-resolving a merge")?;
+            if commit.status.success() {
+                return Ok(MergeOutcome::Merged { auto_resolved });
+            }
+            tracing::warn!(
+                "auto-resolved every conflicted file for branch '{branch}' but `git commit` \
+                 still failed -- treating as a genuine conflict instead: {}",
+                String::from_utf8_lossy(&commit.stderr)
+            );
+            unresolved = conflicted_files;
+        }
+
+        self.abort_merge(worktree_path, branch);
+        Ok(MergeOutcome::Conflict { files: unresolved })
+    }
+
+    fn abort_merge(&self, worktree_path: &Path, branch: &str) {
         let abort = Command::new("git")
             .args(["merge", "--abort"])
             .current_dir(worktree_path)
@@ -772,15 +869,209 @@ impl WorkspaceManager {
                 );
             }
         }
-
-        Ok(MergeOutcome::Conflict {
-            files: if files.is_empty() {
-                vec![String::from_utf8_lossy(&output.stderr).trim().to_string()]
-            } else {
-                files
-            },
-        })
     }
+
+    /// Tries to auto-resolve one conflicted file during a merge, using the
+    /// semantic-narrow rules `merge_all` is built around: never touch a
+    /// generated/structural file (`NEVER_AUTO_RESOLVE`); JSON-aware merge
+    /// for `package.json`'s dependency blocks; a plain line-union merge for
+    /// anything matching a caller-supplied `--union` glob (nothing is
+    /// union-merged unless the caller explicitly named it -- pact does not
+    /// guess which files are safe to blindly concatenate). Returns `true`
+    /// and stages the file (`git add`) if it resolved, `false` (file left
+    /// untouched, still conflicted) otherwise.
+    fn try_auto_resolve(&self, worktree_path: &Path, file: &str, union_globs: &[String]) -> Result<bool> {
+        if is_never_auto_resolve(file) {
+            return Ok(false);
+        }
+
+        let resolved = if is_package_json(file) {
+            self.try_resolve_package_json(worktree_path, file)?
+        } else if union_globs.iter().any(|pattern| glob_matches(pattern, file)) {
+            self.try_resolve_union(worktree_path, file)?
+        } else {
+            None
+        };
+
+        let Some(content) = resolved else {
+            return Ok(false);
+        };
+
+        std::fs::write(worktree_path.join(file), content)
+            .with_context(|| format!("writing auto-resolved content for {file}"))?;
+        let add = Command::new("git")
+            .args(["add", "--", file])
+            .current_dir(worktree_path)
+            .output()
+            .with_context(|| format!("failed to spawn `git add` for auto-resolved {file}"))?;
+        Ok(add.status.success())
+    }
+
+    /// Reads one side of a conflicted file from git's index -- stage 1 is
+    /// the common ancestor, 2 is "ours" (the integration branch, before
+    /// this merge), 3 is "theirs" (the branch being merged in). Returns
+    /// `Ok(None)` if that stage doesn't exist for this path (e.g. the file
+    /// was added fresh on only one side), which callers treat as "don't
+    /// understand this shape well enough to auto-resolve" rather than an
+    /// error.
+    fn read_conflict_stage(&self, worktree_path: &Path, file: &str, stage: u8) -> Result<Option<String>> {
+        let output = Command::new("git")
+            .args(["show", &format!(":{stage}:{file}")])
+            .current_dir(worktree_path)
+            .output()
+            .context("failed to spawn `git show` for a conflicted file's stage")?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+    }
+
+    /// JSON-aware merge of `package.json`'s dependency blocks
+    /// (`PACKAGE_JSON_DEP_KEYS`) -- far and away the most common real
+    /// conflict from parallel agents (two agents both adding a package). A
+    /// dependency name added or changed on exactly one side is taken as-is;
+    /// changed to the *same* value on both sides is fine; changed to
+    /// *different* values on both sides is a real conflict this does not
+    /// try to guess at -- returns `Ok(None)` for the whole file in that
+    /// case, same as if anything *outside* the dependency keys differs
+    /// between the two sides. This only ever resolves the dependency-block
+    /// class of conflict; nothing else in the file is touched.
+    fn try_resolve_package_json(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
+        let (Some(base), Some(ours), Some(theirs)) = (
+            self.read_conflict_stage(worktree_path, file, 1)?,
+            self.read_conflict_stage(worktree_path, file, 2)?,
+            self.read_conflict_stage(worktree_path, file, 3)?,
+        ) else {
+            return Ok(None);
+        };
+
+        let (Ok(base), Ok(ours_value), Ok(theirs_value)) = (
+            serde_json::from_str::<serde_json::Value>(&base),
+            serde_json::from_str::<serde_json::Value>(&ours),
+            serde_json::from_str::<serde_json::Value>(&theirs),
+        ) else {
+            return Ok(None);
+        };
+
+        // Anything outside the dependency keys must be identical between
+        // ours and theirs, or this resolver doesn't understand the
+        // conflict well enough to touch it.
+        let mut ours_stripped = ours_value.clone();
+        let mut theirs_stripped = theirs_value.clone();
+        if let (Some(o), Some(t)) = (ours_stripped.as_object_mut(), theirs_stripped.as_object_mut()) {
+            for key in PACKAGE_JSON_DEP_KEYS {
+                o.remove(*key);
+                t.remove(*key);
+            }
+        }
+        if ours_stripped != theirs_stripped {
+            return Ok(None);
+        }
+
+        let Some(mut merged_obj) = ours_value.as_object().cloned() else {
+            return Ok(None);
+        };
+
+        for key in PACKAGE_JSON_DEP_KEYS {
+            let base_block = base.get(*key).and_then(|v| v.as_object());
+            let ours_block = ours_value.get(*key).and_then(|v| v.as_object());
+            let theirs_block = theirs_value.get(*key).and_then(|v| v.as_object());
+            if base_block.is_none() && ours_block.is_none() && theirs_block.is_none() {
+                continue;
+            }
+
+            let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            if let Some(m) = ours_block {
+                names.extend(m.keys().cloned());
+            }
+            if let Some(m) = theirs_block {
+                names.extend(m.keys().cloned());
+            }
+
+            let mut merged_block = serde_json::Map::new();
+            for name in names {
+                let base_v = base_block.and_then(|m| m.get(&name));
+                let ours_v = ours_block.and_then(|m| m.get(&name));
+                let theirs_v = theirs_block.and_then(|m| m.get(&name));
+                let resolved = match (ours_v, theirs_v) {
+                    (Some(o), Some(t)) if o == t => o.clone(),
+                    (Some(o), Some(t)) => {
+                        if base_v == Some(o) {
+                            t.clone() // only theirs changed this dependency
+                        } else if base_v == Some(t) {
+                            o.clone() // only ours changed this dependency
+                        } else {
+                            return Ok(None); // both changed it, differently
+                        }
+                    }
+                    (Some(o), None) => o.clone(),
+                    (None, Some(t)) => t.clone(),
+                    (None, None) => unreachable!("name came from ours_block or theirs_block"),
+                };
+                merged_block.insert(name, resolved);
+            }
+            merged_obj.insert(key.to_string(), serde_json::Value::Object(merged_block));
+        }
+
+        let merged_value = serde_json::Value::Object(merged_obj);
+        Ok(Some(serde_json::to_string_pretty(&merged_value)? + "\n"))
+    }
+
+    /// Plain line-union merge for a `--union`-matched file: the result is
+    /// "ours" lines, in order, followed by any of "theirs" lines not
+    /// already present verbatim -- the same semantics as git's own
+    /// `merge=union` attribute driver, just applied here in Rust rather
+    /// than by mutating the repo's shared (cross-worktree)
+    /// `.gitattributes`/config to register a driver. Appropriate only for
+    /// genuinely order-independent, append-only content (barrel exports,
+    /// changelog entries): the caller's own `--union <glob>` is what scopes
+    /// this, pact does not try to guess which files qualify.
+    fn try_resolve_union(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
+        let (Some(ours), Some(theirs)) = (
+            self.read_conflict_stage(worktree_path, file, 2)?,
+            self.read_conflict_stage(worktree_path, file, 3)?,
+        ) else {
+            return Ok(None);
+        };
+
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut merged_lines: Vec<&str> = Vec::new();
+        for line in ours.lines() {
+            if seen.insert(line) {
+                merged_lines.push(line);
+            }
+        }
+        for line in theirs.lines() {
+            if seen.insert(line) {
+                merged_lines.push(line);
+            }
+        }
+
+        let mut result = merged_lines.join("\n");
+        result.push('\n');
+        Ok(Some(result))
+    }
+}
+
+fn is_never_auto_resolve(path: &str) -> bool {
+    let basename = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+    NEVER_AUTO_RESOLVE.contains(&basename)
+}
+
+fn is_package_json(path: &str) -> bool {
+    Path::new(path).file_name().and_then(|n| n.to_str()) == Some("package.json")
+}
+
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    globset::GlobBuilder::new(pattern)
+        .literal_separator(false)
+        .build()
+        .ok()
+        .map(|g| g.compile_matcher().is_match(path))
+        .unwrap_or(false)
 }
 
 /// Builds a commit subject (and, for multi-line/long task text, a body) from

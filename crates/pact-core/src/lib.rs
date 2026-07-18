@@ -348,9 +348,10 @@ impl Orchestrator {
         &self,
         ids: Option<&[String]>,
         target_branch: Option<&str>,
+        union_globs: &[String],
         dry_run: bool,
     ) -> Result<MergeReport> {
-        self.workspaces.merge_all(ids, target_branch, dry_run)
+        self.workspaces.merge_all(ids, target_branch, union_globs, dry_run)
     }
 
     /// Reports files touched by more than one active workspace, among

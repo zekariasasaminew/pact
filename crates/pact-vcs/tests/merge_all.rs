@@ -49,6 +49,49 @@ fn cleanup(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Same base as `init_repo`, plus `package.json` (one existing dependency)
+/// and a stand-in `package-lock.json` -- used by the semantic-resolution
+/// tests below.
+fn init_repo_with_package_json() -> PathBuf {
+    let root = init_repo();
+    std::fs::write(
+        root.join("package.json"),
+        "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"a\": \"1.0.0\"\n  }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package-lock.json"),
+        "{\n  \"lockfileVersion\": 1\n}\n",
+    )
+    .unwrap();
+    run_git(&root, &["add", "-A"]);
+    run_git(&root, &["commit", "-q", "-m", "add package.json"]);
+    root
+}
+
+/// Same base as `init_repo`, plus a single-line `src/barrel.ts` -- kept
+/// deliberately tiny (no surrounding context) so two independent appends to
+/// it reliably produce a real git conflict, confirmed by hand first (see
+/// the file-level doc comment on the main conflict test) -- used by the
+/// `--union` test.
+fn init_repo_with_barrel() -> PathBuf {
+    let root = init_repo();
+    std::fs::write(root.join("src/barrel.ts"), "export {};\n").unwrap();
+    run_git(&root, &["add", "-A"]);
+    run_git(&root, &["commit", "-q", "-m", "add barrel"]);
+    root
+}
+
+fn show(repo: &Path, spec: &str) -> String {
+    let output = Command::new("git")
+        .args(["show", spec])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git show {spec} failed: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).unwrap()
+}
+
 #[test]
 fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     let repo = init_repo();
@@ -90,7 +133,7 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], false).unwrap();
 
     let merged_ids: Vec<&str> = report.merged.iter().map(|w| w.id.as_str()).collect();
     assert!(merged_ids.contains(&a.id.as_str()), "expected {} (well-separated append) to always merge cleanly", a.id);
@@ -170,7 +213,7 @@ fn merge_all_dry_run_touches_no_git_state() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, true).unwrap();
+    let report = manager.merge_all(None, None, &[], true).unwrap();
 
     assert!(report.dry_run);
     assert!(report.merged.is_empty(), "dry run must not actually merge anything");
@@ -202,7 +245,7 @@ fn merge_all_skips_workspace_whose_base_is_no_longer_an_ancestor() {
     // second, unrelated repo.
     run_git(&repo, &["commit", "--amend", "-q", "--allow-empty", "-m", "init (amended)"]);
 
-    let report = manager.merge_all(None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], false).unwrap();
 
     assert!(report.merged.is_empty(), "workspace with a moved base must not be merged");
     assert_eq!(report.skipped.len(), 1);
@@ -212,6 +255,118 @@ fn merge_all_skips_workspace_whose_base_is_no_longer_an_ancestor() {
         "expected a moving-base reason, got: {}",
         report.skipped[0].reason
     );
+
+    cleanup(&repo);
+}
+
+#[test]
+fn merge_all_auto_resolves_package_json_dependency_conflict() {
+    let repo = init_repo_with_package_json();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    // Both workspaces add a *different* new dependency next to the same
+    // existing one -- confirmed by hand against real git first: this is a
+    // genuine conflict (single existing entry gives git no unambiguous
+    // insertion point), not something a plain merge resolves on its own.
+    let a = manager.create_workspace("add dep b").unwrap();
+    std::fs::write(
+        a.path.join("package.json"),
+        "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"a\": \"1.0.0\",\n    \"b\": \"2.0.0\"\n  }\n}\n",
+    )
+    .unwrap();
+
+    let b = manager.create_workspace("add dep c").unwrap();
+    std::fs::write(
+        b.path.join("package.json"),
+        "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"a\": \"1.0.0\",\n    \"c\": \"3.0.0\"\n  }\n}\n",
+    )
+    .unwrap();
+
+    let report = manager.merge_all(None, None, &[], false).unwrap();
+
+    assert_eq!(report.skipped.len(), 0, "expected both to merge via JSON-aware auto-resolution, got skipped={:?}", report.skipped);
+    assert_eq!(report.merged.len(), 2);
+
+    // One of the two merges is a plain clean merge (whichever lands first
+    // on an untouched package.json); the other must go through -- and
+    // report -- the JSON-aware resolver.
+    let auto_resolved_count = report
+        .merged
+        .iter()
+        .filter(|w| w.auto_resolved.iter().any(|f| f == "package.json"))
+        .count();
+    assert_eq!(auto_resolved_count, 1, "expected exactly one merge to need package.json auto-resolution");
+
+    let content = show(&repo, &format!("{}:package.json", report.target_branch));
+    let value: serde_json::Value = serde_json::from_str(&content).expect("merged package.json must be valid JSON");
+    let deps = value.get("dependencies").and_then(|d| d.as_object()).expect("dependencies object");
+    assert_eq!(deps.get("a").and_then(|v| v.as_str()), Some("1.0.0"));
+    assert_eq!(deps.get("b").and_then(|v| v.as_str()), Some("2.0.0"));
+    assert_eq!(deps.get("c").and_then(|v| v.as_str()), Some("3.0.0"));
+
+    cleanup(&repo);
+}
+
+#[test]
+fn merge_all_union_resolves_matched_file_conflict() {
+    let repo = init_repo_with_barrel();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("export chunk").unwrap();
+    std::fs::write(a.path.join("src/barrel.ts"), "export {};\nexport * from './chunk';\n").unwrap();
+
+    let b = manager.create_workspace("export omit").unwrap();
+    std::fs::write(b.path.join("src/barrel.ts"), "export {};\nexport * from './omit';\n").unwrap();
+
+    let report = manager
+        .merge_all(None, None, &["src/barrel.ts".to_string()], false)
+        .unwrap();
+
+    assert_eq!(report.skipped.len(), 0, "expected both to merge via --union, got skipped={:?}", report.skipped);
+    assert_eq!(report.merged.len(), 2);
+
+    let auto_resolved_count = report
+        .merged
+        .iter()
+        .filter(|w| w.auto_resolved.iter().any(|f| f == "src/barrel.ts"))
+        .count();
+    assert_eq!(auto_resolved_count, 1, "expected exactly one merge to need the union resolver");
+
+    let content = show(&repo, &format!("{}:src/barrel.ts", report.target_branch));
+    assert!(content.contains("export * from './chunk';"));
+    assert!(content.contains("export * from './omit';"));
+
+    cleanup(&repo);
+}
+
+#[test]
+fn merge_all_never_auto_resolves_lockfiles_even_with_matching_union_glob() {
+    let repo = init_repo_with_package_json();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("touch lockfile a").unwrap();
+    std::fs::write(
+        a.path.join("package-lock.json"),
+        "{\n  \"lockfileVersion\": 1,\n  \"a\": true\n}\n",
+    )
+    .unwrap();
+
+    let b = manager.create_workspace("touch lockfile b").unwrap();
+    std::fs::write(
+        b.path.join("package-lock.json"),
+        "{\n  \"lockfileVersion\": 1,\n  \"b\": true\n}\n",
+    )
+    .unwrap();
+
+    // Even with an explicit --union match on the lockfile, NEVER_AUTO_RESOLVE
+    // must win -- a real conflict here always stays a real conflict.
+    let report = manager
+        .merge_all(None, None, &["package-lock.json".to_string()], false)
+        .unwrap();
+
+    assert_eq!(report.merged.len(), 1, "expected exactly one of the two to merge cleanly");
+    assert_eq!(report.skipped.len(), 1, "expected the other to stay a real, unresolved conflict");
+    assert!(report.skipped[0].reason.contains("merge conflict"));
 
     cleanup(&repo);
 }

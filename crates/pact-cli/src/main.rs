@@ -128,6 +128,15 @@ enum Command {
         /// moving-base check) without touching any git state.
         #[arg(long)]
         dry_run: bool,
+
+        /// Glob (repeatable) for files safe to resolve with a plain
+        /// line-union merge on conflict (ours' lines, then any of theirs'
+        /// not already present) -- e.g. a barrel export file. Only files
+        /// you name here are ever touched this way; package.json's
+        /// dependency blocks get their own JSON-aware merge automatically,
+        /// no flag needed, and lockfiles are never auto-resolved.
+        #[arg(long = "union")]
+        union: Vec<String>,
     },
     /// Tear down an agent workspace
     Teardown {
@@ -375,9 +384,9 @@ fn main() -> Result<()> {
             let conflicts = orchestrator.detect_conflicts()?;
             print_conflicts(&conflicts);
         }
-        Command::MergeAll { ids, into, dry_run } => {
+        Command::MergeAll { ids, into, dry_run, union } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
-            let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), dry_run)?;
+            let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), &union, dry_run)?;
             print_merge_report(&report);
             if !report.skipped.is_empty() {
                 std::process::exit(1);
@@ -432,6 +441,9 @@ fn print_merge_report(report: &MergeReport) {
         }
         for workspace in &report.merged {
             println!("  merged  {} ({})", workspace.id, workspace.branch);
+            if !workspace.auto_resolved.is_empty() {
+                println!("          auto-resolved: {}", workspace.auto_resolved.join(", "));
+            }
         }
     }
 
