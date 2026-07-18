@@ -333,6 +333,13 @@ impl Orchestrator {
         self.workspaces.workspace_diff(id)
     }
 
+    /// Commits everything in a workspace's working tree -- see
+    /// `pact_vcs::WorkspaceManager::commit_all`. Returns `false` if the
+    /// workspace was already clean.
+    pub fn commit_all(&self, id: &str) -> Result<bool> {
+        self.workspaces.commit_all(id)
+    }
+
     /// Reports files touched by more than one active workspace, among
     /// workspaces that share a common merge-base (i.e. forked from the
     /// same point in history) -- see issue #8. Informational only, same

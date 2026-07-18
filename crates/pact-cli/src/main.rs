@@ -91,6 +91,18 @@ enum Command {
         /// Workspace id (as shown by `list`)
         id: String,
     },
+    /// Commit everything in a workspace's working tree with a message
+    /// derived from its task ("agent <id>: <task>"). Without --id, commits
+    /// every active workspace that's dirty; a clean workspace is a no-op,
+    /// not an error. This is the same step `merge-all` runs on your behalf
+    /// before merging -- run it standalone if you just want workspaces'
+    /// work captured in a real commit without merging yet.
+    CommitAll {
+        /// Only commit this workspace (as shown by `list`), instead of every
+        /// dirty active workspace.
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// Report files touched by more than one active workspace that forked
     /// from the same point in history. Informational only -- nothing here
     /// blocks anything, same as MCP leases being advisory.
@@ -310,6 +322,31 @@ fn main() -> Result<()> {
                 for line in diff.uncommitted_summary.lines() {
                     println!("  {line}");
                 }
+            }
+        }
+        Command::CommitAll { id } => {
+            let ids: Vec<String> = match id {
+                Some(id) => vec![id],
+                None => orchestrator.list()?.into_iter().map(|w| w.id).collect(),
+            };
+            if ids.is_empty() {
+                println!("no active workspaces");
+                return Ok(());
+            }
+
+            let mut any_failed = false;
+            for id in ids {
+                match orchestrator.commit_all(&id) {
+                    Ok(true) => println!("{id}: committed"),
+                    Ok(false) => println!("{id}: clean, nothing to commit"),
+                    Err(err) => {
+                        println!("{id}: failed to commit: {err:#}");
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
             }
         }
         Command::Conflicts => {

@@ -430,6 +430,79 @@ impl WorkspaceManager {
             .with_context(|| format!("no workspace found with id '{id}'"))?;
         Ok(serde_json::from_str(&contents)?)
     }
+
+    /// Stages and commits everything in a workspace's working tree (staged,
+    /// unstaged, and untracked) with a message derived from its task text,
+    /// so `pact diff`/`pact log` and `merge-all` always have a real commit
+    /// to work with instead of a permanently-dirty worktree -- see the
+    /// trial report that motivated this (every workspace ended `[dirty]`
+    /// with nothing to merge). Returns `Ok(false)` without running `git
+    /// commit` at all if the workspace is already clean, so callers (e.g.
+    /// `merge-all`'s first phase) can call this unconditionally on every
+    /// workspace.
+    pub fn commit_all(&self, id: &str) -> Result<bool> {
+        let workspace = self.get_workspace(id)?;
+        if self.dirty_status(&workspace.path)?.is_empty() {
+            return Ok(false);
+        }
+
+        let add = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .output()
+            .context("failed to spawn `git add`")?;
+        if !add.status.success() {
+            bail!(
+                "git add failed in {}:\n{}",
+                workspace.path.display(),
+                String::from_utf8_lossy(&add.stderr)
+            );
+        }
+
+        let message = commit_message(id, &workspace.task);
+        let commit = Command::new("git")
+            .args(["commit", "-m", &message])
+            .current_dir(&workspace.path)
+            .output()
+            .context("failed to spawn `git commit`")?;
+        if !commit.status.success() {
+            bail!(
+                "git commit failed in {}:\n{}",
+                workspace.path.display(),
+                String::from_utf8_lossy(&commit.stderr)
+            );
+        }
+
+        Ok(true)
+    }
+}
+
+/// Builds a commit subject (and, for multi-line/long task text, a body) from
+/// a workspace id and its task: `agent <id>: <first line of task>`, matching
+/// the existing `pact/<id>` branch-naming convention so a commit is
+/// traceable back to its workspace at a glance. The subject line is capped
+/// around 72 chars (git convention); if the task is longer or spans
+/// multiple lines, the full untruncated text follows in the commit body.
+fn commit_message(id: &str, task: &str) -> String {
+    let task = task.trim();
+    let first_line = task.lines().next().unwrap_or(task).trim();
+
+    let (subject_line, truncated) = if first_line.chars().count() > 72 {
+        let truncated: String = first_line.chars().take(69).collect();
+        (format!("{truncated}..."), true)
+    } else {
+        (first_line.to_string(), false)
+    };
+    let subject = format!("agent {id}: {subject_line}");
+
+    // Full text goes in the body whenever the subject alone doesn't already
+    // capture it losslessly -- either because there's more than one line,
+    // or because the single line itself had to be truncated to fit.
+    if task == first_line && !truncated {
+        subject
+    } else {
+        format!("{subject}\n\n{task}")
+    }
 }
 
 /// If `workspace` has a live agent process recorded, kills its whole
@@ -537,4 +610,69 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_message_short_single_line_task() {
+        assert_eq!(
+            commit_message("ab12cd34", "add chunk.ts utility"),
+            "agent ab12cd34: add chunk.ts utility"
+        );
+    }
+
+    #[test]
+    fn commit_message_trims_surrounding_whitespace() {
+        assert_eq!(
+            commit_message("ab12cd34", "  add chunk.ts utility  \n"),
+            "agent ab12cd34: add chunk.ts utility"
+        );
+    }
+
+    #[test]
+    fn commit_message_truncates_long_subject_and_keeps_full_body() {
+        let task = "a".repeat(100);
+        let message = commit_message("ab12cd34", &task);
+        let mut lines = message.lines();
+        let subject = lines.next().unwrap();
+
+        assert!(subject.chars().count() <= 72 + "agent ab12cd34: ...".len());
+        assert!(subject.ends_with("..."));
+        assert!(message.ends_with(&task));
+    }
+
+    #[test]
+    fn commit_message_multiline_task_keeps_full_text_in_body() {
+        let task = "add chunk.ts utility\n\nHandles the empty-array edge case explicitly.";
+        let message = commit_message("ab12cd34", task);
+        assert_eq!(message.lines().next().unwrap(), "agent ab12cd34: add chunk.ts utility");
+        assert!(message.contains("Handles the empty-array edge case explicitly."));
+    }
+
+    #[test]
+    fn parse_porcelain_path_plain_entry() {
+        assert_eq!(
+            parse_porcelain_path(" M src/index.ts"),
+            Some("src/index.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_porcelain_path_rename_entry_uses_new_path() {
+        assert_eq!(
+            parse_porcelain_path("R  src/old.ts -> src/new.ts"),
+            Some("src/new.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_porcelain_path_normalizes_backslashes() {
+        assert_eq!(
+            parse_porcelain_path(" M src\\nested\\file.ts"),
+            Some("src/nested/file.ts".to_string())
+        );
+    }
 }
