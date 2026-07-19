@@ -98,6 +98,38 @@ the more reliable place to see the exact contract than a comment.
 
 ### merge_all
 
+Closes the loop from "N workspaces are dirty" to "one clean integration
+branch" -- see the trial report this is built against: 9 of 10 manual
+merges failed on a shared barrel file, and strict-mode git blocked every
+merge after the first conflict. Never touches the repo's own checkout --
+everything happens in a throwaway worktree, same isolation model as agent
+workspaces themselves, so this is safe to run regardless of what branch
+(or branch-protection rules) the main checkout has.
+
+Phases, all best-effort (one workspace's failure never blocks another's):
+
+1. Auto-commit every selected workspace via `commit_all`.
+2. Moving-base check -- refuse a workspace whose recorded `base_commit` is
+   no longer an ancestor of current HEAD, so merging never silently
+   assumes a fork point that isn't real anymore (e.g. HEAD was reset since
+   the workspace was created). A workspace whose changes can't be sized in
+   the next phase (e.g. `workspace_changes` failed) sorts last rather than
+   being dropped, so a bug in sizing never silently excludes it.
+3. Sequence the rest smallest-changeset-first, on the theory that landing
+   small compatible changes before a large one reduces cascade conflicts.
+4. Merge each into a fresh `target_branch` (default `pact/merged-<id>`)
+   one at a time, skipping (not aborting the whole run on) a real
+   conflict.
+
+`dry_run` runs phases 1-3 (auto-commit still happens, since that's always
+safe to call) but stops before touching git state for the actual merge,
+returning the planned order instead.
+
+`is_ancestor`'s `git merge-base --is-ancestor` exits non-zero for "not an
+ancestor", which is a normal, expected outcome here, not a spawn/IO
+failure -- so it returns `Ok(false)` for that case rather than treating a
+non-zero exit as an error.
+
 ### Semantic auto-resolution
 
 ### Arbiter resolver hook

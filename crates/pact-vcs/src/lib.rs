@@ -553,31 +553,10 @@ impl WorkspaceManager {
     }
 
     /// Closes the loop from "N workspaces are dirty" to "one clean
-    /// integration branch" (see the trial report this is built against: 9
-    /// of 10 manual merges failed on a shared barrel file, and strict-mode
-    /// git blocked every merge after the first conflict). Never touches the
-    /// repo's own checkout -- everything happens in a throwaway worktree,
-    /// same isolation model as agent workspaces themselves, so this is safe
-    /// to run regardless of what branch (or branch-protection rules) the
-    /// main checkout has.
-    ///
-    /// Phases, all best-effort (one workspace's failure never blocks
-    /// another's): (1) auto-commit every selected workspace via
-    /// `commit_all`; (2) moving-base check -- refuse a workspace whose
-    /// recorded `base_commit` is no longer an ancestor of current HEAD, so
-    /// merging never silently assumes a fork point that isn't real anymore
-    /// (e.g. HEAD was reset since the workspace was created); (3) sequence
-    /// the rest smallest-changeset-first, on the theory that landing small
-    /// compatible changes before a large one reduces cascade conflicts; (4)
-    /// merge each into a fresh `target_branch` (default `pact/merged-<id>`)
-    /// one at a time, skipping (not aborting the whole run on) a real
-    /// conflict.
-    ///
+    /// integration branch" -- see DESIGN.md ("pact-vcs > merge_all") for
+    /// the phase breakdown and the trial report this is built against.
     /// `ids`, if given, restricts the run to those workspaces instead of
-    /// every active one. `dry_run` runs phases 1-3 (auto-commit still
-    /// happens -- see its own doc comment for why that's always safe to
-    /// call) but stops before touching git state for the actual merge,
-    /// returning the planned order instead.
+    /// every active one.
     pub fn merge_all(
         &self,
         ids: Option<&[String]>,
@@ -642,9 +621,6 @@ impl WorkspaceManager {
             }
         });
 
-        // Smallest changeset first -- a workspace whose changes can't be
-        // sized (e.g. `workspace_changes` failed) sorts last rather than
-        // being dropped, so a bug in sizing never silently excludes it.
         let mut sized: Vec<(usize, Workspace)> = selected
             .into_iter()
             .map(|w| {
@@ -715,9 +691,8 @@ impl WorkspaceManager {
         {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
                 .context("acquiring git worktree lock")?;
-            // keep_branch semantics: the worktree was only ever scaffolding
-            // to run `git merge` in -- the branch it built up is the actual
-            // result and must survive this call.
+            // No delete_branch call here -- the branch is the actual
+            // result and must survive, only the scaffolding worktree goes.
             self.remove_worktree_retrying(&integration_path)?;
         }
 
@@ -731,12 +706,6 @@ impl WorkspaceManager {
         })
     }
 
-    /// `true` if `ancestor` is still part of `descendant`'s history --
-    /// i.e. `merge_all`'s recorded base commit for a workspace hasn't been
-    /// reset/rebased away since. `git merge-base --is-ancestor` exits
-    /// non-zero for "not an ancestor", which is a normal, expected outcome
-    /// here, not a spawn/IO failure -- so this returns `Ok(false)` for that
-    /// case rather than treating a non-zero exit as an error.
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
         let output = Command::new("git")
             .args(["merge-base", "--is-ancestor", ancestor, descendant])
