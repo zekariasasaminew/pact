@@ -43,6 +43,38 @@ them).
 
 ## pact-coord — MCP coordination server
 
+Advisory, glob-based, TTL-expiring file leases plus a threaded message log
+between agents -- not enforcement, and deliberately not deep semantic
+dependency analysis (see the README). Runs as its own process (`pact
+mcp-serve`, launched by the agent CLI itself over stdio, not run in-process
+by the orchestrator) speaking MCP via `rmcp`, backed by a SQLite database
+shared across every agent in one repo's session.
+
+### Database placement
+
+The coordination database is *not* placed under `.pact-<repo>/` alongside
+per-workspace bookkeeping (locks, metadata, logs). Those are
+blast-radius-limited to the one agent whose workspace they belong to; this
+database is depended on by *every* agent in the session. That directory
+sits directly inside the same tree as each workspace (e.g.
+`workspaces/<id>/../../state.db` is a trivially short relative path), and
+headless launches default to `bypassPermissions`, so a careless broad shell
+command in any one workspace could reach and corrupt state every other
+agent depends on. Placing it under the platform's local data directory,
+keyed by a hash of the repo root, isn't a hard security boundary (an
+agent's Bash tool can still reach anywhere given an absolute or crafted
+path) but removes it from being stumbled into by accident via
+`../..`-style relative paths, which is the realistic risk.
+
+### WAL mode
+
+WAL is needed because the coordination database is opened concurrently by
+a separate OS process per running agent (each `pact mcp-serve` is its own
+process), not just separate threads in one process. `busy_timeout` means a
+writer under real contention blocks briefly instead of immediately erroring
+with `SQLITE_BUSY` -- prior art's "40-50 concurrent agents" claim implies
+that contention is the normal case, not an edge case.
+
 ### Lease system
 
 ## pact-deps — dependency materialization
