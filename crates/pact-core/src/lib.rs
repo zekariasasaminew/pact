@@ -7,23 +7,11 @@ use anyhow::{Context, Result};
 
 pub use pact_vcs::{ArbiterResolver, MergedWorkspace, MergeReport, SkippedWorkspace};
 
-/// Configuration for the Arbiter fallback resolver -- the "verified" half
-/// of pact's conflict story (see the merge-all design notes): a one-shot
-/// headless agent proposes a resolution for a file the mechanical/semantic
-/// auto-resolution in `merge_all` couldn't handle, but that resolution is
-/// only ever accepted if `test_cmd` then passes in the same worktree.
-/// Entirely opt-in -- `Orchestrator::merge_all` with `arbiter: None` never
-/// spawns an extra agent or spends anything beyond what `spawn_many`
-/// already would.
+/// Configuration for the Arbiter fallback resolver -- entirely opt-in,
+/// see DESIGN.md ("pact-core > Arbiter -- agent invocation").
 pub struct ArbiterConfig {
     pub agent: AgentKind,
     pub safety_override: Option<String>,
-    /// Shell command run (via `cmd /C` on Windows, `sh -c` elsewhere) in the
-    /// worktree after the agent finishes -- a non-zero exit means the
-    /// resolution is rejected and the merge falls back to a reported
-    /// conflict exactly as if Arbiter hadn't run. There is deliberately no
-    /// "skip verification if no test command is configured" path: a
-    /// resolution nothing verified isn't something `merge_all` will accept.
     pub test_cmd: String,
 }
 
@@ -403,11 +391,9 @@ impl Orchestrator {
     }
 
     /// Closes the loop from "N dirty workspaces" to "one clean integration
-    /// branch" -- see `pact_vcs::WorkspaceManager::merge_all`. `arbiter`, if
-    /// given, is wired in as pact-vcs's `ArbiterResolver` hook -- pact-vcs
-    /// itself has no dependency on `pact-agents`, so this is the one place
-    /// that bridges "a file mechanical/semantic resolution couldn't handle"
-    /// to "actually spawn an agent to look at it."
+    /// branch" -- see `pact_vcs::WorkspaceManager::merge_all`. `arbiter`,
+    /// if given, is wired in as pact-vcs's `ArbiterResolver` hook -- see
+    /// DESIGN.md ("pact-core > Arbiter -- agent invocation").
     pub fn merge_all(
         &self,
         ids: Option<&[String]>,
@@ -424,15 +410,8 @@ impl Orchestrator {
     }
 
     /// Invokes the Arbiter fallback for one workspace's still-unresolved
-    /// conflicted files: a one-shot headless agent is given the conflicting
-    /// file(s) (git's own `<<<<<<<`/`=======`/`>>>>>>>` markers still in
-    /// place) and the conflicting workspace's task text, asked to resolve
-    /// them in place. The result is accepted only if (a) no conflict
-    /// markers remain, (b) the files stage cleanly, and (c)
-    /// `config.test_cmd` then exits successfully in the same worktree --
-    /// any failure at any step returns an empty list, and the caller
-    /// (pact-vcs) aborts the whole merge attempt exactly as if this were
-    /// never called. Never partially accepted.
+    /// conflicted files -- see DESIGN.md ("pact-core > Arbiter -- agent
+    /// invocation") for the acceptance criteria. Never partially accepted.
     fn run_arbiter(&self, config: &ArbiterConfig, worktree_path: &Path, task_text: &str, files: &[String]) -> Vec<String> {
         let prompt = build_arbiter_prompt(task_text, files);
         let adapter = pact_agents::adapter(config.agent);
@@ -576,10 +555,6 @@ impl Orchestrator {
     }
 }
 
-/// Builds the Arbiter agent's task text: the conflicting workspace's own
-/// task, the exact files it's being asked to edit (and nothing else), and
-/// an explicit instruction not to run `git` itself -- pact stages and
-/// verifies the result afterward, not the agent.
 fn build_arbiter_prompt(task_text: &str, files: &[String]) -> String {
     format!(
         "You are resolving a real git merge conflict left behind by pact's `merge-all`. \

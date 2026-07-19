@@ -261,6 +261,42 @@ positive/negative tradeoff above for why that's acceptable here.
 
 ### Arbiter — agent invocation
 
+`ArbiterConfig` is the "verified" half of pact's conflict story: a
+one-shot headless agent proposes a resolution for a file the
+mechanical/semantic auto-resolution in `merge_all` couldn't handle, but
+that resolution is only ever accepted if `test_cmd` then passes in the
+same worktree. Entirely opt-in -- `Orchestrator::merge_all` with `arbiter:
+None` never spawns an extra agent or spends anything beyond what
+`spawn_many` already would. `test_cmd` is a shell command run (`cmd /C` on
+Windows, `sh -c` elsewhere) in the worktree after the agent finishes; a
+non-zero exit means the resolution is rejected and the merge falls back to
+a reported conflict exactly as if Arbiter hadn't run. There is
+deliberately no "skip verification if no test command is configured"
+path: a resolution nothing verified isn't something `merge_all` will
+accept.
+
+`Orchestrator::merge_all` wires `arbiter` in as pact-vcs's
+`ArbiterResolver` hook -- pact-vcs itself has no dependency on
+`pact-agents`, so this is the one place that bridges "a file
+mechanical/semantic resolution couldn't handle" to "actually spawn an
+agent to look at it."
+
+`run_arbiter` gives a one-shot headless agent the conflicting file(s)
+(git's own `<<<<<<<`/`=======`/`>>>>>>>` markers still in place) and the
+conflicting workspace's task text, asking it to resolve them in place. The
+result is accepted only if (a) no conflict markers remain, (b) the files
+stage cleanly, and (c) `config.test_cmd` then exits successfully in the
+same worktree -- any failure at any step returns an empty list, and the
+caller (pact-vcs) aborts the whole merge attempt exactly as if this were
+never called. The agent's own reported success isn't trusted on its own --
+conflict markers left behind mean it didn't actually finish, no matter
+what it said.
+
+`build_arbiter_prompt` gives the agent the conflicting workspace's own
+task, the exact files it's being asked to edit (and nothing else), and an
+explicit instruction not to run `git` itself -- pact stages and verifies
+the result afterward, not the agent.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
