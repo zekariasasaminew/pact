@@ -132,25 +132,12 @@ enum MergeOutcome {
     },
 }
 
-/// A hook `merge_all`'s caller can supply to attempt further resolution of
-/// files the mechanical/semantic auto-resolution (`try_auto_resolve`)
-/// couldn't handle -- see "Arbiter" in the design notes. Deliberately a
-/// plain closure, not a concrete type: `pact-vcs` has no dependency on
-/// `pact-agents` and shouldn't need one just to leave a slot for "maybe
-/// spawn an AI agent here" -- the caller (pact-core, which does depend on
-/// pact-agents) builds the actual agent-invoking closure and is entirely
-/// responsible for what "resolved" means, including any verification (e.g.
-/// running a test command) before it reports a file as resolved. Given
-/// `(worktree_path, the workspace's task text, the still-unresolved
+/// Given `(worktree_path, the workspace's task text, the still-unresolved
 /// conflicted files)`, returns exactly the subset it resolved and staged
-/// (`git add`) itself; pact-vcs treats anything not in that list as still
-/// conflicted and aborts the merge exactly as if this hook didn't exist.
+/// (`git add`) itself -- see DESIGN.md ("pact-vcs > Arbiter resolver
+/// hook").
 pub type ArbiterResolver<'a> = dyn Fn(&Path, &str, &[String]) -> Vec<String> + 'a;
 
-/// package.json's dependency-ish top-level keys -- the only part of the
-/// file `try_resolve_package_json` will touch. A conflict anywhere else in
-/// the file (scripts, version, name, ...) is left as a real conflict, same
-/// as before this existed.
 const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
     "dependencies",
     "devDependencies",
@@ -158,11 +145,8 @@ const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
     "optionalDependencies",
 ];
 
-/// Basenames pact never attempts to auto-resolve, even under `--union` --
-/// generated files with integrity hashes or resolved dependency graphs,
-/// where a naive line-level merge is very likely to silently produce a
-/// corrupt result. A real conflict here always stays a real conflict for a
-/// human (or a regenerate step) to handle.
+/// Never auto-resolved, even under `--union` -- see DESIGN.md ("pact-vcs >
+/// Semantic auto-resolution").
 const NEVER_AUTO_RESOLVE: &[&str] = &[
     "package-lock.json",
     "yarn.lock",
@@ -717,14 +701,7 @@ impl WorkspaceManager {
 
     /// Merges `branch` into whatever's checked out in `worktree_path`
     /// (always the throwaway integration worktree, never the repo's own
-    /// checkout). On a real conflict, tries the semantic-narrow
-    /// auto-resolution rules (`try_auto_resolve`) on each conflicted file
-    /// before giving up: if *every* conflicted file resolves, the merge is
-    /// completed with a commit instead of aborted. If any file is left
-    /// over, the whole merge is aborted (so the worktree is clean for the
-    /// *next* workspace's attempt -- one conflicted workspace must not
-    /// poison the rest of the batch) and reported as a real conflict, same
-    /// as before this existed.
+    /// checkout) -- see DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn merge_branch_into(
         &self,
         worktree_path: &Path,
@@ -746,9 +723,6 @@ impl WorkspaceManager {
         let conflicted_files: Vec<String> = status
             .lines()
             .filter(|line| {
-                // Unmerged-path porcelain codes -- the ones `git merge`
-                // actually leaves behind on conflict, as opposed to e.g. a
-                // plain modified/added entry.
                 matches!(
                     line.get(0..2),
                     Some("UU") | Some("AA") | Some("DD") | Some("AU") | Some("UA") | Some("UD") | Some("DU")
@@ -758,9 +732,6 @@ impl WorkspaceManager {
             .collect();
 
         if conflicted_files.is_empty() {
-            // `git merge` failed but left no unmerged paths -- not a
-            // content conflict (e.g. a dirty-worktree refusal), nothing for
-            // auto-resolution to work with.
             self.abort_merge(worktree_path, branch);
             return Ok(MergeOutcome::Conflict {
                 files: vec![String::from_utf8_lossy(&output.stderr).trim().to_string()],
@@ -783,11 +754,6 @@ impl WorkspaceManager {
             }
         }
 
-        // Anything the mechanical/semantic rules above couldn't handle gets
-        // one more shot from the caller-supplied Arbiter hook, if any --
-        // see `ArbiterResolver`'s doc comment for why pact-vcs trusts its
-        // return value outright (verification, if any, already happened
-        // inside the closure).
         let mut arbiter_resolved = Vec::new();
         if !unresolved.is_empty() {
             if let Some(resolve) = arbiter {
@@ -834,15 +800,9 @@ impl WorkspaceManager {
         }
     }
 
-    /// Tries to auto-resolve one conflicted file during a merge, using the
-    /// semantic-narrow rules `merge_all` is built around: never touch a
-    /// generated/structural file (`NEVER_AUTO_RESOLVE`); JSON-aware merge
-    /// for `package.json`'s dependency blocks; a plain line-union merge for
-    /// anything matching a caller-supplied `--union` glob (nothing is
-    /// union-merged unless the caller explicitly named it -- pact does not
-    /// guess which files are safe to blindly concatenate). Returns `true`
-    /// and stages the file (`git add`) if it resolved, `false` (file left
-    /// untouched, still conflicted) otherwise.
+    /// Tries to auto-resolve one conflicted file, returning `true` and
+    /// staging it (`git add`) if it resolved -- see DESIGN.md ("pact-vcs >
+    /// Semantic auto-resolution").
     fn try_auto_resolve(&self, worktree_path: &Path, file: &str, union_globs: &[String]) -> Result<bool> {
         if is_never_auto_resolve(file) {
             return Ok(false);
@@ -871,12 +831,8 @@ impl WorkspaceManager {
     }
 
     /// Reads one side of a conflicted file from git's index -- stage 1 is
-    /// the common ancestor, 2 is "ours" (the integration branch, before
-    /// this merge), 3 is "theirs" (the branch being merged in). Returns
-    /// `Ok(None)` if that stage doesn't exist for this path (e.g. the file
-    /// was added fresh on only one side), which callers treat as "don't
-    /// understand this shape well enough to auto-resolve" rather than an
-    /// error.
+    /// the common ancestor, 2 is "ours", 3 is "theirs". `Ok(None)` if that
+    /// stage doesn't exist for this path.
     fn read_conflict_stage(&self, worktree_path: &Path, file: &str, stage: u8) -> Result<Option<String>> {
         let output = Command::new("git")
             .args(["show", &format!(":{stage}:{file}")])
@@ -889,16 +845,8 @@ impl WorkspaceManager {
         Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
     }
 
-    /// JSON-aware merge of `package.json`'s dependency blocks
-    /// (`PACKAGE_JSON_DEP_KEYS`) -- far and away the most common real
-    /// conflict from parallel agents (two agents both adding a package). A
-    /// dependency name added or changed on exactly one side is taken as-is;
-    /// changed to the *same* value on both sides is fine; changed to
-    /// *different* values on both sides is a real conflict this does not
-    /// try to guess at -- returns `Ok(None)` for the whole file in that
-    /// case, same as if anything *outside* the dependency keys differs
-    /// between the two sides. This only ever resolves the dependency-block
-    /// class of conflict; nothing else in the file is touched.
+    /// JSON-aware merge of `package.json`'s dependency blocks -- see
+    /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn try_resolve_package_json(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
         let (Some(base), Some(ours), Some(theirs)) = (
             self.read_conflict_stage(worktree_path, file, 1)?,
@@ -916,9 +864,6 @@ impl WorkspaceManager {
             return Ok(None);
         };
 
-        // Anything outside the dependency keys must be identical between
-        // ours and theirs, or this resolver doesn't understand the
-        // conflict well enough to touch it.
         let mut ours_stripped = ours_value.clone();
         let mut theirs_stripped = theirs_value.clone();
         if let (Some(o), Some(t)) = (ours_stripped.as_object_mut(), theirs_stripped.as_object_mut()) {
@@ -980,15 +925,8 @@ impl WorkspaceManager {
         Ok(Some(serde_json::to_string_pretty(&merged_value)? + "\n"))
     }
 
-    /// Plain line-union merge for a `--union`-matched file: the result is
-    /// "ours" lines, in order, followed by any of "theirs" lines not
-    /// already present verbatim -- the same semantics as git's own
-    /// `merge=union` attribute driver, just applied here in Rust rather
-    /// than by mutating the repo's shared (cross-worktree)
-    /// `.gitattributes`/config to register a driver. Appropriate only for
-    /// genuinely order-independent, append-only content (barrel exports,
-    /// changelog entries): the caller's own `--union <glob>` is what scopes
-    /// this, pact does not try to guess which files qualify.
+    /// Plain line-union merge for a `--union`-matched file -- see
+    /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn try_resolve_union(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
         let (Some(ours), Some(theirs)) = (
             self.read_conflict_stage(worktree_path, file, 2)?,

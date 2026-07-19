@@ -132,7 +132,59 @@ non-zero exit as an error.
 
 ### Semantic auto-resolution
 
+`merge_branch_into` tries a plain `git merge` first. On a real conflict, it
+tries the semantic-narrow auto-resolution rules in `try_auto_resolve` on
+each conflicted file before giving up: never touch a generated/structural
+file (`NEVER_AUTO_RESOLVE` -- lockfiles and similar, where a naive
+line-level merge is very likely to silently produce a corrupt result, so a
+real conflict there always stays a real conflict for a human or a
+regenerate step); JSON-aware merge for `package.json`'s dependency blocks
+(`PACKAGE_JSON_DEP_KEYS` -- the only part of the file this touches; a
+conflict anywhere else in the file, e.g. scripts/version/name, is left as
+a real conflict); a plain line-union merge for anything matching a
+caller-supplied `--union` glob (nothing is union-merged unless the caller
+explicitly named it -- pact does not guess which files are safe to blindly
+concatenate). If *every* conflicted file resolves, the merge completes
+with a commit instead of aborting. If any file is left over, the whole
+merge is aborted (so the worktree is clean for the *next* workspace's
+attempt -- one conflicted workspace must not poison the rest of the batch)
+and reported as a real conflict, same as if none of this existed.
+
+`try_resolve_package_json`: a dependency name added or changed on exactly
+one side is taken as-is; changed to the *same* value on both sides is
+fine; changed to *different* values on both sides is a real conflict this
+does not try to guess at -- returns `Ok(None)` for the whole file in that
+case, same as if anything *outside* the dependency keys differs between
+the two sides.
+
+`try_resolve_union`: the result is "ours" lines, in order, followed by any
+of "theirs" lines not already present verbatim -- the same semantics as
+git's own `merge=union` attribute driver, just applied here in Rust rather
+than by mutating the repo's shared (cross-worktree)
+`.gitattributes`/config to register a driver. Appropriate only for
+genuinely order-independent, append-only content (barrel exports,
+changelog entries).
+
+`read_conflict_stage` reads one side of a conflicted file from git's index
+-- stage 1 is the common ancestor, 2 is "ours" (the integration branch,
+before this merge), 3 is "theirs" (the branch being merged in). `Ok(None)`
+if that stage doesn't exist for this path (e.g. the file was added fresh
+on only one side) is treated as "don't understand this shape well enough
+to auto-resolve," not an error.
+
 ### Arbiter resolver hook
+
+`ArbiterResolver` is a hook `merge_all`'s caller can supply to attempt
+further resolution of files the mechanical/semantic auto-resolution
+couldn't handle. Deliberately a plain closure, not a concrete type:
+`pact-vcs` has no dependency on `pact-agents` and shouldn't need one just
+to leave a slot for "maybe spawn an AI agent here" -- the caller
+(`pact-core`, which does depend on `pact-agents`) builds the actual
+agent-invoking closure and is entirely responsible for what "resolved"
+means, including any verification (e.g. running a test command) before it
+reports a file as resolved. `pact-vcs` treats anything not in the returned
+list as still conflicted and aborts the merge exactly as if this hook
+didn't exist.
 
 ## pact-core — Orchestrator
 
