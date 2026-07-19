@@ -37,6 +37,24 @@ them).
 
 ## pact-agents — adapters and process supervision
 
+### AgentEvent normalization
+
+`AgentEvent` is shared across every adapter (Claude Code, Copilot CLI,
+Codex, Gemini), even though each CLI's actual output schema is different --
+each adapter's own `parse_line` maps its specific shape onto this enum.
+`Other` is a catch-all for anything not explicitly modeled, but it's still
+surfaced to callers, never silently dropped: an unrecognized event is far
+more likely to be a real message an adapter hasn't been taught about yet
+than something safe to ignore.
+
+`CoordStatus` is a separate variant, not bundled into `Init`, because Claude
+Code reports every MCP server's status inside its one init event, but
+Copilot CLI reports them as their own standalone events, and a line can
+report several servers at once. Each adapter's `parse_line` emits zero or
+more `CoordStatus` events per line as its own schema demands; the
+connectivity check that consumes them (`pact-core`) doesn't need to know
+which shape produced them.
+
 ### Process group kill
 
 ### Adapter-specific quirks
