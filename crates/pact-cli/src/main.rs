@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
-use pact_core::{CoordServerOverride, FileConflict, Orchestrator, SpawnManyTask};
+use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, SpawnManyTask};
 
 #[derive(Parser)]
 #[command(name = "pact", about = "Orchestrate parallel AI coding agent workspaces")]
@@ -91,10 +91,74 @@ enum Command {
         /// Workspace id (as shown by `list`)
         id: String,
     },
+    /// Commit everything in a workspace's working tree with a message
+    /// derived from its task ("agent <id>: <task>"). Without --id, commits
+    /// every active workspace that's dirty; a clean workspace is a no-op,
+    /// not an error. This is the same step `merge-all` runs on your behalf
+    /// before merging -- run it standalone if you just want workspaces'
+    /// work captured in a real commit without merging yet.
+    CommitAll {
+        /// Only commit this workspace (as shown by `list`), instead of every
+        /// dirty active workspace.
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// Report files touched by more than one active workspace that forked
     /// from the same point in history. Informational only -- nothing here
     /// blocks anything, same as MCP leases being advisory.
     Conflicts,
+    /// Merge every (or a chosen set of) active workspace onto a fresh
+    /// integration branch. Auto-commits each workspace first, refuses any
+    /// whose base commit is no longer part of this branch's history, then
+    /// merges smallest-changeset-first, skipping (not aborting on) real
+    /// conflicts. Never touches the repo's own checkout -- the result is a
+    /// new local branch (default `pact/merged-<id>`); pushing it or opening
+    /// a PR is a separate, deliberate step you take yourself.
+    MergeAll {
+        /// Restrict the merge to these workspace ids (as shown by `list`),
+        /// repeatable. Defaults to every active workspace.
+        #[arg(long = "id")]
+        ids: Vec<String>,
+
+        /// Name for the resulting branch. Defaults to `pact/merged-<id>`.
+        #[arg(long)]
+        into: Option<String>,
+
+        /// Show the planned merge order (after sequencing and the
+        /// moving-base check) without touching any git state.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Glob (repeatable) for files safe to resolve with a plain
+        /// line-union merge on conflict (ours' lines, then any of theirs'
+        /// not already present) -- e.g. a barrel export file. Only files
+        /// you name here are ever touched this way; package.json's
+        /// dependency blocks get their own JSON-aware merge automatically,
+        /// no flag needed, and lockfiles are never auto-resolved.
+        #[arg(long = "union")]
+        union: Vec<String>,
+
+        /// Enables the Arbiter fallback: for any file mechanical/semantic
+        /// resolution still can't handle, a one-shot agent proposes a fix,
+        /// accepted only if this command then exits successfully in the
+        /// same worktree (e.g. "npm test", "cargo test"). Presence of this
+        /// flag is what turns Arbiter on at all -- omit it and merge-all
+        /// behaves exactly as before, no extra agent ever spawned or
+        /// billed.
+        #[arg(long = "test-cmd")]
+        test_cmd: Option<String>,
+
+        /// Which agent CLI Arbiter should use. Ignored unless --test-cmd
+        /// is set.
+        #[arg(long = "arbiter-agent", default_value = "claude")]
+        arbiter_agent: String,
+
+        /// Same raw safety/approval override as `spawn --safety`, applied
+        /// to the Arbiter agent specifically. Ignored unless --test-cmd is
+        /// set.
+        #[arg(long = "arbiter-safety")]
+        arbiter_safety: Option<String>,
+    },
     /// Tear down an agent workspace
     Teardown {
         /// Workspace id (as shown by `list`)
@@ -230,6 +294,19 @@ fn main() -> Result<()> {
                 .map(|(agent, task, _)| SpawnManyTask { agent, task })
                 .collect();
 
+            let overlaps = pact_core::predict_task_overlap(&batch);
+            if !overlaps.is_empty() {
+                eprintln!(
+                    "warning: {} of your tasks look like they'll touch the same file(s) -- \
+                     expect a merge conflict there unless you separate that work:",
+                    overlaps.iter().map(|o| o.task_indices.len()).sum::<usize>()
+                );
+                for overlap in &overlaps {
+                    let indices: Vec<String> = overlap.task_indices.iter().map(|i| i.to_string()).collect();
+                    eprintln!("  '{}' -- mentioned by tasks #{}", overlap.token, indices.join(", #"));
+                }
+            }
+
             let coord_override = coord_command.map(|command| CoordServerOverride {
                 command,
                 args: coord_args,
@@ -312,9 +389,57 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::CommitAll { id } => {
+            let ids: Vec<String> = match id {
+                Some(id) => vec![id],
+                None => orchestrator.list()?.into_iter().map(|w| w.id).collect(),
+            };
+            if ids.is_empty() {
+                println!("no active workspaces");
+                return Ok(());
+            }
+
+            let mut any_failed = false;
+            for id in ids {
+                match orchestrator.commit_all(&id) {
+                    Ok(true) => println!("{id}: committed"),
+                    Ok(false) => println!("{id}: clean, nothing to commit"),
+                    Err(err) => {
+                        println!("{id}: failed to commit: {err:#}");
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
+            }
+        }
         Command::Conflicts => {
             let conflicts = orchestrator.detect_conflicts()?;
             print_conflicts(&conflicts);
+        }
+        Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety } => {
+            let ids = if ids.is_empty() { None } else { Some(ids) };
+            let arbiter = match test_cmd {
+                Some(test_cmd) => {
+                    let agent = AgentKind::parse(&arbiter_agent).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, or gemini)"
+                        )
+                    })?;
+                    Some(pact_core::ArbiterConfig {
+                        agent,
+                        safety_override: arbiter_safety,
+                        test_cmd,
+                    })
+                }
+                None => None,
+            };
+            let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), &union, arbiter.as_ref(), dry_run)?;
+            print_merge_report(&report);
+            if !report.skipped.is_empty() {
+                std::process::exit(1);
+            }
         }
         Command::Teardown {
             id,
@@ -347,6 +472,43 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Prints a `merge-all` report -- the merge order/outcome for a real run,
+/// or just the planned order for `--dry-run` (see `MergeReport::dry_run`).
+fn print_merge_report(report: &MergeReport) {
+    if report.dry_run {
+        println!("dry run: would merge onto '{}' from {}", report.target_branch, short(&report.base_commit));
+        println!("  planned order:");
+        for id in &report.planned {
+            println!("    {id}");
+        }
+    } else {
+        println!("merged onto '{}' from {}", report.target_branch, short(&report.base_commit));
+        if report.merged.is_empty() {
+            println!("  (nothing merged cleanly)");
+        }
+        for workspace in &report.merged {
+            println!("  merged  {} ({})", workspace.id, workspace.branch);
+            if !workspace.auto_resolved.is_empty() {
+                println!("          auto-resolved: {}", workspace.auto_resolved.join(", "));
+            }
+            if !workspace.arbiter_resolved.is_empty() {
+                println!("          arbiter-resolved (agent + tests verified): {}", workspace.arbiter_resolved.join(", "));
+            }
+        }
+    }
+
+    if !report.skipped.is_empty() {
+        println!("skipped -- needs a human:");
+        for workspace in &report.skipped {
+            println!("  {} ({}): {}", workspace.id, workspace.branch, workspace.reason);
+        }
+    }
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
 }
 
 /// Prints a cross-workspace conflict report -- shared by the standalone
