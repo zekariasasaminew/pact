@@ -1,12 +1,5 @@
-//! Cross-platform integration test for issue #6: confirms that killing a
-//! `Supervisor`-registered child actually reaches a grandchild process too,
-//! on every platform CI runs on -- not just Windows, where this was
-//! originally hand-verified only via `examples/group_kill_check.rs`. Runs
-//! automatically under `cargo test --workspace` in CI (ubuntu-latest,
-//! macos-latest, windows-latest), so the Unix path -- previously
-//! implemented from documented POSIX semantics but never actually
-//! exercised -- now gets a real, automated check on every push, without
-//! needing real Unix hardware or any credentials.
+//! Cross-platform integration test for issue #6 -- see DESIGN.md
+//! ("pact-agents > Process group kill").
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -33,8 +26,6 @@ fn killing_a_registered_group_reaches_a_grandchild_process() {
         "expected the grandchild marker process to be running by now (found {before})"
     );
 
-    // Same call the Ctrl-C handler makes: reach into the registry and kill
-    // every registered group. There's only one here.
     let mut killed = supervisor.take(slot).expect("child was not registered");
     killed.kill().expect("group kill failed");
     println!("killed group {}", killed.id());
@@ -49,10 +40,6 @@ fn killing_a_registered_group_reaches_a_grandchild_process() {
     );
 }
 
-/// A parent process that spawns a distinctly-named grandchild, so the test
-/// can confirm the *grandchild* specifically died, not just the direct
-/// child -- the exact gap the old plain `Child::kill()` path had (it only
-/// killed the immediate process, not descendants a shell spawns).
 #[cfg(windows)]
 fn build_parent_command() -> Command {
     let mut command = Command::new("cmd");
@@ -64,9 +51,6 @@ fn build_parent_command() -> Command {
 
 #[cfg(unix)]
 fn build_parent_command() -> Command {
-    // `sh -c` is the parent (direct child of this test process); the `sleep
-    // 60` it backgrounds and waits on is the grandchild whose survival
-    // we're actually checking.
     let mut command = Command::new("sh");
     command.arg("-c").arg("sleep 60 & wait");
     command
@@ -86,9 +70,6 @@ fn count_marker_processes() -> usize {
 
 #[cfg(unix)]
 fn count_marker_processes() -> usize {
-    // pgrep -f matches against the full command line, so this finds the
-    // backgrounded `sleep 60` specifically, not unrelated `sleep` calls
-    // elsewhere on a shared CI runner.
     let output = Command::new("pgrep")
         .args(["-f", "sleep 60"])
         .output()

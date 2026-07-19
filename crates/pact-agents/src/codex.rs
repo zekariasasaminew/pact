@@ -4,12 +4,7 @@ use crate::adapter::{AgentAdapter, CoordConfig};
 use crate::event::AgentEvent;
 
 /// Live-verified against a real installed `codex` (codex-cli 0.144.3) --
-/// this was NOT true when this adapter was first written (built from
-/// OpenAI's docs alone, on a machine without Codex installed) and the
-/// docs turned out to be wrong on the exact safety flag (see
-/// `default_safety_description`). Fixed and confirmed end-to-end,
-/// including a real MCP tool call through this project's own
-/// coordination server, not just a bare launch.
+/// see DESIGN.md ("pact-agents > Codex adapter").
 pub struct CodexAdapter;
 
 impl AgentAdapter for CodexAdapter {
@@ -17,38 +12,14 @@ impl AgentAdapter for CodexAdapter {
         "pact-coord"
     }
 
-    /// The docs described a separate `--ask-for-approval` flag with
-    /// `never`/`on-request`/`untrusted` values -- that flag does not exist
-    /// in `codex exec --help` for the installed version. What actually
-    /// works, confirmed directly: `--sandbox workspace-write` alone still
-    /// refuses to write files in non-interactive mode (the agent reports
-    /// back "approvals are disabled" and gives up rather than hanging --
-    /// a good failure mode, but not a working one). The only flag that
-    /// produces a real, completed file write is
-    /// `--dangerously-bypass-approvals-and-sandbox`, which -- true to its
-    /// name -- skips both approval prompts and sandboxing in one flag,
-    /// rather than two independent axes as the docs implied.
+    /// See DESIGN.md ("pact-agents > Codex adapter").
     fn default_safety_description(&self) -> &'static str {
         "--dangerously-bypass-approvals-and-sandbox (can run any shell command and edit any file \
          with no restriction -- confirmed no safe alternative actually lets it write files at all \
          in headless mode; see issue #2's investigation)"
     }
 
-    /// `safety_override`, if given, is treated as a `--sandbox` value
-    /// (`read-only`/`workspace-write`/`danger-full-access`) rather than
-    /// the bypass flag -- confirmed that a plain sandbox mode without the
-    /// bypass flag still won't let the agent actually change anything in
-    /// headless mode, so this is mainly useful for a deliberately
-    /// read-only/inspect-only run, not a safer "still gets work done"
-    /// middle ground the way Claude Code's `acceptEdits` is.
-    ///
-    /// MCP servers are passed via inline `-c mcp_servers.<id>.command=`/
-    /// `-c mcp_servers.<id>.args=` overrides (confirmed working end-to-end:
-    /// a real `claim_files` call through this project's own coordination
-    /// server returned the correct JSON) rather than
-    /// `$CODEX_HOME/config.toml` -- that file also holds Codex's
-    /// auth/session state, not just config, so pointing `CODEX_HOME` at a
-    /// per-workspace directory would plausibly break headless login.
+    /// See DESIGN.md ("pact-agents > Codex adapter").
     fn build_command(
         &self,
         task: &str,
@@ -81,21 +52,9 @@ impl AgentAdapter for CodexAdapter {
         ("codex".to_string(), args)
     }
 
-    /// Schema modeled directly against real output captured from
-    /// `codex exec --json` (see README), not secondhand docs -- including
-    /// a real tool-call-forcing task and a real MCP tool call, the same
-    /// standard as the Claude Code and Copilot CLI adapters.
-    ///
-    /// One real gap: unlike Claude Code's `result.is_error` or Copilot's
-    /// `result.exitCode`, Codex's `turn.completed` event carries no
-    /// success/failure signal at all -- a turn can "complete" whether or
-    /// not the requested task actually happened (confirmed: a file-write
-    /// task under a sandbox mode that refused the write still produced a
-    /// normal `turn.completed`). So this adapter never emits
-    /// `AgentEvent::Result` itself; success is determined from the
-    /// process's actual exit code instead (see
-    /// `process::run_and_stream`'s fallback, which this finding is also
-    /// why that fallback no longer assumes failure by default).
+    /// Schema modeled against real captured output -- see DESIGN.md
+    /// ("pact-agents > Codex adapter") for the success-signal gap this
+    /// adapter works around.
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         let value: Value = match serde_json::from_str(line) {
             Ok(v) => v,

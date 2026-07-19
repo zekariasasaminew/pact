@@ -3,14 +3,8 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
 
-/// Spawns `program` with `args` in `cwd`.
-///
-/// On Windows, npm/pnpm/yarn (and sometimes poetry/pipenv, depending on
-/// install method) ship as `.cmd` shims, not `.exe`. `std::process::Command`
-/// does not consult `PATHEXT` the way a real shell does, so `Command::new("npm")`
-/// fails with "program not found" even though `npm` works fine when typed
-/// interactively. Routing through `cmd /C` restores that resolution; on
-/// other platforms this is a plain, direct spawn.
+/// Spawns `program` with `args` in `cwd`, routed through `cmd /C` on
+/// Windows -- see DESIGN.md ("pact-deps > Windows .cmd shim resolution").
 pub fn run(program: &str, args: &[&str], cwd: &Path) -> Result<Output> {
     let output = if cfg!(windows) {
         Command::new("cmd")

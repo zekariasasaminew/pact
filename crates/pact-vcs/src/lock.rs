@@ -5,17 +5,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-/// A serialized, PID-aware file lock.
-///
-/// Originally built because git itself races on `.git/config.lock` when
-/// `git worktree add`/`remove` run concurrently (see
-/// anthropics/claude-code#34645) -- but the mechanism isn't git-specific,
-/// it's just "serialize access to a resource, and don't leave it stuck
-/// locked forever if the holder died." `pact-deps` reuses it verbatim
-/// to guard concurrent population of a shared dependency store entry.
-///
-/// If the previous holder's process has died without cleaning up, the lock
-/// is stolen (checked via PID liveness) rather than left stale forever.
+/// A serialized, PID-aware file lock: if the previous holder's process has
+/// died without cleaning up, the lock is stolen (checked via PID liveness)
+/// rather than left stale forever. See DESIGN.md ("pact-vcs > PidLock
+/// origin") for why this exists and where else it's reused.
 pub struct PidLock {
     path: PathBuf,
 }

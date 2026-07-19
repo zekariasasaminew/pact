@@ -1,12 +1,6 @@
-//! Manual, Windows-only verification harness (not run by CI -- `cargo
-//! build`/`test --workspace` don't build examples unless asked): confirms
-//! that killing a `Supervisor`-registered child actually reaches a
-//! grandchild process too (the exact gap the old plain `Child::kill()`
-//! path had -- see `supervisor.rs`'s doc comment). Spawns
-//! `cmd /C "ping ... && ping ..."`, where the second `ping` is a
-//! grandchild of the `pact`-spawned `cmd.exe`, then kills the top-level
-//! group and confirms every `ping.exe` under it is actually gone. Run with
-//! `cargo run -p pact-agents --example group_kill_check`.
+//! Manual, Windows-only verification harness (not run by CI). Run with
+//! `cargo run -p pact-agents --example group_kill_check`. See DESIGN.md
+//! ("pact-agents > Process group kill").
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -36,8 +30,6 @@ fn main() {
         "expected the grandchild ping.exe to be running by now"
     );
 
-    // Same call the Ctrl-C handler makes: reach into the registry and kill
-    // every registered group. There's only one here.
     let killed = supervisor.take(_slot);
     match killed {
         Some(mut c) => {
