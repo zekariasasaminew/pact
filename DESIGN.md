@@ -174,6 +174,53 @@ practice Claude Code emits one block per line in stream-json mode.
 Anything genuinely mixed falls back to `Other` with the full message
 preserved.
 
+### Codex adapter
+
+`CodexAdapter` is live-verified against a real installed `codex`
+(codex-cli 0.144.3) -- this was NOT true when the adapter was first
+written (built from OpenAI's docs alone, on a machine without Codex
+installed), and the docs turned out to be wrong on the exact safety flag.
+Fixed and confirmed end-to-end, including a real MCP tool call through
+this project's own coordination server, not just a bare launch.
+
+**Safety flag**: the docs described a separate `--ask-for-approval` flag
+with `never`/`on-request`/`untrusted` values -- that flag does not exist in
+`codex exec --help` for the installed version. What actually works,
+confirmed directly: `--sandbox workspace-write` alone still refuses to
+write files in non-interactive mode (the agent reports back "approvals are
+disabled" and gives up rather than hanging -- a good failure mode, but not
+a working one). The only flag that produces a real, completed file write
+is `--dangerously-bypass-approvals-and-sandbox`, which -- true to its name
+-- skips both approval prompts and sandboxing in one flag, rather than two
+independent axes as the docs implied. `safety_override`, if given, is
+treated as a `--sandbox` value (`read-only`/`workspace-write`/
+`danger-full-access`) instead of the bypass flag -- confirmed that a plain
+sandbox mode without the bypass flag still won't let the agent actually
+change anything in headless mode, so this is mainly useful for a
+deliberately read-only/inspect-only run, not a safer "still gets work
+done" middle ground the way Claude Code's `acceptEdits` is.
+
+**MCP config**: passed via inline `-c mcp_servers.<id>.command=`/`-c
+mcp_servers.<id>.args=` overrides (confirmed working end-to-end: a real
+`claim_files` call through this project's own coordination server returned
+the correct JSON) rather than `$CODEX_HOME/config.toml` -- that file also
+holds Codex's auth/session state, not just config, so pointing
+`CODEX_HOME` at a per-workspace directory would plausibly break headless
+login.
+
+**Output schema**: modeled against real output captured from `codex exec
+--json` (see README), not secondhand docs -- including a real
+tool-call-forcing task and a real MCP tool call, the same standard as the
+Claude Code and Copilot CLI adapters. One real gap: unlike Claude Code's
+`result.is_error` or Copilot's `result.exitCode`, Codex's `turn.completed`
+event carries no success/failure signal at all -- a turn can "complete"
+whether or not the requested task actually happened (confirmed: a
+file-write task under a sandbox mode that refused the write still produced
+a normal `turn.completed`). So this adapter never emits
+`AgentEvent::Result` itself; success is determined from the process's
+actual exit code instead (see "run_and_stream" above -- this finding is
+why that fallback no longer assumes failure by default).
+
 ### Copilot CLI safety default
 
 Unlike Claude Code, no confirmed non-hanging alternative to
