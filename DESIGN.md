@@ -130,6 +130,21 @@ ancestor", which is a normal, expected outcome here, not a spawn/IO
 failure -- so it returns `Ok(false)` for that case rather than treating a
 non-zero exit as an error.
 
+**Test scenario notes** (`crates/pact-vcs/tests/merge_all.rs`): the main
+conflict test has workspace A append a new line at the end of `index.ts`,
+well-separated (4 lines of untouched context) from anything C/D touch;
+workspace B edits a completely different file. Both are genuinely
+compatible with everything else and must always merge, regardless of
+order. C and D both rewrite `index.ts`'s *first* line differently -- a
+real, unavoidable conflict between exactly those two, confirmed by hand
+against real git before writing the test: single-line-file appends turned
+out to conflict far more readily than multi-line context does (see the
+trial report this whole feature is built against). Since C and D touch the
+same single file, they tie on the smallest-changeset-first heuristic, so
+which one merges first (and therefore which one the *other* conflicts
+against) isn't specified -- the test asserts that exactly one of them
+merged, not which one.
+
 ### Semantic auto-resolution
 
 `merge_branch_into` tries a plain `git merge` first. On a real conflict, it
