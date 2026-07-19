@@ -24,7 +24,58 @@ concurrent population of a shared dependency store entry.
 
 ### Workspace lifecycle
 
-### Teardown edge cases
+`create_workspace` captures `base_commit` (`git rev-parse HEAD`) under the
+same `PidLock` as the `git worktree add` call immediately after it, so
+it's exactly the commit the new branch forks from -- not a value that
+could race against a concurrent `pact spawn` moving HEAD in between the
+two calls.
+
+`workspace_diff` and `workspace_changes` both compute the merge-base
+against the *repo root's* current HEAD, not a persisted value -- correct
+as long as the repo's own branch hasn't been reset past the point the
+workspace's branch forked from, the same assumption `git worktree`/`git
+worktree remove` themselves make about a branch's relationship to its
+origin. `workspace_changes` specifically exists to detect cross-workspace
+file overlap (issue #8): two workspaces sharing the same merge-base forked
+from a comparable point in history, so any file both of them touched is
+worth surfacing, without needing semantic/AST-level analysis -- file-path
+overlap is the same restriction the MCP lease layer already accepts.
+
+### Workspace teardown
+
+`remove_workspace` deletes a workspace's worktree and, unless
+`keep_branch` is set, its `pact/<id>` branch. Confirmed via a real trial
+run (an outside reviewer's report): `git worktree remove` does not delete
+the branch it was created with -- that's standard git behavior, worktree
+removal and branch deletion are independent -- so without this, every
+torn-down workspace left a dead branch behind, accumulating over repeated
+use. Force-deletes (`-D`, not `-d`) since an agent's throwaway workspace
+branch is very often unmerged; `keep_branch` exists for anyone who wants
+to inspect or rebase a workspace's commits after tearing it down.
+
+It refuses on a workspace with uncommitted changes unless `force` is set.
+This wasn't a real check before -- confirmed directly, by spawning a
+workspace, adding an uncommitted file to it, and running the old
+unconditional-`--force` teardown: the file was silently gone afterward,
+with no warning at all. The underlying `git worktree remove` call already
+has this exact protection built in (it refuses on a dirty worktree unless
+*it's* passed `--force`); `remove_worktree_retrying` was defeating that
+protection unconditionally on every call. This check restores it at
+pact's own layer instead, so `--force` is something the caller chooses,
+not something baked in silently.
+
+`remove_worktree_retrying` tolerates two Windows failure modes confirmed
+against a real killed agent process, not theoretical: (1) killing a
+process doesn't mean its handles on its own `current_dir` are released the
+instant `kill()` returns, so an immediate `git worktree remove` can fail
+with "Permission denied" even though the process is already gone --
+retrying briefly usually clears this; (2) git unregisters a worktree from
+its own metadata *before* attempting to delete the directory, so if that
+deletion fails, a later `git worktree remove` on the same path fails with
+"is not a working tree" even though the directory (and whatever's in it)
+is still sitting there orphaned. In that case it falls back to removing
+the directory directly, also with retries, since it's the same underlying
+handle-release race, just past the point where git itself can help.
 
 ### commit_all
 
