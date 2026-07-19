@@ -96,8 +96,6 @@ make every other live child unkillable on Ctrl-C. A failure to install the
 handler at all (e.g. an outer caller already installed one) is logged, not
 fatal -- the agent process(es) just won't be killed on Ctrl-C in that case.
 
-### Process group kill
-
 ### run_and_stream
 
 Every raw stdout line is appended to `log_path` as-is (not the
@@ -135,6 +133,38 @@ by deliberately pointing both real CLIs at a broken command and observing
 a loud, non-silent failure -- not just inferred from documentation.
 
 ### Adapter-specific quirks
+
+### Copilot CLI safety default
+
+Unlike Claude Code, no confirmed non-hanging alternative to
+`--allow-all-tools` exists yet (see the README and issue #2's
+investigation): `--allow-tool` works for in-scope actions, but a task
+needing a tool outside that list hangs (confirmed directly, 50s/zero
+output) rather than denying cleanly the way Claude Code's `--allowedTools`
+does. Until that's investigated further, `--allow-all-tools` stays the
+only working default -- stated plainly in
+`default_safety_description` rather than implying parity with Claude
+Code's safer one. It also has no gradient (unlike Claude Code's six
+permission modes): Copilot CLI's own `--help` states it's "required for
+non-interactive mode", so `build_command`'s `safety_override` parameter
+has nothing meaningful to override here.
+
+### Copilot CLI output schema
+
+`copilot.rs`'s `parse_line` is modeled directly against real output
+captured from `copilot -p ... --output-format json` (see README),
+including a real tool-call-forcing task to confirm `toolRequests`' field
+names -- `name`/`arguments`, not Claude Code's `name`/`input`. Unlike
+Claude Code (one content block per line), Copilot CLI can bundle response
+text *and* one or more tool calls into a single `assistant.message` event
+-- confirmed directly: a file-writing task produced one line with
+non-empty `content` alongside a non-empty `toolRequests` array. Returning
+a `Vec` from `parse_line` is what makes that safe to represent without
+dropping either half. The MCP config passed via `--additional-mcp-config
+@<path>` is the same `{"mcpServers": {...}}` shape Claude Code uses
+(confirmed identical) -- the `@` prefix means "load from file" per Copilot
+CLI's own docs; without it the argument would be parsed as an inline JSON
+string instead.
 
 ## pact-coord — MCP coordination server
 
