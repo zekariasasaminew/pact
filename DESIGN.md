@@ -77,6 +77,16 @@ embedding absolute paths from the wrong venv (activation scripts, `.pth`
 files, console script shebangs) -- a correctness risk, not just extra
 engineering, so it's left as future work rather than shipped provisionally.
 
+### ReadOnlyHardlink tradeoff
+
+A hardlink shares the same underlying file record as its content-store
+entry, so marking the destination read-only also freezes the canonical
+store copy after first use -- intentional, not a side effect to work
+around. The tradeoff: a package that writes into its own installed files
+after materialization (a native-build step, a binary downloader, a
+git-hook installer) fails loudly instead of silently corrupting every
+other workspace sharing that store entry. That failure is the point.
+
 ### Package manager detection
 
 ## pact-cli — command-line surface
