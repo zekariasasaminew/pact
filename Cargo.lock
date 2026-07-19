@@ -872,6 +872,7 @@ name = "pact-vcs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "globset",
  "libc",
  "serde",
  "serde_json",
