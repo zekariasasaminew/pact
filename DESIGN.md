@@ -47,6 +47,58 @@ them).
 
 ## pact-deps — dependency materialization
 
+Detects a workspace's package manager(s) and makes sure dependencies are
+ready before the agent's first real command runs. Most ecosystems (pnpm,
+yarn, uv, poetry, pipenv, Cargo, Go modules, Maven, Gradle) already have a
+good global shared cache, so those just get their normal install/fetch
+command run (`passthrough`). npm (flat, per-project `node_modules`, no
+built-in sharing) is routed through a lockfile-hash-keyed content store
+instead (`store`), materialized via reflink or read-only hardlink so a
+second-plus workspace doesn't pay for a full reinstall. Plain pip/venv is
+intentionally left as passthrough-only (see "Passthrough caching strategy"
+below).
+
+### The Windows MAX_PATH failure (issue #7)
+
+A real failure mode found while verifying issue #7's fallback path, not a
+synthetic test case: the store's key (platform/arch/libc/node/npm version
+plus a 64-character lockfile hash) makes store-entry paths meaningfully
+longer than a plain per-workspace `node_modules` would be. Confirmed
+directly on Windows: `npm ci` populating a store entry for a package with a
+postinstall step (`esbuild`) failed with `ENOENT` spawning `cmd.exe` -- not
+because `cmd.exe` was missing, but because the fully-qualified path to the
+file being installed exceeded Windows' legacy `MAX_PATH` (260 chars) once
+nested under a long store-key directory name inside an already-long
+temp/state-dir root.
+
+`prepare_npm`'s populate-failure fallback (falling back to a plain,
+unshared `npm install` for that one workspace) exists exactly for this
+class of precondition-not-met failure -- it was hit for real, not
+hypothetically, and the fallback (a shorter path) succeeded where store
+population didn't. The same fallback also covers other real causes: a
+network blip, a native build tool missing on that specific machine, a
+registry issue -- none of which should leave a workspace with no
+`node_modules` at all.
+
+### Store key components
+
+`platform_key` distinguishes store entries by OS, architecture, libc
+flavor (Linux only), Node major version, and npm's own version -- see
+issue #7's risk analysis for why each of these, beyond the original
+os/arch/node-major set, turned out to matter: npm version because
+different npm versions can lay out `node_modules` differently from an
+identical lockfile, and libc flavor because packages that resolve a
+platform-specific binary via `optionalDependencies` (esbuild, swc, sharp,
+and others in that exact shape) pick a *different* one for musl (Alpine)
+vs. glibc (Debian/Ubuntu) despite both reporting the same os/arch.
+
+`libc_suffix` detects musl via the presence of a musl dynamic linker
+(`ld-musl-*` in `/lib`), which is how musl libc (Alpine's default)
+identifies itself; anything else on Linux is assumed glibc. Best-effort:
+if detection is inconclusive, "glibc" is the safer assumption (the
+overwhelming majority of non-Alpine Linux), not silently omitting the
+dimension entirely.
+
 ### Windows `.cmd` shim resolution
 
 `cmdutil::run` routes every spawned package-manager command through `cmd /C`

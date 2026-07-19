@@ -1,31 +1,8 @@
-//! The dependency broker (Phase 1).
-//!
-//! Detects a workspace's package manager(s) and makes sure dependencies are
-//! ready before the agent's first real command runs. Most ecosystems
-//! (pnpm, yarn, uv, poetry, pipenv, Cargo, Go modules, Maven, Gradle)
-//! already have a good global shared cache, so those just get their normal
-//! install/fetch command run (see `passthrough`). npm (flat, per-project
-//! `node_modules`, no built-in sharing) is routed through a lockfile-hash-
-//! keyed content store instead (see `store`), materialized via reflink or
-//! read-only hardlink so a second+ workspace doesn't pay for a full
-//! reinstall. Plain pip/venv is intentionally left as passthrough-only --
-//! see `passthrough::run_pip_plain` for why a custom store there was
-//! rejected rather than deferred by accident.
-//!
-//! **A real failure mode found while verifying issue #7's fallback path,
-//! not a synthetic test case:** the store's key (platform/arch/libc/node/
-//! npm version plus a 64-character lockfile hash) makes store-entry paths
-//! meaningfully longer than a plain per-workspace `node_modules` would be.
-//! Confirmed directly on Windows: `npm ci` populating a store entry for a
-//! package with a postinstall step (`esbuild`) failed with `ENOENT`
-//! spawning `cmd.exe` -- not because `cmd.exe` was missing, but because
-//! the fully-qualified path to the file being installed exceeded Windows'
-//! legacy `MAX_PATH` (260 chars) once nested under a long store-key
-//! directory name inside an already-long temp/state-dir root. This is
-//! exactly the class of precondition-not-met failure `prepare_npm`'s
-//! populate-failure fallback (see below) exists for: it was hit for real,
-//! not hypothetically, and the fallback to a plain per-workspace install
-//! (a shorter path) succeeded where the store population didn't.
+//! The dependency broker (Phase 1). Detects a workspace's package
+//! manager(s) and makes sure dependencies are ready before the agent's
+//! first real command runs -- see DESIGN.md ("pact-deps") for the caching
+//! strategy per ecosystem and the real Windows MAX_PATH failure that
+//! shaped `prepare_npm`'s fallback path.
 
 mod cmdutil;
 mod detect;
@@ -66,11 +43,8 @@ fn prepare_npm(workspace_path: &Path) -> Result<()> {
              stable to key a shared cache on",
             workspace_path.display()
         );
-        return passthrough::run(PackageManager::Npm, workspace_path).or_else(|_| {
-            // PackageManager::Npm intentionally bails in passthrough::run;
-            // fall back to a plain, unshared install directly here instead.
-            run_plain_npm_install(workspace_path)
-        });
+        return passthrough::run(PackageManager::Npm, workspace_path)
+            .or_else(|_| run_plain_npm_install(workspace_path));
     }
 
     let key = format!("{}-{}", platform_key(), hash_file(&lockfile)?);
@@ -95,12 +69,6 @@ fn prepare_npm(workspace_path: &Path) -> Result<()> {
         Ok(())
     });
 
-    // A store-population failure (network blip, a native build tool
-    // missing on this specific machine, a registry issue) shouldn't leave
-    // the workspace with no node_modules at all -- fall back to a normal,
-    // unshared install for this one workspace instead, the same as the
-    // no-lockfile path already does. See issue #7's risk analysis: this
-    // was a real gap, not just a hypothetical one.
     let entry = match populated {
         Ok(entry) => entry,
         Err(err) => {
@@ -142,14 +110,8 @@ fn store_root_for(workspace_path: &Path) -> Result<PathBuf> {
 }
 
 /// Distinguishes store entries by OS, architecture, libc flavor (Linux
-/// only), Node major version, and npm's own version -- see issue #7's risk
-/// analysis for why each of these, beyond the original os/arch/node-major
-/// set, turned out to matter: npm version because different npm versions
-/// can lay out `node_modules` differently from an identical lockfile, and
-/// libc flavor because packages that resolve a platform-specific binary
-/// via `optionalDependencies` (esbuild, swc, sharp, and others in that
-/// exact shape) pick a *different* one for musl (Alpine) vs. glibc
-/// (Debian/Ubuntu) despite both reporting the same os/arch.
+/// only), Node major version, and npm's own version -- see DESIGN.md
+/// ("pact-deps > Store key components") for why each dimension is there.
 fn platform_key() -> String {
     let node_major = cmd_version_part("node", 0)
         .unwrap_or_else(|| "unknown".to_string());
@@ -185,11 +147,7 @@ fn cmd_version_part(program: &str, part: i32) -> Option<String> {
 }
 
 /// Empty on every platform except Linux, where it's `-musl` or `-glibc` --
-/// detected via the presence of a musl dynamic linker, which is how musl
-/// libc (Alpine's default) identifies itself; anything else on Linux is
-/// assumed glibc. Best-effort: if detection is inconclusive, "glibc" is
-/// the safer assumption (it's the overwhelming majority of non-Alpine
-/// Linux), not silently omitting the dimension entirely.
+/// see DESIGN.md ("pact-deps > Store key components").
 fn libc_suffix() -> &'static str {
     if std::env::consts::OS != "linux" {
         return "";
