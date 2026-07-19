@@ -74,6 +74,13 @@ runners (`crates/pact-agents/tests/group_kill.rs`, issue #6) -- but a real
 agent's own process tree on real Unix hardware remains unconfirmed, since
 this project's primary dev environment is Windows.
 
+The Unix test spawns `sh -c "sleep 60 & wait"` as the parent (direct child
+of the test process), with the backgrounded `sleep 60` as the grandchild
+whose survival is what's actually being checked; it counts survivors with
+`pgrep -f "sleep 60"` (matching the full command line, so it finds that
+specific backgrounded process, not unrelated `sleep` calls on a shared CI
+runner).
+
 ### Supervisor
 
 `Supervisor` tracks every live child process group across however many
