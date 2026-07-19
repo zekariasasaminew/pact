@@ -57,6 +57,47 @@ which shape produced them.
 
 ### Process group kill
 
+`Supervisor` (below) covers the Ctrl-C path; `kill_if_alive` in `pact-vcs`
+(used by `teardown`) covers killing a specific workspace's agent process on
+demand -- both need to reach an agent's *whole* process tree, not just the
+directly-spawned PID, since a Bash tool call spawns a child shell that a
+plain `Child::kill()` leaves running. On Windows, `taskkill /F /T /PID`
+terminates the full descendant tree in one call. On Unix,
+`pact_agents::run_and_stream` spawns every agent process via
+`command_group`'s `group_spawn` (`process_group(0)`), making the child its
+own process group leader, so its pgid equals its pid -- meaning the
+already-recorded pid alone is enough to kill the whole group via
+`kill(-pid, SIGKILL)`, without needing to persist a separate pgid. The Unix
+path is implemented from documented POSIX process-group semantics and
+`command_group`'s own source, and is CI-verified on real Linux/macOS
+runners (`crates/pact-agents/tests/group_kill.rs`, issue #6) -- but a real
+agent's own process tree on real Unix hardware remains unconfirmed, since
+this project's primary dev environment is Windows.
+
+### Supervisor
+
+`Supervisor` tracks every live child process group across however many
+concurrent `run_and_stream` calls share it, so one process-wide Ctrl-C
+handler can kill all of them (registering the whole group, not just the
+tracked child -- see "Process group kill" above for why) instead of the
+single-shot, one-child assumption `run_and_stream`'s old self-installed
+handler made. Single-`spawn` and `spawn-many` both go through a
+`Supervisor` now: `spawn` just creates its own with exactly one registrant
+for the duration of that one call, so its observable behavior (one
+handler, killing one child, installed and torn down within a single
+`run_and_stream` call) is unchanged; only the mechanism moved from a bare
+function into this small object so `spawn-many` can share one across N
+threads.
+
+The Ctrl-C handler recovers a poisoned mutex guard (`unwrap_or_else(|p|
+p.into_inner())`) rather than bailing out of the handler: a prior panic
+while holding the lock (e.g. inside another thread's own cleanup) must not
+make every other live child unkillable on Ctrl-C. A failure to install the
+handler at all (e.g. an outer caller already installed one) is logged, not
+fatal -- the agent process(es) just won't be killed on Ctrl-C in that case.
+
+### Process group kill
+
 ### Adapter-specific quirks
 
 ## pact-coord — MCP coordination server
