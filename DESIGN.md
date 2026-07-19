@@ -205,7 +205,34 @@ didn't exist.
 
 ### spawn / spawn_many concurrency
 
+A separate, explicit `safety_override` per task in a `spawn_many` batch
+(rather than one shared across the whole batch) is deliberately not
+supported yet -- issue #3's acceptance criteria don't call for it, and
+`--safety`'s existing single-spawn meaning (an adapter-vocabulary
+override) already applies uniformly per invocation; extending it per-task
+is a plausible follow-up, not something to speculatively build now.
+
+`spawn_many` shares one `Supervisor` across N concurrent `std::thread`
+calls so a single Ctrl-C kills every still-running child at once.
+`workspaces: &WorkspaceManager` (via `self`) has no interior mutability
+beyond what `create_workspace` already serializes with `PidLock` -- the
+same concurrency Phase 0 verified against 6 simultaneous `spawn` calls --
+so sharing `&self` across scoped threads doesn't need any new
+synchronization of its own. Index and agent are captured outside each
+task's closure return value specifically so a panic (which loses whatever
+the closure would have returned) still leaves enough to attribute the
+failure to the right task afterward.
+
 ### Coordination config wiring
+
+`coord_config` builds the adapter-agnostic description of the
+coordination server for the agent CLI to launch. What each adapter *does*
+with this (a JSON file passed via a flag, or inline config overrides) is
+up to it -- see `pact-agents::AgentAdapter::build_command`.
+`coord_override`, if given (see `CoordServerOverride`, issue #10), points
+at an alternative command/args instead of `pact mcp-serve` -- pact does no
+protocol translation, it just tells the agent CLI to launch something else
+instead of itself.
 
 ### Weaver — task overlap prediction
 

@@ -35,13 +35,9 @@ pub struct Orchestrator {
     repo_root: PathBuf,
 }
 
-/// One (agent, task) pair to run as part of a `spawn_many` batch. A
-/// separate, explicit `safety_override` per task (rather than one shared
-/// across the whole batch) is deliberately not supported in this first cut
-/// -- issue #3's acceptance criteria don't call for it, and `--safety`'s
-/// existing single-spawn meaning (an adapter-vocabulary override) already
-/// applies uniformly per invocation; extending it per-task is a plausible
-/// follow-up, not something to speculatively build now.
+/// One (agent, task) pair to run as part of a `spawn_many` batch -- see
+/// DESIGN.md ("pact-core > spawn / spawn_many concurrency") for why a
+/// per-task safety override isn't supported yet.
 pub struct SpawnManyTask {
     pub agent: AgentKind,
     pub task: String,
@@ -166,13 +162,9 @@ impl Orchestrator {
     }
 
     /// Builds the (adapter-agnostic) description of the coordination
-    /// server for the agent CLI to launch. What each adapter *does* with
-    /// this (a JSON file passed via a flag, or inline config overrides) is
-    /// up to it -- see `AgentAdapter::build_command`. Defaults to `pact
-    /// mcp-serve`; `coord_override`, if given, points at an alternative
-    /// command/args instead (see `CoordServerOverride`, issue #10) --
-    /// pact does no protocol translation, it just tells the agent CLI to
-    /// launch something else instead of itself.
+    /// server for the agent CLI to launch. Defaults to `pact mcp-serve`;
+    /// `coord_override`, if given, points at an alternative command/args
+    /// instead -- see `CoordServerOverride`.
     fn coord_config(
         &self,
         workspace: &Workspace,
@@ -214,17 +206,11 @@ impl Orchestrator {
 
     /// Creates a workspace, best-effort prepares its dependencies, then
     /// launches the chosen agent CLI headlessly in it and blocks until it
-    /// finishes, forwarding each streamed event to `on_event` as it
-    /// arrives. `safety_override`, if given, is passed through raw to
-    /// that adapter's own safety/approval vocabulary (see
-    /// `AgentAdapter::build_command`); if `None`, the adapter's own
-    /// unattended-safety default is used and should be warned about by the
-    /// caller (see `AgentAdapter::default_safety_description`).
-    ///
-    /// Creates its own single-use `Supervisor` -- this call's Ctrl-C
-    /// handling is exactly what it was before `spawn_many` existed, just
-    /// routed through the same shared mechanism spawn_many uses for N
-    /// concurrent children instead of a bare function.
+    /// finishes, forwarding each streamed event to `on_event`.
+    /// `safety_override`, if given, is passed through raw to that
+    /// adapter's own safety/approval vocabulary; if `None`, the adapter's
+    /// own unattended-safety default is used and should be warned about by
+    /// the caller.
     pub fn spawn(
         &self,
         agent: AgentKind,
@@ -249,13 +235,9 @@ impl Orchestrator {
     /// kills every still-running child at once. `on_event` receives each
     /// task's batch index alongside its event so the caller can attribute
     /// interleaved output back to its source; it's called from whichever
-    /// task's thread produced the event, so it must be `Sync`.
-    ///
-    /// `workspaces: &WorkspaceManager` (via `self`) has no interior
-    /// mutability beyond what `create_workspace` already serializes with
-    /// `PidLock` -- the same concurrency Phase 0 verified against 6
-    /// simultaneous `spawn` calls -- so sharing `&self` across scoped
-    /// threads here doesn't need any new synchronization of its own.
+    /// task's thread produced the event, so it must be `Sync`. See
+    /// DESIGN.md ("pact-core > spawn / spawn_many concurrency") for the
+    /// synchronization argument.
     pub fn spawn_many(
         &self,
         tasks: Vec<SpawnManyTask>,
@@ -536,15 +518,12 @@ impl Orchestrator {
     }
 
     /// Reports files touched by more than one active workspace, among
-    /// workspaces that share a common merge-base (i.e. forked from the
-    /// same point in history) -- see issue #8. Informational only, same
-    /// as MCP leases being advisory: nothing here blocks anything, it just
-    /// surfaces overlap that would otherwise only become visible when a
-    /// user tries to reconcile worktrees by hand. Each conflict is
-    /// enriched with any coordination-DB lease that matched the file
-    /// (active or expired -- lapsed-but-relevant context still counts) and
-    /// a coarse related-message count, since a workspace's id is the same
-    /// string as its MCP `agent_id`, making that join direct.
+    /// workspaces that share a common merge-base -- see issue #8.
+    /// Informational only, same as MCP leases being advisory: nothing here
+    /// blocks anything. Each conflict is enriched with any coordination-DB
+    /// lease that matched the file (active or expired) and a coarse
+    /// related-message count, since a workspace's id is the same string as
+    /// its MCP `agent_id`, making that join direct.
     pub fn detect_conflicts(&self) -> Result<Vec<FileConflict>> {
         let workspaces = self.workspaces.list_workspaces()?;
 
