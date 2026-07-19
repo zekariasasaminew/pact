@@ -75,6 +75,13 @@ writer under real contention blocks briefly instead of immediately erroring
 with `SQLITE_BUSY` -- prior art's "40-50 concurrent agents" claim implies
 that contention is the normal case, not an edge case.
 
+### Per-agent read cursors
+
+A cursor per agent (rather than a shared `read_at` column on the message
+itself) is what makes broadcasts work correctly: each recipient needs to
+see a message once independently of whether other recipients have already
+seen it, which a single mutable "read" flag on the row can't represent.
+
 ### Lease system
 
 ## pact-deps — dependency materialization

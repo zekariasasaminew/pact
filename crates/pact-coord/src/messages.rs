@@ -30,12 +30,9 @@ pub fn send_message(
 }
 
 /// Returns every message addressed to `agent_id` (directly, or broadcast)
-/// that arrived since this agent last checked, then advances its cursor.
-/// A cursor per agent (rather than a shared `read_at` column on the
-/// message itself) is what makes broadcasts work correctly: each recipient
-/// needs to see a message once independently of whether other recipients
-/// have already seen it, which a single mutable "read" flag on the row
-/// can't represent.
+/// that arrived since this agent last checked, then advances its cursor --
+/// see DESIGN.md ("pact-coord > Per-agent read cursors") for why it's a
+/// cursor per agent rather than a shared `read_at` column.
 pub fn check_messages(conn: &Connection, agent_id: &str) -> Result<Vec<Message>> {
     let last_seen: i64 = conn
         .query_row(
