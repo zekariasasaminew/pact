@@ -709,3 +709,20 @@ other workspace sharing that store entry. That failure is the point.
 ### Package manager detection
 
 ## pact-cli — command-line surface
+
+`--help` output for every command comes directly from `///` doc comments
+on the `Cli`/`Command` struct and enum definitions in `main.rs` -- those
+are user-facing product documentation, not internal narrative, so they're
+intentionally kept verbose and are not subject to the comment-reduction
+pass the rest of the codebase got.
+
+`mcp-serve` gets its own, self-contained tokio runtime rather than making
+the whole CLI async -- it's the only command that needs one (`rmcp`
+requires async), and every other command stays exactly as synchronous as
+it already is. See the README for why that tradeoff was made deliberately,
+not by default.
+
+`print_event_labeled` needs no extra locking beyond what `println!`'s own
+internal `Stdout` lock already gives per call: each event becomes one
+complete line written in one call, so concurrent threads' (`spawn-many`)
+lines interleave at line granularity, never mid-line.

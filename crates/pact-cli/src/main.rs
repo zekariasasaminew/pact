@@ -203,11 +203,6 @@ fn main() -> Result<()> {
         None => find_repo_root(&std::env::current_dir()?)?,
     };
 
-    // mcp-serve gets its own, self-contained tokio runtime rather than
-    // making the whole CLI async -- it's the only command that needs one
-    // (rmcp requires async), and every other command stays exactly as
-    // synchronous as it already is. See the README for why that tradeoff
-    // was made deliberately, not by default.
     if let Command::McpServe { agent_id, workspace } = cli.command {
         let runtime = tokio::runtime::Runtime::new()?;
         return runtime.block_on(pact_coord::serve(&repo_root, agent_id, workspace));
@@ -537,11 +532,6 @@ fn print_conflicts(conflicts: &[FileConflict]) {
     }
 }
 
-/// Parses one `--task <agent>:<text>` argument, splitting on the *first*
-/// `:` only so task text itself may freely contain colons (e.g.
-/// `claude:implement X: handle the edge case`). Returns the parsed
-/// `AgentKind`, the raw task text, and the original agent name (for
-/// warning messages, which want the user's own spelling).
 fn parse_task_spec(raw: &str) -> Result<(AgentKind, String, String)> {
     let (agent_name, task) = raw.split_once(':').ok_or_else(|| {
         anyhow::anyhow!("--task '{raw}' must be in the form <agent>:<task text>, e.g. claude:\"fix the bug\"")
@@ -566,12 +556,6 @@ fn agent_label(kind: AgentKind) -> &'static str {
     }
 }
 
-/// Same event formatting as `print_event`, prefixed with `label` so N
-/// interleaved concurrent agents' output stays attributable. No extra
-/// locking beyond what `println!`'s own internal `Stdout` lock already
-/// gives per call -- each event here becomes one complete line written in
-/// one call, so concurrent threads' lines interleave at line granularity,
-/// never mid-line.
 fn print_event_labeled(label: &str, event: &AgentEvent) {
     match event {
         AgentEvent::Init { session_id } => println!("[{label}] [init] session {session_id}"),
@@ -585,17 +569,13 @@ fn print_event_labeled(label: &str, event: &AgentEvent) {
     }
 }
 
-/// Prints one streamed agent event. `Other` is deliberately not skipped --
-/// an unrecognized event is far more likely to be a real message this
-/// adapter doesn't parse in detail yet (a tool-result echo, for instance)
-/// than something safe to drop silently.
 fn print_event(event: &AgentEvent) {
     match event {
         AgentEvent::Init { session_id } => println!("[init] session {session_id}"),
         AgentEvent::CoordStatus { name, status } => println!("[coord] {name}: {status}"),
         AgentEvent::AssistantText(text) => println!("[assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[tool] {name} {input}"),
-        AgentEvent::Result { .. } => {} // surfaced by the caller as the final outcome instead
+        AgentEvent::Result { .. } => {}
         AgentEvent::Other(value) => println!("[other] {value}"),
     }
 }
