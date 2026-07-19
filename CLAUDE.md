@@ -21,7 +21,7 @@ Workspace layout (`crates/`):
 - **Run the CI checks locally before pushing.** This repo's CI (`.github/workflows/ci.yml`) runs `cargo build --workspace --verbose` and `cargo test --workspace --verbose` on ubuntu/macos/windows. Also run `cargo clippy --workspace --all-targets` locally — CI doesn't currently gate on it, but it should be clean anyway.
 - **Keep your branch current with `main` before pushing.** `main` is protected (no direct pushes, no force-push, no deletion, PR + all 3 CI matrix checks required) — rebase or merge `main` into your branch first so the PR doesn't go stale.
 - **No AI attribution trailers** — never `Co-Authored-By: Claude`/`Co-authored-by: Copilot` unless explicitly asked.
-- **Meaningful commit messages** — imperative, specific, states *why* when not obvious (this repo's existing commit style already leans toward detailed doc comments explaining *why*, not just *what* — match that).
+- **Meaningful commit messages** — imperative, specific, states *why* when not obvious from the diff alone.
 
 ## Testing conventions in this repo
 
@@ -30,8 +30,13 @@ Workspace layout (`crates/`):
 - **Never spawn a real agent CLI (claude/copilot/codex/gemini) in a test.** It costs real money and can hang. Where agent-invoking logic needs test coverage, inject a stub closure/fake instead (see `ArbiterResolver` in `pact-vcs` — pact-core builds the real agent-spawning closure, tests pass a stub that never touches a real process).
 - Before hand-verifying any new git-interaction behavior, reproduce the exact git scenario by hand in a scratch repo first (`git init` + manual branches) to confirm the real git behavior matches what the code assumes — this codebase has already been burned once by an incorrect assumption about how `git merge`'s 3-way merge handles single-line-context conflicts.
 
+## Comments
+
+Default to no comments — see `~/.claude/CLAUDE.md`'s "Comments" section for the full policy (naming/structure carries the *what* and *why*; brief `///` public-API docs and `// SAFETY:` comments are the exceptions; clap's `///` on CLI command/flag definitions is `--help` text, not a code comment, and stays verbose).
+
+`DESIGN.md` at the repo root is where this project's *why* actually lives: empirical findings from manual testing, trial-report-driven fixes, tradeoffs considered and rejected, what's been confirmed by hand vs. only reasoned about — organized by crate. When code needs that context, point to a `DESIGN.md` section by name (`-- see DESIGN.md ("pact-vcs > merge_all")`) rather than writing it inline. Read it, and keep it current when you add or change something worth recording there.
+
 ## Other practices
 
-- Doc comments here lean long and explain *why*, including references to the specific issue/trial report that motivated a piece of code, and what's been *confirmed* by hand vs. only reasoned about. Keep that standard — it's load-bearing for a solo-maintained project.
-- Anything implemented but not exercised against a real paid agent call (e.g. the Gemini adapter, Arbiter's live agent path) should say so explicitly in a doc comment, matching the existing "implemented-not-live-verified" convention (see issue #6, #9).
+- Anything implemented but not exercised against a real paid agent call (e.g. the Gemini adapter, Arbiter's live agent path) should say so explicitly — in `DESIGN.md`, not an inline comment — matching the existing "implemented-not-live-verified" convention (see issue #6, #9).
 - Clean up scratch/temp repos created during manual verification (`AppData/Local/Temp/claude/.../scratchpad` or similar) — don't leave them behind.

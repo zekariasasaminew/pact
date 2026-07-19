@@ -36,6 +36,6 @@ crates/
 
 ## Code style
 
-- Doc comments explain *why*, not just *what* — including what's confirmed by hand vs. only reasoned about, and references to the issue/trial that motivated the code. This project is solo-maintained; that context is load-bearing.
-- Say explicitly when something is implemented but not live-verified against a real paid agent call (matches the existing convention for the Gemini adapter and Arbiter's live-agent path).
+- **Default to no comments.** Naming and structure carry the *what* and *why*. Exceptions: brief `///` summaries on public API (real documentation, not narrative), `// SAFETY:` on unsafe blocks, and a short load-bearing note at a genuinely non-obvious branch naming can't carry. Clap's `///` on CLI command/flag definitions is `--help` text, not a code comment, and stays verbose.
+- `DESIGN.md` at the repo root holds this project's *why*: empirical findings confirmed by hand, trial-report-driven fixes, rejected alternatives, organized by crate. Point to it by section name (`-- see DESIGN.md ("pact-vcs > merge_all")`) instead of writing that context inline. Say explicitly when something is implemented but not live-verified against a real paid agent call (matches the existing convention for the Gemini adapter and Arbiter's live-agent path) — in `DESIGN.md`, not a comment.
 - Prefer editing existing files over creating new ones; avoid abstraction the current task doesn't need.
