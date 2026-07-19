@@ -134,6 +134,46 @@ a loud, non-silent failure -- not just inferred from documentation.
 
 ### Adapter-specific quirks
 
+### Claude Code safety default
+
+`ClaudeCodeAdapter`'s default is `--allowedTools` (a curated safe-operation
+allowlist covering file read/write/edit/search plus the VCS and
+package-manager commands a coding task actually needs), not
+`bypassPermissions` -- confirmed directly that an explicit `--allowedTools`
+list makes Claude Code deny an out-of-scope tool call cleanly and
+immediately in headless mode, rather than hang waiting for an approval
+prompt no TTY can answer. `bypassPermissions` alone was the *documented*
+fix for the hang; this is a real, verified safer alternative that isn't
+all-or-nothing. The allowlist (`DEFAULT_ALLOWED_TOOLS`) isn't
+user-configurable yet (see the README's Known limitations) -- the point
+for now is proving the mechanism is genuinely safer than the old
+bypass-everything default, not claiming this exact list is final.
+
+`--allowedTools` is always passed, harmless alongside an explicit
+`--permission-mode` override too (including `bypassPermissions` itself).
+`safety_override`, when given, is passed as a raw `--permission-mode`
+value; when absent, no `--permission-mode` flag is passed at all --
+confirmed that Claude Code's own baseline default mode, combined with the
+allowlist, is what produces the clean-deny-not-hang behavior this default
+relies on. The MCP config is rendered to a `{"mcpServers": {...}}` JSON
+file and passed via `--mcp-config` -- confirmed against the real CLI: a
+malformed config is rejected with a loud error before the session starts,
+so getting the file wrong is never a silent no-op.
+
+### Claude Code output schema
+
+`parse_line` is modeled directly against real output captured from
+`claude -p --output-format stream-json --verbose` (see README), not
+secondhand docs. One event in, one event out in every case observed so
+far, but it returns a `Vec` to match the shared `AgentAdapter` interface
+other adapters need.
+
+`parse_assistant` reports the first recognized content block (text or
+tool_use) rather than collecting all of them into a `Vec`, since in
+practice Claude Code emits one block per line in stream-json mode.
+Anything genuinely mixed falls back to `Other` with the full message
+preserved.
+
 ### Copilot CLI safety default
 
 Unlike Claude Code, no confirmed non-hanging alternative to
