@@ -13,6 +13,15 @@ them).
 
 ## pact-vcs — git worktree lifecycle, merge-all
 
+### PidLock origin
+
+Originally built because git itself races on `.git/config.lock` when `git
+worktree add`/`remove` run concurrently (see
+anthropics/claude-code#34645) -- but the mechanism isn't git-specific,
+it's just "serialize access to a resource, and don't leave it stuck locked
+forever if the holder died." `pact-deps` reuses it verbatim to guard
+concurrent population of a shared dependency store entry.
+
 ### Workspace lifecycle
 
 ### Teardown edge cases
