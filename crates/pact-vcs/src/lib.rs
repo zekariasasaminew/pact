@@ -512,15 +512,10 @@ impl WorkspaceManager {
         Ok(serde_json::from_str(&contents)?)
     }
 
-    /// Stages and commits everything in a workspace's working tree (staged,
-    /// unstaged, and untracked) with a message derived from its task text,
-    /// so `pact diff`/`pact log` and `merge-all` always have a real commit
-    /// to work with instead of a permanently-dirty worktree -- see the
-    /// trial report that motivated this (every workspace ended `[dirty]`
-    /// with nothing to merge). Returns `Ok(false)` without running `git
-    /// commit` at all if the workspace is already clean, so callers (e.g.
-    /// `merge-all`'s first phase) can call this unconditionally on every
-    /// workspace.
+    /// Stages and commits everything in a workspace's working tree with a
+    /// message derived from its task text -- see DESIGN.md ("pact-vcs >
+    /// commit_all"). Returns `Ok(false)` without running `git commit` at
+    /// all if the workspace is already clean.
     pub fn commit_all(&self, id: &str) -> Result<bool> {
         let workspace = self.get_workspace(id)?;
         if self.dirty_status(&workspace.path)?.is_empty() {
@@ -1073,12 +1068,6 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Builds a commit subject (and, for multi-line/long task text, a body) from
-/// a workspace id and its task: `agent <id>: <first line of task>`, matching
-/// the existing `pact/<id>` branch-naming convention so a commit is
-/// traceable back to its workspace at a glance. The subject line is capped
-/// around 72 chars (git convention); if the task is longer or spans
-/// multiple lines, the full untruncated text follows in the commit body.
 fn commit_message(id: &str, task: &str) -> String {
     let task = task.trim();
     let first_line = task.lines().next().unwrap_or(task).trim();
@@ -1091,9 +1080,6 @@ fn commit_message(id: &str, task: &str) -> String {
     };
     let subject = format!("agent {id}: {subject_line}");
 
-    // Full text goes in the body whenever the subject alone doesn't already
-    // capture it losslessly -- either because there's more than one line,
-    // or because the single line itself had to be truncated to fit.
     if task == first_line && !truncated {
         subject
     } else {

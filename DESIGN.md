@@ -79,6 +79,23 @@ handle-release race, just past the point where git itself can help.
 
 ### commit_all
 
+Stages and commits everything in a workspace's working tree (staged,
+unstaged, untracked) with a message derived from its task text, so `pact
+diff`/`pact log` and `merge-all` always have a real commit to work with
+instead of a permanently-dirty worktree -- see the trial report that
+motivated this: every workspace in the trial ended `[dirty]` with nothing
+to merge. `merge-all`'s first phase calls this unconditionally on every
+selected workspace, which is why it's a no-op returning `Ok(false)` rather
+than an error on an already-clean workspace.
+
+`commit_message` builds the commit subject as `agent <id>: <first line of
+task>`, matching the existing `pact/<id>` branch-naming convention so a
+commit is traceable back to its workspace at a glance. The subject line is
+capped around 72 chars (git convention); if the task is longer or spans
+multiple lines, the full untruncated text follows in the commit body --
+this is asserted directly by `commit_message`'s own unit tests, which is
+the more reliable place to see the exact contract than a comment.
+
 ### merge_all
 
 ### Semantic auto-resolution
