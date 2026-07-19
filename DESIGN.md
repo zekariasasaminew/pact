@@ -47,6 +47,15 @@ them).
 
 ## pact-deps — dependency materialization
 
+### Windows `.cmd` shim resolution
+
+`cmdutil::run` routes every spawned package-manager command through `cmd /C`
+on Windows. npm/pnpm/yarn (and sometimes poetry/pipenv, depending on install
+method) ship as `.cmd` shims, not `.exe`. `std::process::Command` doesn't
+consult `PATHEXT` the way a real shell does, so `Command::new("npm")` fails
+with "program not found" even though `npm` works fine typed interactively.
+`cmd /C` restores that resolution; other platforms get a plain, direct spawn.
+
 ### Package manager detection
 
 ## pact-cli — command-line surface
