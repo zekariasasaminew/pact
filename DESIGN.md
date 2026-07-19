@@ -98,6 +98,35 @@ fatal -- the agent process(es) just won't be killed on Ctrl-C in that case.
 
 ### Process group kill
 
+### run_and_stream
+
+Every raw stdout line is appended to `log_path` as-is (not the
+re-serialized `AgentEvent`) so schema drift or fields the parser doesn't
+know about yet aren't lost -- then parsed and handed to `on_event`.
+`on_pid` is called once, immediately after spawning, so the caller can
+persist the PID before this function blocks -- that's what lets a
+`teardown` invoked from a different process find and kill a still-running
+agent.
+
+stderr is drained on its own thread into the same log file (prefixed
+`[stderr] `) rather than left inherited or piped-but-undrained -- either
+of those risks interleaved garbage in the terminal or a full-pipe deadlock
+if the child writes enough of it.
+
+`parse_line` is adapter-supplied and returns zero or more events for one
+raw line, not exactly one, because not every adapter's schema maps one
+line to one event: confirmed necessary for Copilot CLI, whose
+`assistant.message` events can carry both response text and one or more
+tool calls in the same line. Claude Code's schema happens to be
+one-event-per-line, but this function doesn't assume that of anyone.
+
+Not every adapter emits an explicit `Result`-shaped event -- Codex's
+`turn.completed`, confirmed directly, carries no success/failure signal at
+all, so it never produces one. Falling back to `success: false`
+unconditionally when none was seen would misreport every successful Codex
+run as a failure; the process's own exit code is the honest fallback
+signal instead.
+
 ### MCP config format confirmation
 
 `write_mcp_json_config`'s JSON shape was confirmed to work for both Claude
