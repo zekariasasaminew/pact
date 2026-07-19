@@ -82,15 +82,9 @@ pub struct FileConflict {
 }
 
 /// One file-like token mentioned in more than one task's text within the
-/// same `spawn_many` batch -- "Weaver": the prevention half of the
-/// conflict-avoidance story (see the merge-all design notes). Pure text
-/// analysis, no agent spawned, run *before* anything is spawned at all, on
-/// the theory that decomposition-time prevention is cheaper and more
-/// reliable than any amount of post-hoc merge cleverness -- this is a
-/// heuristic prediction, not a guarantee: it never blocks `spawn_many`, it
-/// only gives the caller something to warn about (same "informational,
-/// nothing here blocks anything" posture `Orchestrator::detect_conflicts`
-/// already established for git-level overlap).
+/// same `spawn_many` batch -- "Weaver", the prevention half of the
+/// conflict-avoidance story. See DESIGN.md ("pact-core > Weaver -- task
+/// overlap prediction").
 pub struct PredictedOverlap {
     pub token: String,
     /// Indices into the `spawn_many` task list (0-based) whose text
@@ -99,13 +93,8 @@ pub struct PredictedOverlap {
 }
 
 /// Scans every task's text for file-path-like tokens and reports any token
-/// mentioned by two or more tasks -- e.g. 5 of 10 tasks each saying "export
-/// it from `src/index.ts`" predicts exactly the conflict the pact v0.2
-/// trial report hit. Deliberately conservative about false negatives, not
-/// false positives: missing a real overlap just means this specific
-/// prediction isn't caught (no worse than not running this at all), while
-/// an occasional false-positive token (e.g. "next.js" read as a file) costs
-/// nothing worse than one harmless extra line in a warning.
+/// mentioned by two or more tasks -- see DESIGN.md ("pact-core > Weaver --
+/// task overlap prediction").
 pub fn predict_task_overlap(tasks: &[SpawnManyTask]) -> Vec<PredictedOverlap> {
     let mut token_to_tasks: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
@@ -137,11 +126,8 @@ fn extract_file_tokens(task: &str) -> std::collections::HashSet<String> {
     tokens
 }
 
-/// A conservative, regex-free "does this look like a file path" check: ends
-/// in a short alphanumeric extension after the last `.`, with a non-empty
-/// stem made of path-ish characters. Not a real path grammar -- see
-/// `predict_task_overlap`'s doc comment for why that's an acceptable
-/// tradeoff here.
+/// A conservative, regex-free "does this look like a file path" check --
+/// see DESIGN.md ("pact-core > Weaver -- task overlap prediction").
 fn looks_like_file_path(s: &str) -> bool {
     let Some(dot) = s.rfind('.') else { return false };
     let ext = &s[dot + 1..];

@@ -236,6 +236,29 @@ instead of itself.
 
 ### Weaver — task overlap prediction
 
+`PredictedOverlap`/`predict_task_overlap`: pure text analysis, no agent
+spawned, run *before* anything is spawned at all, on the theory that
+decomposition-time prevention is cheaper and more reliable than any amount
+of post-hoc merge cleverness -- this is a heuristic prediction, not a
+guarantee: it never blocks `spawn_many`, it only gives the caller
+something to warn about (same "informational, nothing here blocks
+anything" posture `Orchestrator::detect_conflicts` already established for
+git-level overlap).
+
+`predict_task_overlap` scans every task's text for file-path-like tokens
+and reports any token mentioned by two or more tasks -- e.g. 5 of 10 tasks
+each saying "export it from `src/index.ts`" predicts exactly the conflict
+the pact v0.2 trial report hit. Deliberately conservative about false
+negatives, not false positives: missing a real overlap just means this
+specific prediction isn't caught (no worse than not running this at all),
+while an occasional false-positive token (e.g. "next.js" read as a file)
+costs nothing worse than one harmless extra line in a warning.
+
+`looks_like_file_path` is a conservative, regex-free check: ends in a
+short alphanumeric extension after the last `.`, with a non-empty stem
+made of path-ish characters. Not a real path grammar -- see the false
+positive/negative tradeoff above for why that's acceptable here.
+
 ### Arbiter — agent invocation
 
 ## pact-agents — adapters and process supervision
