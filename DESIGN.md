@@ -56,6 +56,27 @@ consult `PATHEXT` the way a real shell does, so `Command::new("npm")` fails
 with "program not found" even though `npm` works fine typed interactively.
 `cmd /C` restores that resolution; other platforms get a plain, direct spawn.
 
+### Passthrough caching strategy
+
+`passthrough::run` warms the package manager's own global cache instead of
+building pact-specific sharing, for ecosystems that already cache well:
+pnpm, yarn, uv, poetry, pipenv, Cargo, and Go modules all cache once and
+reuse across projects by default, so the only job here is warming that
+cache before the agent's first real command. Maven and Gradle need no
+command at all -- `~/.m2` and `~/.gradle/caches` populate lazily on any
+build invocation, so an explicit fetch step would only add time. A
+non-zero exit is logged, not returned as an error: a transient network
+failure here shouldn't fail the whole `spawn`, since the agent can still
+retry the install itself once it starts working.
+
+Plain pip/venv gets no custom store (a Phase 1 decision): pip already has
+its own global download cache (`~/.cache/pip`) shared across projects,
+covering the expensive part (network fetch). A hardlink-based store on top
+of that would mean hardlinking into freshly created venvs, which risks
+embedding absolute paths from the wrong venv (activation scripts, `.pth`
+files, console script shebangs) -- a correctness risk, not just extra
+engineering, so it's left as future work rather than shipped provisionally.
+
 ### Package manager detection
 
 ## pact-cli — command-line surface
