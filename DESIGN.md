@@ -98,6 +98,13 @@ fatal -- the agent process(es) just won't be killed on Ctrl-C in that case.
 
 ### Process group kill
 
+### MCP config format confirmation
+
+`write_mcp_json_config`'s JSON shape was confirmed to work for both Claude
+Code's `--mcp-config` and Copilot CLI's `--additional-mcp-config @<path>`
+by deliberately pointing both real CLIs at a broken command and observing
+a loud, non-silent failure -- not just inferred from documentation.
+
 ### Adapter-specific quirks
 
 ## pact-coord — MCP coordination server
