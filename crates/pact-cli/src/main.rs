@@ -7,7 +7,7 @@ use pact_agents::{AgentEvent, AgentKind};
 use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, PredictedOverlap, SpawnManyTask};
 
 #[derive(Parser)]
-#[command(name = "pact", about = "Orchestrate parallel AI coding agent workspaces")]
+#[command(name = "pact", version, about = "Orchestrate parallel AI coding agent workspaces")]
 struct Cli {
     /// Path to the git repository to operate on (defaults to the current directory's repo root)
     #[arg(long, global = true)]
