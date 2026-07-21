@@ -13,6 +13,13 @@ struct Cli {
     #[arg(long, global = true)]
     repo: Option<PathBuf>,
 
+    /// Show every streamed agent event, including ones filtered out by
+    /// default as noise (e.g. Copilot CLI's `session.background_tasks_changed`).
+    /// Only affects what's printed live -- the full unfiltered stream is
+    /// always written to the workspace's log file regardless of this flag.
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -228,6 +235,7 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let verbose = cli.verbose;
     let repo_root = match cli.repo {
         Some(p) => p,
         None => find_repo_root(&std::env::current_dir()?)?,
@@ -278,7 +286,7 @@ fn main() -> Result<()> {
                 &task,
                 safety.as_deref(),
                 coord_override.as_ref(),
-                print_event,
+                |event| print_event(event, verbose),
             )?;
 
             println!("workspace {} ({})", workspace.id, workspace.branch);
@@ -356,7 +364,7 @@ fn main() -> Result<()> {
                 safety.as_deref(),
                 coord_override.as_ref(),
                 |index, agent, event| {
-                    print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event);
+                    print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
                 },
             );
 
@@ -630,13 +638,42 @@ fn agent_label(kind: AgentKind) -> &'static str {
     }
 }
 
+/// Raw `type` values, as reported by an adapter's underlying CLI, that are
+/// real but uninteresting to a human watching the stream live -- confirmed
+/// noise, not a guess: a single Copilot CLI spawn produced 52 `[other]`
+/// lines to 1 real `[assistant]` line, almost all `session
+/// .background_tasks_changed`/`tool.execution_partial_result`; a 2-agent
+/// `spawn-many` run's log ballooned to 695 KB on the strength of these two
+/// alone. Suppressed only from the live terminal view by default -- the
+/// full unfiltered stream is always in the workspace's log file
+/// (`run_and_stream` writes every raw line there before any filtering),
+/// and `--verbose` restores them here too.
+const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] =
+    &["session.background_tasks_changed", "tool.execution_partial_result"];
+
+/// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
+/// only when it's a known-noisy type (see `SUPPRESSED_OTHER_EVENT_TYPES`)
+/// and `--verbose` wasn't passed. Anything not on that list still prints
+/// unconditionally: an unrecognized event is far more likely to be a real
+/// message an adapter doesn't parse in detail yet than something safe to
+/// drop silently, so only specifically-confirmed noise is ever suppressed.
+fn should_print_other(value: &serde_json::Value, verbose: bool) -> bool {
+    if verbose {
+        return true;
+    }
+    match value.get("type").and_then(serde_json::Value::as_str) {
+        Some(t) => !SUPPRESSED_OTHER_EVENT_TYPES.contains(&t),
+        None => true,
+    }
+}
+
 /// Same event formatting as `print_event`, prefixed with `label` so N
 /// interleaved concurrent agents' output stays attributable. No extra
 /// locking beyond what `println!`'s own internal `Stdout` lock already
 /// gives per call -- each event here becomes one complete line written in
 /// one call, so concurrent threads' lines interleave at line granularity,
 /// never mid-line.
-fn print_event_labeled(label: &str, event: &AgentEvent) {
+fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[{label}] [init] session {session_id}"),
         AgentEvent::CoordStatus { name, status } => {
@@ -645,22 +682,28 @@ fn print_event_labeled(label: &str, event: &AgentEvent) {
         AgentEvent::AssistantText(text) => println!("[{label}] [assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[{label}] [tool] {name} {input}"),
         AgentEvent::Result { .. } => {}
-        AgentEvent::Other(value) => println!("[{label}] [other] {value}"),
+        AgentEvent::Other(value) if should_print_other(value, verbose) => {
+            println!("[{label}] [other] {value}")
+        }
+        AgentEvent::Other(_) => {}
     }
 }
 
-/// Prints one streamed agent event. `Other` is deliberately not skipped --
-/// an unrecognized event is far more likely to be a real message this
-/// adapter doesn't parse in detail yet (a tool-result echo, for instance)
-/// than something safe to drop silently.
-fn print_event(event: &AgentEvent) {
+/// Prints one streamed agent event. `Other` is deliberately not skipped by
+/// default -- an unrecognized event is far more likely to be a real
+/// message this adapter doesn't parse in detail yet (a tool-result echo,
+/// for instance) than something safe to drop silently. The exception is a
+/// short, confirmed list of known-noisy raw types (`should_print_other`),
+/// suppressed unless `--verbose` is passed.
+fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[init] session {session_id}"),
         AgentEvent::CoordStatus { name, status } => println!("[coord] {name}: {status}"),
         AgentEvent::AssistantText(text) => println!("[assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[tool] {name} {input}"),
         AgentEvent::Result { .. } => {} // surfaced by the caller as the final outcome instead
-        AgentEvent::Other(value) => println!("[other] {value}"),
+        AgentEvent::Other(value) if should_print_other(value, verbose) => println!("[other] {value}"),
+        AgentEvent::Other(_) => {}
     }
 }
 
@@ -737,5 +780,32 @@ mod tests {
     fn parse_task_spec_rejects_empty_task_text_after_prefix() {
         let err = parse_task_spec("claude:", None).unwrap_err();
         assert!(err.to_string().contains("empty task text"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn should_print_other_suppresses_known_noisy_types_by_default() {
+        let value = serde_json::json!({"type": "session.background_tasks_changed", "data": {}});
+        assert!(!should_print_other(&value, false));
+
+        let value = serde_json::json!({"type": "tool.execution_partial_result", "data": {}});
+        assert!(!should_print_other(&value, false));
+    }
+
+    #[test]
+    fn should_print_other_shows_known_noisy_types_when_verbose() {
+        let value = serde_json::json!({"type": "session.background_tasks_changed", "data": {}});
+        assert!(should_print_other(&value, true));
+    }
+
+    #[test]
+    fn should_print_other_prints_unrecognized_types_by_default() {
+        // Only specifically-confirmed noise is ever suppressed -- anything
+        // else stays visible even without --verbose, since it's more
+        // likely to be a real message this adapter doesn't parse yet.
+        let value = serde_json::json!({"type": "assistant.some_new_event", "data": {}});
+        assert!(should_print_other(&value, false));
+
+        let value = serde_json::json!({"no_type_field": true});
+        assert!(should_print_other(&value, false));
     }
 }
