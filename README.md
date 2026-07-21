@@ -164,6 +164,12 @@ identical patterns: one agent claimed `src/*.txt`, a second claimed the
 narrower `src/hello.txt`, and the conflict was correctly detected and
 reported with the specific overlapping file named.
 
+`check_messages` never returns a message the calling agent sent itself --
+direct messages already excluded anything not addressed to the caller, and
+broadcasts are now excluded the same way, so an agent that broadcasts a
+status update and then polls in a loop doesn't see, and react to, its own
+broadcast.
+
 The coordination database is deliberately *not* stored alongside
 per-workspace bookkeeping in `.pact-<repo>/` (see State layout) --
 that directory sits one level above every workspace
