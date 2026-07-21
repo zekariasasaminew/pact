@@ -61,18 +61,26 @@ enum Command {
     /// concurrently, streaming their combined output live with each line
     /// attributed to its source. Existing single-`spawn` behavior is
     /// unchanged -- this is an entirely separate command, not an alternate
-    /// mode of `spawn` (it does not accept `spawn`'s `--agent` flag; agent
-    /// selection is per-task, see `--task` below). Same as `spawn`, each
-    /// workspace stays `[dirty]` in `list` until `commit-all` or
-    /// `merge-all` commits it.
+    /// mode of `spawn`. Same as `spawn`, each workspace stays `[dirty]` in
+    /// `list` until `commit-all` or `merge-all` commits it.
     SpawnMany {
-        /// One task per agent to run, repeatable: `--task <agent>:<text>`,
-        /// e.g. `--task claude:"fix the bug" --task claude:"write tests"`
-        /// (N instances of the same agent) or `--task copilot:"..."` mixed
-        /// in (different agents), whichever the caller wants. Split on the
-        /// first `:` only, so task text itself may contain colons.
+        /// One task per agent to run, repeatable. A task without an
+        /// `<agent>:` prefix uses --agent (error if --agent wasn't given);
+        /// a task with a prefix always uses that agent regardless of
+        /// --agent, for mixing agents in one batch, e.g. `--agent claude
+        /// --task "fix the bug" --task copilot:"write tests"` runs the
+        /// first on claude and the second on copilot. Prefix is split on
+        /// the first `:` only, so task text itself may contain colons.
         #[arg(long = "task", required = true)]
         tasks: Vec<String>,
+
+        /// Default agent CLI for any --task without an explicit
+        /// `<agent>:` prefix (claude, copilot, codex, gemini). A task with
+        /// a prefix always uses that agent instead, even when --agent is
+        /// also given. At least one of --agent or a per-task prefix is
+        /// required for every task.
+        #[arg(long)]
+        agent: Option<String>,
 
         /// Same raw safety/approval override as `spawn --safety`, applied
         /// to every task in this batch -- see `spawn`'s help for the
@@ -283,13 +291,22 @@ fn main() -> Result<()> {
         }
         Command::SpawnMany {
             tasks,
+            agent,
             safety,
             coord_command,
             coord_args,
         } => {
+            let default_agent = agent
+                .as_deref()
+                .map(|name| {
+                    AgentKind::parse(name)
+                        .map(|kind| (kind, name))
+                        .ok_or_else(|| anyhow::anyhow!("unknown --agent '{name}' (expected claude, copilot, codex, or gemini)"))
+                })
+                .transpose()?;
             let specs = tasks
                 .iter()
-                .map(|raw| parse_task_spec(raw))
+                .map(|raw| parse_task_spec(raw, default_agent))
                 .collect::<Result<Vec<_>>>()?;
 
             let mut warned_agents = std::collections::HashSet::new();
@@ -571,19 +588,37 @@ fn print_conflicts(conflicts: &[FileConflict]) {
 /// `claude:implement X: handle the edge case`). Returns the parsed
 /// `AgentKind`, the raw task text, and the original agent name (for
 /// warning messages, which want the user's own spelling).
-fn parse_task_spec(raw: &str) -> Result<(AgentKind, String, String)> {
-    let (agent_name, task) = raw.split_once(':').ok_or_else(|| {
-        anyhow::anyhow!("--task '{raw}' must be in the form <agent>:<task text>, e.g. claude:\"fix the bug\"")
-    })?;
-    if task.trim().is_empty() {
-        bail!("--task '{raw}' has empty task text after the ':'");
+/// Parses one `--task` value into `(agent, task text, agent display name)`.
+/// A `<agent>:` prefix, when present and recognized, always wins -- that's
+/// what makes mixing agents in one `spawn-many` batch possible even when
+/// `--agent` also sets a default. `default` (from `--agent`) is what a task
+/// without a recognized prefix falls back to; without one, a prefix is
+/// mandatory, same as before `--agent` existed on this command.
+fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(AgentKind, String, String)> {
+    if let Some((agent_name, task)) = raw.split_once(':') {
+        if let Some(kind) = AgentKind::parse(agent_name) {
+            if task.trim().is_empty() {
+                bail!("--task '{raw}' has empty task text after the ':'");
+            }
+            return Ok((kind, task.to_string(), agent_name.to_string()));
+        }
+        if default.is_none() {
+            bail!(
+                "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, codex, or gemini)"
+            );
+        }
     }
-    let kind = AgentKind::parse(agent_name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, codex, or gemini)"
-        )
-    })?;
-    Ok((kind, task.to_string(), agent_name.to_string()))
+
+    let Some((kind, name)) = default else {
+        bail!(
+            "--task '{raw}' must be in the form <agent>:<task text>, e.g. claude:\"fix the bug\" \
+             (or pass --agent to set a default agent for tasks without a prefix)"
+        );
+    };
+    if raw.trim().is_empty() {
+        bail!("--task '{raw}' is empty");
+    }
+    Ok((kind, raw.to_string(), name.to_string()))
 }
 
 fn agent_label(kind: AgentKind) -> &'static str {
@@ -642,5 +677,65 @@ fn find_repo_root(start: &Path) -> Result<PathBuf> {
                 start.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_task_spec_uses_explicit_prefix_with_no_default() {
+        let (kind, task, name) = parse_task_spec("claude:fix the bug", None).unwrap();
+        assert_eq!(kind, AgentKind::Claude);
+        assert_eq!(task, "fix the bug");
+        assert_eq!(name, "claude");
+    }
+
+    #[test]
+    fn parse_task_spec_requires_a_prefix_when_no_default_is_set() {
+        let err = parse_task_spec("fix the bug", None).unwrap_err();
+        assert!(err.to_string().contains("must be in the form"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_task_spec_falls_back_to_default_when_no_prefix_present() {
+        let (kind, task, name) =
+            parse_task_spec("fix the bug", Some((AgentKind::Copilot, "copilot"))).unwrap();
+        assert_eq!(kind, AgentKind::Copilot);
+        assert_eq!(task, "fix the bug");
+        assert_eq!(name, "copilot");
+    }
+
+    #[test]
+    fn parse_task_spec_prefix_wins_over_default_for_mixed_batches() {
+        let (kind, task, name) =
+            parse_task_spec("claude:fix the bug", Some((AgentKind::Copilot, "copilot"))).unwrap();
+        assert_eq!(kind, AgentKind::Claude);
+        assert_eq!(task, "fix the bug");
+        assert_eq!(name, "claude");
+    }
+
+    #[test]
+    fn parse_task_spec_falls_back_to_default_when_colon_prefix_is_not_a_known_agent() {
+        // A colon in the task text itself, not a real agent prefix -- with
+        // a default set, the whole string is the task text.
+        let (kind, task, name) =
+            parse_task_spec("fix the bug: handle empty array", Some((AgentKind::Copilot, "copilot"))).unwrap();
+        assert_eq!(kind, AgentKind::Copilot);
+        assert_eq!(task, "fix the bug: handle empty array");
+        assert_eq!(name, "copilot");
+    }
+
+    #[test]
+    fn parse_task_spec_reports_unknown_agent_prefix_when_no_default_is_set() {
+        let err = parse_task_spec("bogus:fix the bug", None).unwrap_err();
+        assert!(err.to_string().contains("unknown agent 'bogus'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_task_spec_rejects_empty_task_text_after_prefix() {
+        let err = parse_task_spec("claude:", None).unwrap_err();
+        assert!(err.to_string().contains("empty task text"), "unexpected error: {err}");
     }
 }
