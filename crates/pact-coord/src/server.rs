@@ -16,7 +16,8 @@ use crate::{leases, messages};
 pub struct ClaimFilesParams {
     /// Glob patterns (e.g. "src/**/*.rs") you're about to edit.
     pub globs: Vec<String>,
-    /// How long the claim lasts, in seconds. Defaults to 15 minutes if omitted.
+    /// How long the claim lasts, in seconds. Defaults to 15 minutes if
+    /// omitted. Must be positive and at most 86400 (24 hours).
     pub ttl_seconds: Option<i64>,
 }
 
