@@ -139,13 +139,46 @@ pub fn claim_files(
     })
 }
 
-pub fn release_files(conn: &Connection, holder: &str, patterns: &[String]) -> Result<usize> {
-    let mut released = 0;
+/// Releases a holder's leases whose *claimed* pattern either matches one of
+/// `patterns` exactly, or -- since agents can plausibly reuse a
+/// differently-worded but equivalent glob at release time, e.g. releasing
+/// `src/*.js` for something originally claimed as `src/add.js` -- overlaps
+/// it on the actual files each pattern currently matches (same expand-and-
+/// intersect approach `claim_files` already uses for conflict detection).
+/// The exact-match path also covers a lease whose claimed pattern's files
+/// have since been deleted from disk, where glob expansion alone could no
+/// longer find anything to overlap against.
+pub fn release_files(
+    conn: &Connection,
+    workspace_root: &Path,
+    holder: &str,
+    patterns: &[String],
+) -> Result<usize> {
+    let exact: HashSet<&str> = patterns.iter().map(String::as_str).collect();
+    let mut released_files: HashSet<String> = HashSet::new();
     for pattern in patterns {
-        released += conn.execute(
-            "DELETE FROM leases WHERE holder = ?1 AND pattern = ?2",
-            (holder, pattern),
-        )?;
+        released_files.extend(expand_glob(workspace_root, pattern)?);
+    }
+
+    let mut to_delete: Vec<i64> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, pattern FROM leases WHERE holder = ?1")?;
+        let rows = stmt.query_map([holder], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, existing_pattern) = row?;
+            let matches = exact.contains(existing_pattern.as_str()) || {
+                let existing_files = expand_glob(workspace_root, &existing_pattern)?;
+                !released_files.is_disjoint(&existing_files)
+            };
+            if matches {
+                to_delete.push(id);
+            }
+        }
+    }
+
+    let released = to_delete.len();
+    for id in &to_delete {
+        conn.execute("DELETE FROM leases WHERE id = ?1", [id])?;
     }
     Ok(released)
 }
@@ -154,6 +187,9 @@ pub fn release_files(conn: &Connection, holder: &str, patterns: &[String]) -> Re
 mod tests {
     use super::*;
 
+    /// Mirrors the real schema `db::open` creates, including the
+    /// `leases_holder_pattern` unique index the `ON CONFLICT` upsert in
+    /// `claim_files` depends on.
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -163,10 +199,25 @@ mod tests {
                 holder TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL
-            );",
+            );
+            CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);",
         )
         .unwrap();
         conn
+    }
+
+    /// A throwaway directory on disk with the given (empty) files created,
+    /// for tests that need `expand_glob` to actually match something real
+    /// -- `release_files`' glob-overlap matching walks the real filesystem,
+    /// so an in-memory-only test can't exercise it.
+    fn temp_workspace_with_files(files: &[&str]) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("pact-coord-leases-test-{}", uuid::Uuid::new_v4()));
+        for f in files {
+            let path = root.join(f);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap();
+        }
+        root
     }
 
     #[test]
@@ -216,10 +267,6 @@ mod tests {
     #[test]
     fn repeat_claim_updates_existing_row_instead_of_inserting_a_duplicate() {
         let conn = test_conn();
-        conn.execute_batch(
-            "CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);",
-        )
-        .unwrap();
         let root = std::env::temp_dir();
 
         claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
@@ -232,10 +279,6 @@ mod tests {
     #[test]
     fn repeat_claim_extends_the_expiry() {
         let conn = test_conn();
-        conn.execute_batch(
-            "CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);",
-        )
-        .unwrap();
         let root = std::env::temp_dir();
 
         let first = claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(60)).unwrap();
@@ -247,15 +290,60 @@ mod tests {
     #[test]
     fn distinct_patterns_from_the_same_holder_get_separate_rows() {
         let conn = test_conn();
-        conn.execute_batch(
-            "CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);",
-        )
-        .unwrap();
         let root = std::env::temp_dir();
 
         claim_files(&conn, &root, "agent-a", &["a.txt".to_string()], Some(900)).unwrap();
         claim_files(&conn, &root, "agent-a", &["b.txt".to_string()], Some(900)).unwrap();
 
         assert_eq!(lease_count(&conn), 2);
+    }
+
+    #[test]
+    fn release_files_matches_exact_pattern_string() {
+        let conn = test_conn();
+        let root = std::env::temp_dir();
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
+
+        let released = release_files(&conn, &root, "agent-a", &["same.txt".to_string()]).unwrap();
+        assert_eq!(released, 1);
+    }
+
+    #[test]
+    fn release_files_matches_by_glob_overlap_with_a_different_pattern_string() {
+        let root = temp_workspace_with_files(&["src/add.js", "src/sub.js"]);
+        let conn = test_conn();
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+
+        let released = release_files(&conn, &root, "agent-a", &["src/*.js".to_string()]).unwrap();
+        assert_eq!(
+            released, 1,
+            "releasing a broader glob that overlaps the file matched by the originally claimed pattern must release it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn release_files_does_not_release_another_holders_lease() {
+        let root = temp_workspace_with_files(&["src/add.js"]);
+        let conn = test_conn();
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+
+        let released = release_files(&conn, &root, "agent-b", &["src/*.js".to_string()]).unwrap();
+        assert_eq!(released, 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn release_files_returns_zero_for_a_non_overlapping_pattern() {
+        let root = temp_workspace_with_files(&["src/add.js", "src/sub.js"]);
+        let conn = test_conn();
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+
+        let released = release_files(&conn, &root, "agent-a", &["src/sub.js".to_string()]).unwrap();
+        assert_eq!(released, 0);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
