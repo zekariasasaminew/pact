@@ -832,7 +832,12 @@ impl WorkspaceManager {
 
     /// Reads one side of a conflicted file from git's index -- stage 1 is
     /// the common ancestor, 2 is "ours", 3 is "theirs". `Ok(None)` if that
-    /// stage doesn't exist for this path.
+    /// stage doesn't exist for this path. Strips a leading UTF-8 BOM if
+    /// present -- issue #57: PowerShell's `Out-File -Encoding utf8` (and
+    /// other common Windows tooling) writes one by default, and
+    /// `serde_json::from_str` rejects a BOM outright, so an otherwise valid
+    /// `package.json` stage would silently fail `try_resolve_package_json`'s
+    /// parse and fall through to a real conflict instead of auto-resolving.
     fn read_conflict_stage(&self, worktree_path: &Path, file: &str, stage: u8) -> Result<Option<String>> {
         let output = Command::new("git")
             .args(["show", &format!(":{stage}:{file}")])
@@ -842,7 +847,8 @@ impl WorkspaceManager {
         if !output.status.success() {
             return Ok(None);
         }
-        Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+        let content = String::from_utf8_lossy(&output.stdout);
+        Ok(Some(strip_bom(&content).to_string()))
     }
 
     /// JSON-aware merge of `package.json`'s dependency blocks -- see
@@ -1100,6 +1106,15 @@ fn detect_json_indent(text: &str) -> Vec<u8> {
     b"  ".to_vec()
 }
 
+/// Strips a leading UTF-8 BOM (`\u{FEFF}`), if present. Common Windows
+/// tooling (PowerShell's `Out-File -Encoding utf8`, some editors) writes one
+/// by default; `serde_json::from_str` rejects it outright, which otherwise
+/// silently breaks `try_resolve_package_json`'s parse on an otherwise valid
+/// file (issue #57).
+fn strip_bom(s: &str) -> &str {
+    s.strip_prefix('\u{FEFF}').unwrap_or(s)
+}
+
 fn is_never_auto_resolve(path: &str) -> bool {
     let basename = Path::new(path)
         .file_name()
@@ -1355,5 +1370,23 @@ mod tests {
     fn detect_json_indent_falls_back_to_two_space_for_minified_json() {
         let text = "{\"a\":1}";
         assert_eq!(detect_json_indent(text), b"  ".to_vec());
+    }
+
+    #[test]
+    fn strip_bom_removes_a_leading_bom() {
+        assert_eq!(strip_bom("\u{FEFF}{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn strip_bom_is_a_no_op_without_one() {
+        assert_eq!(strip_bom("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn strip_bom_only_removes_a_leading_occurrence() {
+        // A BOM character anywhere but the start is real (unlikely, but not
+        // this function's job to touch) content, not a byte-order mark.
+        let s = "{\"a\":\"\u{FEFF}\"}";
+        assert_eq!(strip_bom(s), s);
     }
 }

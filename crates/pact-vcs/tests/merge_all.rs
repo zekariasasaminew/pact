@@ -351,6 +351,55 @@ fn merge_all_package_json_merge_preserves_key_order_and_indent() {
     cleanup(&repo);
 }
 
+/// Regression test for issue #57: a real Windows footgun where PowerShell's
+/// `Out-File -Encoding utf8` (and other common tooling) writes a leading
+/// UTF-8 BOM by default. `serde_json::from_str` rejects a BOM outright, so
+/// before the fix this fell through to a real conflict instead of the
+/// JSON-aware auto-resolve.
+#[test]
+fn merge_all_package_json_merge_handles_utf8_bom() {
+    let repo = init_repo();
+    const BOM: &str = "\u{FEFF}";
+    let base = "{\n  \"name\": \"widget\",\n  \"version\": \"1.0.0\",\n  \
+                \"dependencies\": {\n    \"a\": \"1.0.0\"\n  }\n}\n";
+    std::fs::write(repo.join("package.json"), format!("{BOM}{base}")).unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add BOM'd package.json"]);
+
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("add dep b").unwrap();
+    std::fs::write(
+        a.path.join("package.json"),
+        format!("{BOM}{}", base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n    \"b\": \"2.0.0\"\n")),
+    )
+    .unwrap();
+
+    let b = manager.create_workspace("add dep c").unwrap();
+    std::fs::write(
+        b.path.join("package.json"),
+        format!("{BOM}{}", base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n    \"c\": \"3.0.0\"\n")),
+    )
+    .unwrap();
+
+    let report = manager.merge_all(None, None, &[], None, false).unwrap();
+    assert_eq!(
+        report.skipped.len(),
+        0,
+        "a BOM'd package.json must still auto-resolve via the JSON-aware merge, got skipped={:?}",
+        report.skipped
+    );
+
+    let content = show(&repo, &format!("{}:package.json", report.target_branch));
+    let value: serde_json::Value = serde_json::from_str(&content).expect("merged package.json must be valid JSON");
+    let deps = value.get("dependencies").and_then(|d| d.as_object()).expect("dependencies object");
+    assert_eq!(deps.get("a").and_then(|v| v.as_str()), Some("1.0.0"));
+    assert_eq!(deps.get("b").and_then(|v| v.as_str()), Some("2.0.0"));
+    assert_eq!(deps.get("c").and_then(|v| v.as_str()), Some("3.0.0"));
+
+    cleanup(&repo);
+}
+
 #[test]
 fn merge_all_union_resolves_matched_file_conflict() {
     let repo = init_repo_with_barrel();
