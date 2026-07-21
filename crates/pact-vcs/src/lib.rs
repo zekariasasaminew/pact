@@ -1094,7 +1094,118 @@ impl WorkspaceManager {
 
         let mut result = merged_lines.join("\n");
         result.push('\n');
+
+        // A plain line-concat is wrong for any file with "final
+        // assignment/declaration wins" semantics: two independent barrel
+        // appends can each be a no-conflict-looking line, yet together
+        // produce two `module.exports =` statements (second silently wins,
+        // first is dropped) or two declarations binding the same
+        // identifier (a real redeclaration SyntaxError in JS/TS). Confirmed
+        // by hand: this exact shape reliably breaks a merged CommonJS
+        // barrel. Treat that as "don't understand this well enough to
+        // auto-resolve" rather than reporting a broken merge as a success.
+        if !union_merge_is_safe(file, &result) {
+            return Ok(None);
+        }
+
         Ok(Some(result))
+    }
+}
+
+/// File extensions `try_resolve_union`'s safety check applies to.
+const UNION_SAFETY_CHECKED_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "tsx"];
+
+/// Heuristic (not a real parser) check for the two `--union` failure modes
+/// found in practice on JS/TS files: two `module.exports =` / `export
+/// default` statements surviving into the same merged file, and two
+/// declarations binding the same identifier in the same scope. False
+/// negatives are possible by design (this is intentionally cheap, not a
+/// full parser); a false positive just means a file that would otherwise
+/// silently break instead falls through to "needs a human", which is the
+/// safe direction. Non-JS/TS files are never checked.
+fn union_merge_is_safe(file: &str, content: &str) -> bool {
+    let ext = Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !UNION_SAFETY_CHECKED_EXTENSIONS.contains(&ext) {
+        return true;
+    }
+
+    let mut module_exports_count = 0u32;
+    let mut default_export_count = 0u32;
+    let mut bound_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("module.exports") {
+            let rest = rest.trim_start();
+            if rest.starts_with('=') && !rest.starts_with("==") {
+                module_exports_count += 1;
+            }
+        }
+        if line.starts_with("export default ") || line == "export default" || line == "export default;" {
+            default_export_count += 1;
+        }
+
+        for keyword in ["const ", "let ", "var "] {
+            if let Some(rest) = line.strip_prefix(keyword) {
+                for name in binding_names(rest) {
+                    if !bound_names.insert(name) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    module_exports_count <= 1 && default_export_count <= 1
+}
+
+/// Extracts the identifier(s) a single `const`/`let`/`var` declaration
+/// binds, from the source text right after the keyword -- handles a plain
+/// identifier (`x = ...`), object destructuring (`{ a, b: c, ...rest } =
+/// ...`), and array destructuring (`[a, , b] = ...`). Best-effort: only
+/// needs to catch the common barrel-export shape, not be a full parser.
+fn binding_names(rest: &str) -> Vec<String> {
+    let rest = rest.trim_start();
+    let extract = |inner: &str| -> Vec<String> {
+        inner
+            .split(',')
+            .filter_map(|entry| {
+                let entry = entry.trim().trim_start_matches("...").trim();
+                let key = entry.split(':').next().unwrap_or(entry).trim();
+                let key = key.split('=').next().unwrap_or(key).trim();
+                if key.is_empty() {
+                    None
+                } else {
+                    Some(key.to_string())
+                }
+            })
+            .collect()
+    };
+
+    if let Some(inner) = rest.strip_prefix('{') {
+        match inner.find('}') {
+            Some(end) => extract(&inner[..end]),
+            None => Vec::new(),
+        }
+    } else if let Some(inner) = rest.strip_prefix('[') {
+        match inner.find(']') {
+            Some(end) => extract(&inner[..end]),
+            None => Vec::new(),
+        }
+    } else {
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        if name.is_empty() {
+            Vec::new()
+        } else {
+            vec![name]
+        }
     }
 }
 
@@ -1323,5 +1434,49 @@ mod tests {
             parse_porcelain_path(" M src\\nested\\file.ts"),
             Some("src/nested/file.ts".to_string())
         );
+    }
+
+    #[test]
+    fn union_merge_is_safe_ignores_non_js_ts_files() {
+        // Two "final value wins" assignments, but this isn't a checked
+        // extension, so the safety check doesn't apply.
+        let content = "module.exports = { a };\nmodule.exports = { b };\n";
+        assert!(union_merge_is_safe("CHANGELOG.md", content));
+    }
+
+    #[test]
+    fn union_merge_is_safe_accepts_plain_barrel_append() {
+        let content = "export {};\nexport * from './chunk';\nexport * from './omit';\n";
+        assert!(union_merge_is_safe("src/barrel.ts", content));
+    }
+
+    #[test]
+    fn union_merge_rejects_duplicate_module_exports() {
+        let content = "const { mul } = require('./mul');\n\
+                        const { div } = require('./div');\n\
+                        module.exports = { mul };\n\
+                        module.exports = { div };\n";
+        assert!(!union_merge_is_safe("src/index.js", content));
+    }
+
+    #[test]
+    fn union_merge_rejects_redeclared_destructured_binding() {
+        let content = "const { add, sub, mul } = require('../src/index');\n\
+                        const { add, sub, div } = require('../src/index');\n";
+        assert!(!union_merge_is_safe("test/index.test.js", content));
+    }
+
+    #[test]
+    fn union_merge_rejects_duplicate_export_default() {
+        let content = "export default class A {}\nexport default class B {}\n";
+        assert!(!union_merge_is_safe("src/widget.tsx", content));
+    }
+
+    #[test]
+    fn union_merge_allows_module_exports_property_assignment() {
+        // `module.exports.foo = ...` is not a full reassignment, so two of
+        // these (for different properties) is a legitimate union merge.
+        let content = "module.exports.mul = require('./mul');\nmodule.exports.div = require('./div');\n";
+        assert!(union_merge_is_safe("src/index.js", content));
     }
 }
