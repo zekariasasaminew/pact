@@ -631,7 +631,7 @@ sequenceDiagram
 
     A->>Coord: claim_files(["src/*.txt"])
     Coord->>DB: INSERT lease (pattern, holder=A, expires_at)
-    Coord-->>A: { granted: true, conflicts: [] }
+    Coord-->>A: { accepted: true, has_conflicts: false, conflicts: [] }
     A->>Coord: send_message(to: null, "lease-info", "...")
     Coord->>DB: INSERT message (from=A, to=NULL)
 
@@ -641,7 +641,7 @@ sequenceDiagram
     B->>Coord: claim_files(["src/hello.txt"])
     Coord->>DB: SELECT active leases WHERE holder != B
     Note over Coord: expand "src/*.txt" (A's lease) and "src/hello.txt" (B's request)<br/>against B's own workspace files, intersect the two sets
-    Coord-->>B: { granted: true, conflicts: [{holder: A, pattern: "src/*.txt", example_files: ["src/hello.txt"]}] }
+    Coord-->>B: { accepted: true, has_conflicts: true, conflicts: [{holder: A, pattern: "src/*.txt", example_files: ["src/hello.txt"]}] }
 ```
 
 Each agent is a separate `claude -p` process that launches its own
