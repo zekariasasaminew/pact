@@ -47,6 +47,17 @@ fn text_result(body: String) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(body)]))
 }
 
+/// `isError: true` on the MCP result, so a calling model can tell a real
+/// tool-level failure (a malformed glob, a store/DB error) apart from a
+/// normal successful response by the standard MCP convention, instead of
+/// having to string-match a body that happens to start with "error:".
+/// Every handler below previously funneled its `Err` path through
+/// `text_result` -- a real failure, but `isError: false` -- same as a
+/// success.
+fn error_result(body: String) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::error(vec![Content::text(body)]))
+}
+
 #[tool_router]
 impl CoordServer {
     pub fn new(conn: Connection, agent_id: String, workspace_root: PathBuf) -> Self {
@@ -66,18 +77,19 @@ impl CoordServer {
         Parameters(params): Parameters<ClaimFilesParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().unwrap();
-        let body = match leases::claim_files(
+        match leases::claim_files(
             &conn,
             &self.workspace_root,
             &self.agent_id,
             &params.globs,
             params.ttl_seconds,
         ) {
-            Ok(result) => serde_json::to_string_pretty(&result)
-                .unwrap_or_else(|e| format!("error serializing result: {e}")),
-            Err(e) => format!("error: {e:#}"),
-        };
-        text_result(body)
+            Ok(result) => text_result(
+                serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|e| format!("error serializing result: {e}")),
+            ),
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
     }
 
     #[tool(
@@ -88,11 +100,10 @@ impl CoordServer {
         Parameters(params): Parameters<ReleaseFilesParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().unwrap();
-        let body = match leases::release_files(&conn, &self.workspace_root, &self.agent_id, &params.globs) {
-            Ok(n) => format!("released {n} lease(s)"),
-            Err(e) => format!("error: {e:#}"),
-        };
-        text_result(body)
+        match leases::release_files(&conn, &self.workspace_root, &self.agent_id, &params.globs) {
+            Ok(n) => text_result(format!("released {n} lease(s)")),
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
     }
 
     #[tool(
@@ -103,17 +114,16 @@ impl CoordServer {
         Parameters(params): Parameters<SendMessageParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().unwrap();
-        let body = match messages::send_message(
+        match messages::send_message(
             &conn,
             &self.agent_id,
             params.to.as_deref(),
             &params.subject,
             &params.body,
         ) {
-            Ok(id) => format!("sent message {id}"),
-            Err(e) => format!("error: {e:#}"),
-        };
-        text_result(body)
+            Ok(id) => text_result(format!("sent message {id}")),
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
     }
 
     #[tool(
@@ -121,12 +131,12 @@ impl CoordServer {
     )]
     fn check_messages(&self) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().unwrap();
-        let body = match messages::check_messages(&conn, &self.agent_id) {
-            Ok(msgs) => serde_json::to_string_pretty(&msgs)
-                .unwrap_or_else(|e| format!("error serializing result: {e}")),
-            Err(e) => format!("error: {e:#}"),
-        };
-        text_result(body)
+        match messages::check_messages(&conn, &self.agent_id) {
+            Ok(msgs) => text_result(
+                serde_json::to_string_pretty(&msgs).unwrap_or_else(|e| format!("error serializing result: {e}")),
+            ),
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
     }
 }
 
@@ -145,4 +155,73 @@ pub async fn serve(conn: Connection, agent_id: String, workspace_root: PathBuf) 
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern TEXT NOT NULL,
+                holder TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_agent TEXT NOT NULL,
+                to_agent TEXT,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE read_cursors (
+                agent_id TEXT PRIMARY KEY,
+                last_seen_message_id INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn claim_files_sets_is_error_on_malformed_glob() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = server
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["[".to_string()], ttl_seconds: None }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn claim_files_leaves_is_error_false_on_success() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = server
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: None }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn claim_files_sets_is_error_on_invalid_ttl() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = server
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: Some(-1) }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn release_files_sets_is_error_on_malformed_glob() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = server
+            .release_files(Parameters(ReleaseFilesParams { globs: vec!["[".to_string()] }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
 }
