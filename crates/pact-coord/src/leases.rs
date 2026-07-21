@@ -27,10 +27,20 @@ pub struct Conflict {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ClaimResult {
-    pub granted: bool,
+    /// Always true -- `claim_files` records every claim it's given, full
+    /// stop. Named `accepted`, not `granted`: leases are advisory, not
+    /// exclusive (see the README's design-decision writeup for why), so a
+    /// field implying exclusivity would mislead a caller reading
+    /// `{granted: true, conflicts: [...]}` into assuming it holds the file
+    /// alone. `has_conflicts` is the field to check for that.
+    pub accepted: bool,
     pub expires_at: i64,
+    /// True when `conflicts` is non-empty -- a plain boolean for callers
+    /// that don't need the detail, without having to check
+    /// `conflicts.is_empty()` themselves.
+    pub has_conflicts: bool,
     /// Non-empty means another agent holds an overlapping claim -- this is
-    /// advisory, not enforced: the lease is granted either way (see the
+    /// advisory, not enforced: the claim is recorded either way (see the
     /// README's design-decision writeup for why), the caller decides what
     /// to do with the warning.
     pub conflicts: Vec<Conflict>,
@@ -133,8 +143,9 @@ pub fn claim_files(
     }
 
     Ok(ClaimResult {
-        granted: true,
+        accepted: true,
         expires_at,
+        has_conflicts: !conflicts.is_empty(),
         conflicts,
     })
 }
@@ -249,7 +260,8 @@ mod tests {
         let conn = test_conn();
         let root = std::env::temp_dir();
         let result = claim_files(&conn, &root, "agent-a", &[], Some(3600)).unwrap();
-        assert!(result.granted);
+        assert!(result.accepted);
+        assert!(!result.has_conflicts);
     }
 
     #[test]
@@ -257,7 +269,8 @@ mod tests {
         let conn = test_conn();
         let root = std::env::temp_dir();
         let result = claim_files(&conn, &root, "agent-a", &[], None).unwrap();
-        assert!(result.granted);
+        assert!(result.accepted);
+        assert!(!result.has_conflicts);
     }
 
     fn lease_count(conn: &Connection) -> i64 {
@@ -296,6 +309,23 @@ mod tests {
         claim_files(&conn, &root, "agent-a", &["b.txt".to_string()], Some(900)).unwrap();
 
         assert_eq!(lease_count(&conn), 2);
+    }
+
+    #[test]
+    fn claim_files_reports_has_conflicts_when_another_holder_overlaps() {
+        let root = temp_workspace_with_files(&["src/add.js"]);
+        let conn = test_conn();
+
+        let first = claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+        assert!(!first.has_conflicts);
+        assert!(first.conflicts.is_empty());
+
+        let second = claim_files(&conn, &root, "agent-b", &["src/add.js".to_string()], Some(900)).unwrap();
+        assert!(second.accepted, "leases are advisory -- a conflicting claim is still accepted");
+        assert!(second.has_conflicts);
+        assert!(!second.conflicts.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

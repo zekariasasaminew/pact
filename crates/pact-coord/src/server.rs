@@ -70,7 +70,7 @@ impl CoordServer {
     }
 
     #[tool(
-        description = "Claim an advisory lease on file glob patterns you're about to edit, so other agents can see you're working on them. Returns any conflicting claims held by other agents -- this does not block you, it's informational, act on it yourself (e.g. message the other agent or avoid the overlap)."
+        description = "Claim an advisory lease on file glob patterns you're about to edit, so other agents can see you're working on them. This is never enforced against other agents -- the claim is recorded (accepted: true) even when another agent already holds an overlapping one; check has_conflicts/conflicts in the response yourself and decide what to do (e.g. message the other agent or avoid the overlap). Do not treat a successful response as exclusive access."
     )]
     fn claim_files(
         &self,
