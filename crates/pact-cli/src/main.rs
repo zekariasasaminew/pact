@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
-use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, SpawnManyTask};
+use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, PredictedOverlap, SpawnManyTask};
 
 #[derive(Parser)]
 #[command(name = "pact", about = "Orchestrate parallel AI coding agent workspaces")]
@@ -341,7 +341,7 @@ fn main() -> Result<()> {
                 eprintln!(
                     "warning: {} of your tasks look like they'll touch the same file(s) -- \
                      expect a merge conflict there unless you separate that work:",
-                    overlaps.iter().map(|o| o.task_indices.len()).sum::<usize>()
+                    distinct_overlapping_task_count(&overlaps)
                 );
                 for overlap in &overlaps {
                     let indices: Vec<String> = overlap.task_indices.iter().map(|i| i.to_string()).collect();
@@ -616,6 +616,18 @@ fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(Age
     Ok((kind, raw.to_string(), name.to_string()))
 }
 
+/// Counts distinct tasks involved in *any* predicted overlap, not the sum
+/// of each overlapping token's group size -- issue #59: two tasks sharing
+/// 3 overlapping file mentions previously printed "6 of your tasks" (3
+/// tokens x 2 tasks each), not the actual 2.
+fn distinct_overlapping_task_count(overlaps: &[PredictedOverlap]) -> usize {
+    overlaps
+        .iter()
+        .flat_map(|o| o.task_indices.iter().copied())
+        .collect::<std::collections::HashSet<usize>>()
+        .len()
+}
+
 fn agent_label(kind: AgentKind) -> &'static str {
     match kind {
         AgentKind::Claude => "claude",
@@ -798,5 +810,34 @@ mod tests {
 
         let value = serde_json::json!({"no_type_field": true});
         assert!(should_print_other(&value, false));
+    }
+
+    #[test]
+    fn distinct_overlapping_task_count_matches_the_simple_two_task_case() {
+        let overlaps = vec![PredictedOverlap { token: "src/index.js".to_string(), task_indices: vec![0, 1] }];
+        assert_eq!(distinct_overlapping_task_count(&overlaps), 2);
+    }
+
+    #[test]
+    fn distinct_overlapping_task_count_does_not_double_count_shared_tasks() {
+        // Same 2 tasks (0 and 1) overlapping on 3 different tokens must
+        // still report 2 distinct tasks, not 3 x 2 = 6.
+        let overlaps = vec![
+            PredictedOverlap { token: "src/index.js".to_string(), task_indices: vec![0, 1] },
+            PredictedOverlap { token: "test/index.test.js".to_string(), task_indices: vec![0, 1] },
+            PredictedOverlap { token: "package.json".to_string(), task_indices: vec![0, 1] },
+        ];
+        assert_eq!(distinct_overlapping_task_count(&overlaps), 2);
+    }
+
+    #[test]
+    fn distinct_overlapping_task_count_unions_across_non_identical_task_sets() {
+        // Tasks 0/1 overlap on one file, tasks 1/2 overlap on another --
+        // task 1 must not be counted twice.
+        let overlaps = vec![
+            PredictedOverlap { token: "src/index.js".to_string(), task_indices: vec![0, 1] },
+            PredictedOverlap { token: "src/other.js".to_string(), task_indices: vec![1, 2] },
+        ];
+        assert_eq!(distinct_overlapping_task_count(&overlaps), 3);
     }
 }
