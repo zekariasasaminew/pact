@@ -57,6 +57,15 @@ pub fn open(repo_root: &Path) -> Result<Connection> {
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
         );
+        -- Migration for databases created before this uniqueness
+        -- constraint existed: claim_files used to insert a fresh row on
+        -- every call, even for an identical (holder, pattern) repeat claim,
+        -- so an existing on-disk database may already have duplicates that
+        -- would make the index below fail to create. Keep only the most
+        -- recently created row per (holder, pattern) before creating it.
+        DELETE FROM leases
+        WHERE id NOT IN (SELECT MAX(id) FROM leases GROUP BY holder, pattern);
+        CREATE UNIQUE INDEX IF NOT EXISTS leases_holder_pattern ON leases(holder, pattern);
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             from_agent TEXT NOT NULL,
@@ -79,4 +88,71 @@ pub fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `leases_holder_pattern` unique index (issue #31) is added by
+    /// `open`'s migration, run against whatever a real on-disk database
+    /// already contains -- including, for a database created before the
+    /// index existed, duplicate (holder, pattern) rows that would make
+    /// `CREATE UNIQUE INDEX` fail outright if they weren't cleaned up
+    /// first. Reproduces that exact pre-existing-duplicates shape directly
+    /// against a real file-backed database (not in-memory), since this is
+    /// specifically about `open`'s one-time migration path, not the
+    /// steady-state schema `pact-coord`'s other tests already cover.
+    #[test]
+    fn open_migrates_a_database_with_pre_existing_duplicate_leases() {
+        let repo_root = std::env::temp_dir().join(format!("pact-coord-migration-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo_root).unwrap();
+        let path = db_path(&repo_root).unwrap();
+
+        {
+            // Seed a pre-existing database in the same shape `open` would
+            // have created before the leases_holder_pattern unique index
+            // existed -- including duplicate (holder, pattern) rows, the
+            // exact thing the old no-dedup claim_files could produce.
+            let seed = Connection::open(&path).unwrap();
+            seed.execute_batch(
+                "CREATE TABLE leases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern TEXT NOT NULL,
+                    holder TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+            for _ in 0..3 {
+                seed.execute(
+                    "INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES ('same.txt', 'agent-a', 0, 900)",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+
+        let migrated = open(&repo_root).unwrap();
+
+        let count: i64 = migrated
+            .query_row("SELECT COUNT(*) FROM leases", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "migration must collapse pre-existing duplicates before the unique index is created");
+
+        // The index must now actually be enforced -- confirms this isn't
+        // just "didn't error", the constraint is really there.
+        let err = migrated
+            .execute(
+                "INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES ('same.txt', 'agent-a', 0, 900)",
+                [],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("UNIQUE constraint failed"), "unexpected error: {err}");
+
+        drop(migrated);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
 }
