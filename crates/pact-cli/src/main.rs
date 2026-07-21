@@ -19,7 +19,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new isolated agent workspace and run an agent CLI in it
+    /// Create a new isolated agent workspace and run an agent CLI in it.
+    /// The agent's changes land in the workspace's working tree, not a
+    /// commit -- `list` will show it as `[dirty]` when the agent is done,
+    /// not because something needs your attention, but because `commit-all`
+    /// or `merge-all` is what actually commits it (`merge-all` does so
+    /// automatically before merging).
     Spawn {
         /// Task/prompt to give the agent
         task: String,
@@ -54,9 +59,12 @@ enum Command {
     },
     /// Create N isolated agent workspaces and run N agent CLIs in them
     /// concurrently, streaming their combined output live with each line
-    /// attributed to its source. Existing single-`spawn` behavior and CLI
-    /// surface are unchanged -- this is an entirely separate command, not
-    /// an alternate mode of `spawn`.
+    /// attributed to its source. Existing single-`spawn` behavior is
+    /// unchanged -- this is an entirely separate command, not an alternate
+    /// mode of `spawn` (it does not accept `spawn`'s `--agent` flag; agent
+    /// selection is per-task, see `--task` below). Same as `spawn`, each
+    /// workspace stays `[dirty]` in `list` until `commit-all` or
+    /// `merge-all` commits it.
     SpawnMany {
         /// One task per agent to run, repeatable: `--task <agent>:<text>`,
         /// e.g. `--task claude:"fix the bug" --task claude:"write tests"`

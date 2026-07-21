@@ -954,6 +954,17 @@ child (whole process group, not just the immediate process) before `pact`
 exits. `--safety` applies to every task in the batch uniformly -- see
 Known limitations for why that's not per-task yet.
 
+**Neither `spawn` nor `spawn-many` commits anything.** An agent's changes
+land in its workspace's working tree; `pact list` shows it as `[dirty]`
+once the agent is done, which is expected, not a sign anything needs your
+attention. `pact commit-all` (or `pact merge-all`, which runs the same
+commit step automatically before merging each workspace) is what actually
+creates a commit, with a message derived from the workspace's task
+(`agent <id>: <task text>`). Checking a workspace's branch with `git log`
+before running either will show it at the same commit it forked from --
+that's this, not the agent having done nothing; `pact diff <id>` shows the
+uncommitted work directly.
+
 ## Privacy
 
 **pact collects and sends no telemetry of any kind.** No usage data,
