@@ -819,9 +819,11 @@ dependencies = [
  "pact-agents",
  "pact-coord",
  "pact-core",
+ "pact-vcs",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

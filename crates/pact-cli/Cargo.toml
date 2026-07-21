@@ -17,3 +17,7 @@ anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+pact-vcs.workspace = true
+uuid.workspace = true

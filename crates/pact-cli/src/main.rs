@@ -114,6 +114,13 @@ enum Command {
     /// conflicts. Never touches the repo's own checkout -- the result is a
     /// new local branch (default `pact/merged-<id>`); pushing it or opening
     /// a PR is a separate, deliberate step you take yourself.
+    ///
+    /// Exit code: 0 if every workspace merged, 2 if one or more were
+    /// skipped (a real conflict, or a moving-base refusal) but nothing
+    /// errored outright, 1 only for a hard/unexpected failure. A CI wrapper
+    /// that wants "fail unless everything merged cleanly" should treat any
+    /// non-zero exit as failure; one that's fine with partial merges landing
+    /// (and a human resolving the rest) can treat exit 2 as a soft signal.
     MergeAll {
         /// Restrict the merge to these workspace ids (as shown by `list`),
         /// repeatable. Defaults to every active workspace.
@@ -444,8 +451,15 @@ fn main() -> Result<()> {
             };
             let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), &union, arbiter.as_ref(), dry_run)?;
             print_merge_report(&report);
+            // Exit 1 is reserved for a hard/unexpected failure (the `?`
+            // above already exits 1 on one, via anyhow::Result's
+            // Termination impl). One or more workspaces skipped -- a real
+            // conflict, or the moving-base check -- is a distinct, softer
+            // outcome: some work landed, it's just not everything. A CI
+            // wrapper around `pact merge-all` shouldn't have to treat a
+            // 50%-successful run identically to a crash.
             if !report.skipped.is_empty() {
-                std::process::exit(1);
+                std::process::exit(2);
             }
         }
         Command::Teardown {
