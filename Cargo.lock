@@ -842,6 +842,7 @@ dependencies = [
  "pact-coord",
  "pact-core",
  "pact-vcs",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
