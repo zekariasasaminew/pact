@@ -132,25 +132,12 @@ enum MergeOutcome {
     },
 }
 
-/// A hook `merge_all`'s caller can supply to attempt further resolution of
-/// files the mechanical/semantic auto-resolution (`try_auto_resolve`)
-/// couldn't handle -- see "Arbiter" in the design notes. Deliberately a
-/// plain closure, not a concrete type: `pact-vcs` has no dependency on
-/// `pact-agents` and shouldn't need one just to leave a slot for "maybe
-/// spawn an AI agent here" -- the caller (pact-core, which does depend on
-/// pact-agents) builds the actual agent-invoking closure and is entirely
-/// responsible for what "resolved" means, including any verification (e.g.
-/// running a test command) before it reports a file as resolved. Given
-/// `(worktree_path, the workspace's task text, the still-unresolved
+/// Given `(worktree_path, the workspace's task text, the still-unresolved
 /// conflicted files)`, returns exactly the subset it resolved and staged
-/// (`git add`) itself; pact-vcs treats anything not in that list as still
-/// conflicted and aborts the merge exactly as if this hook didn't exist.
+/// (`git add`) itself -- see DESIGN.md ("pact-vcs > Arbiter resolver
+/// hook").
 pub type ArbiterResolver<'a> = dyn Fn(&Path, &str, &[String]) -> Vec<String> + 'a;
 
-/// package.json's dependency-ish top-level keys -- the only part of the
-/// file `try_resolve_package_json` will touch. A conflict anywhere else in
-/// the file (scripts, version, name, ...) is left as a real conflict, same
-/// as before this existed.
 const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
     "dependencies",
     "devDependencies",
@@ -158,11 +145,8 @@ const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
     "optionalDependencies",
 ];
 
-/// Basenames pact never attempts to auto-resolve, even under `--union` --
-/// generated files with integrity hashes or resolved dependency graphs,
-/// where a naive line-level merge is very likely to silently produce a
-/// corrupt result. A real conflict here always stays a real conflict for a
-/// human (or a regenerate step) to handle.
+/// Never auto-resolved, even under `--union` -- see DESIGN.md ("pact-vcs >
+/// Semantic auto-resolution").
 const NEVER_AUTO_RESOLVE: &[&str] = &[
     "package-lock.json",
     "yarn.lock",
@@ -233,10 +217,6 @@ impl WorkspaceManager {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
                 .context("acquiring git worktree lock")?;
 
-            // Captured under the same lock as `worktree add` immediately
-            // below, so this is exactly the commit the new branch forks
-            // from -- not a value that could race against a concurrent
-            // `pact spawn` moving HEAD in between the two calls.
             let base_commit = run_git_text(&self.repo_root, &["rev-parse", "HEAD"])?;
 
             let output = Command::new("git")
@@ -286,27 +266,9 @@ impl WorkspaceManager {
     }
 
     /// Removes a workspace's worktree and, unless `keep_branch` is set,
-    /// the `pact/<id>` branch created for it. Confirmed via a real trial
-    /// run (an outside reviewer's report): `git worktree remove` does not
-    /// delete the branch it was created with -- that's standard git
-    /// behavior, worktree removal and branch deletion are independent --
-    /// so without this, every torn-down workspace left a dead branch
-    /// behind, accumulating over repeated use. Force-deletes (`-D`, not
-    /// `-d`) since an agent's throwaway workspace branch is very often
-    /// unmerged; `keep_branch` exists for anyone who wants to inspect or
-    /// rebase a workspace's commits after tearing it down.
-    ///
-    /// Refuses on a workspace with uncommitted changes unless `force` is
-    /// set. This wasn't a real check before -- confirmed directly, by
-    /// spawning a workspace, adding an uncommitted file to it, and running
-    /// the old unconditional-`--force` teardown: the file was silently
-    /// gone afterward, with no warning at all. The underlying
-    /// `git worktree remove` call already has this exact protection built
-    /// in (it refuses on a dirty worktree unless *it's* passed `--force`);
-    /// this crate's `remove_worktree_retrying` was defeating that
-    /// protection unconditionally on every call. This check restores it at
-    /// `pact`'s own layer instead, so `--force` is something the caller
-    /// chooses, not something baked in silently.
+    /// the `pact/<id>` branch created for it. Refuses on uncommitted
+    /// changes unless `force` is set -- see DESIGN.md ("pact-vcs >
+    /// Workspace teardown").
     pub fn remove_workspace(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         let workspace = self.get_workspace(id)?;
 
@@ -363,18 +325,10 @@ impl WorkspaceManager {
         Ok(!self.dirty_status(&workspace.path)?.is_empty())
     }
 
-    /// A workspace's changes relative to the point it was branched from,
-    /// covering both what's committed on its branch and what's still only
-    /// in its working tree -- "what did this agent actually do" in one
-    /// call, so a user can decide whether to keep, discard, or manually
-    /// merge it before tearing it down.
-    ///
-    /// The merge-base is computed against the *repo root's* current HEAD,
-    /// not a persisted value -- correct as long as the repo's own branch
-    /// hasn't been reset past the point this workspace's branch forked
-    /// from, which is the same assumption `git worktree`/`git worktree
-    /// remove` themselves make about a branch's relationship to its
-    /// origin.
+    /// A workspace's changes relative to the point it was branched from --
+    /// "what did this agent actually do" in one call. See DESIGN.md
+    /// ("pact-vcs > Workspace lifecycle") for the merge-base assumption
+    /// this relies on.
     pub fn workspace_diff(&self, id: &str) -> Result<WorkspaceDiff> {
         let workspace = self.get_workspace(id)?;
 
@@ -414,13 +368,9 @@ impl WorkspaceManager {
     }
 
     /// The merge-base a workspace's branch forked from, plus the set of
-    /// files it has touched since -- both committed on the branch and
-    /// still only in its working tree. Used to detect cross-workspace file
-    /// overlap (issue #8): two workspaces sharing the same merge-base
-    /// forked from a comparable point in history, so any file both of them
-    /// touched is worth surfacing, without needing semantic/AST-level
-    /// analysis -- file-path overlap is the same restriction the MCP
-    /// lease layer already accepts.
+    /// files it has touched since. Used to detect cross-workspace file
+    /// overlap (issue #8) -- see DESIGN.md ("pact-vcs > Workspace
+    /// lifecycle").
     pub fn workspace_changes(&self, id: &str) -> Result<WorkspaceChanges> {
         let workspace = self.get_workspace(id)?;
 
@@ -483,20 +433,8 @@ impl WorkspaceManager {
         }
     }
 
-    /// Removes a worktree directory, tolerating the two Windows failure
-    /// modes confirmed against a real killed agent process (not
-    /// theoretical): (1) killing a process doesn't mean its handles on its
-    /// own `current_dir` are released the instant `kill()` returns, so an
-    /// immediate `git worktree remove` can fail with "Permission denied"
-    /// even though the process is already gone -- retrying briefly usually
-    /// clears this; (2) git unregisters a worktree from its own metadata
-    /// *before* attempting to delete the directory, so if that deletion
-    /// fails, a later `git worktree remove` on the same path fails with
-    /// "is not a working tree" even though the directory (and whatever's
-    /// in it) is still sitting there orphaned. In that case this falls
-    /// back to removing the directory directly, also with retries, since
-    /// it's the same underlying handle-release race, just past the point
-    /// where git itself can help.
+    /// Removes a worktree directory, tolerating two Windows failure modes
+    /// -- see DESIGN.md ("pact-vcs > Workspace teardown").
     fn remove_worktree_retrying(&self, path: &std::path::Path) -> Result<()> {
         let mut last_err = String::new();
         for attempt in 0..10 {
@@ -558,15 +496,10 @@ impl WorkspaceManager {
         Ok(serde_json::from_str(&contents)?)
     }
 
-    /// Stages and commits everything in a workspace's working tree (staged,
-    /// unstaged, and untracked) with a message derived from its task text,
-    /// so `pact diff`/`pact log` and `merge-all` always have a real commit
-    /// to work with instead of a permanently-dirty worktree -- see the
-    /// trial report that motivated this (every workspace ended `[dirty]`
-    /// with nothing to merge). Returns `Ok(false)` without running `git
-    /// commit` at all if the workspace is already clean, so callers (e.g.
-    /// `merge-all`'s first phase) can call this unconditionally on every
-    /// workspace.
+    /// Stages and commits everything in a workspace's working tree with a
+    /// message derived from its task text -- see DESIGN.md ("pact-vcs >
+    /// commit_all"). Returns `Ok(false)` without running `git commit` at
+    /// all if the workspace is already clean.
     pub fn commit_all(&self, id: &str) -> Result<bool> {
         let workspace = self.get_workspace(id)?;
         if self.dirty_status(&workspace.path)?.is_empty() {
@@ -604,31 +537,10 @@ impl WorkspaceManager {
     }
 
     /// Closes the loop from "N workspaces are dirty" to "one clean
-    /// integration branch" (see the trial report this is built against: 9
-    /// of 10 manual merges failed on a shared barrel file, and strict-mode
-    /// git blocked every merge after the first conflict). Never touches the
-    /// repo's own checkout -- everything happens in a throwaway worktree,
-    /// same isolation model as agent workspaces themselves, so this is safe
-    /// to run regardless of what branch (or branch-protection rules) the
-    /// main checkout has.
-    ///
-    /// Phases, all best-effort (one workspace's failure never blocks
-    /// another's): (1) auto-commit every selected workspace via
-    /// `commit_all`; (2) moving-base check -- refuse a workspace whose
-    /// recorded `base_commit` is no longer an ancestor of current HEAD, so
-    /// merging never silently assumes a fork point that isn't real anymore
-    /// (e.g. HEAD was reset since the workspace was created); (3) sequence
-    /// the rest smallest-changeset-first, on the theory that landing small
-    /// compatible changes before a large one reduces cascade conflicts; (4)
-    /// merge each into a fresh `target_branch` (default `pact/merged-<id>`)
-    /// one at a time, skipping (not aborting the whole run on) a real
-    /// conflict.
-    ///
+    /// integration branch" -- see DESIGN.md ("pact-vcs > merge_all") for
+    /// the phase breakdown and the trial report this is built against.
     /// `ids`, if given, restricts the run to those workspaces instead of
-    /// every active one. `dry_run` runs phases 1-3 (auto-commit still
-    /// happens -- see its own doc comment for why that's always safe to
-    /// call) but stops before touching git state for the actual merge,
-    /// returning the planned order instead.
+    /// every active one.
     pub fn merge_all(
         &self,
         ids: Option<&[String]>,
@@ -693,9 +605,6 @@ impl WorkspaceManager {
             }
         });
 
-        // Smallest changeset first -- a workspace whose changes can't be
-        // sized (e.g. `workspace_changes` failed) sorts last rather than
-        // being dropped, so a bug in sizing never silently excludes it.
         let mut sized: Vec<(usize, Workspace)> = selected
             .into_iter()
             .map(|w| {
@@ -766,9 +675,8 @@ impl WorkspaceManager {
         {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
                 .context("acquiring git worktree lock")?;
-            // keep_branch semantics: the worktree was only ever scaffolding
-            // to run `git merge` in -- the branch it built up is the actual
-            // result and must survive this call.
+            // No delete_branch call here -- the branch is the actual
+            // result and must survive, only the scaffolding worktree goes.
             self.remove_worktree_retrying(&integration_path)?;
         }
 
@@ -782,12 +690,6 @@ impl WorkspaceManager {
         })
     }
 
-    /// `true` if `ancestor` is still part of `descendant`'s history --
-    /// i.e. `merge_all`'s recorded base commit for a workspace hasn't been
-    /// reset/rebased away since. `git merge-base --is-ancestor` exits
-    /// non-zero for "not an ancestor", which is a normal, expected outcome
-    /// here, not a spawn/IO failure -- so this returns `Ok(false)` for that
-    /// case rather than treating a non-zero exit as an error.
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
         let output = Command::new("git")
             .args(["merge-base", "--is-ancestor", ancestor, descendant])
@@ -799,14 +701,7 @@ impl WorkspaceManager {
 
     /// Merges `branch` into whatever's checked out in `worktree_path`
     /// (always the throwaway integration worktree, never the repo's own
-    /// checkout). On a real conflict, tries the semantic-narrow
-    /// auto-resolution rules (`try_auto_resolve`) on each conflicted file
-    /// before giving up: if *every* conflicted file resolves, the merge is
-    /// completed with a commit instead of aborted. If any file is left
-    /// over, the whole merge is aborted (so the worktree is clean for the
-    /// *next* workspace's attempt -- one conflicted workspace must not
-    /// poison the rest of the batch) and reported as a real conflict, same
-    /// as before this existed.
+    /// checkout) -- see DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn merge_branch_into(
         &self,
         worktree_path: &Path,
@@ -828,9 +723,6 @@ impl WorkspaceManager {
         let conflicted_files: Vec<String> = status
             .lines()
             .filter(|line| {
-                // Unmerged-path porcelain codes -- the ones `git merge`
-                // actually leaves behind on conflict, as opposed to e.g. a
-                // plain modified/added entry.
                 matches!(
                     line.get(0..2),
                     Some("UU") | Some("AA") | Some("DD") | Some("AU") | Some("UA") | Some("UD") | Some("DU")
@@ -840,9 +732,6 @@ impl WorkspaceManager {
             .collect();
 
         if conflicted_files.is_empty() {
-            // `git merge` failed but left no unmerged paths -- not a
-            // content conflict (e.g. a dirty-worktree refusal), nothing for
-            // auto-resolution to work with.
             self.abort_merge(worktree_path, branch);
             return Ok(MergeOutcome::Conflict {
                 files: vec![String::from_utf8_lossy(&output.stderr).trim().to_string()],
@@ -865,11 +754,6 @@ impl WorkspaceManager {
             }
         }
 
-        // Anything the mechanical/semantic rules above couldn't handle gets
-        // one more shot from the caller-supplied Arbiter hook, if any --
-        // see `ArbiterResolver`'s doc comment for why pact-vcs trusts its
-        // return value outright (verification, if any, already happened
-        // inside the closure).
         let mut arbiter_resolved = Vec::new();
         if !unresolved.is_empty() {
             if let Some(resolve) = arbiter {
@@ -916,15 +800,9 @@ impl WorkspaceManager {
         }
     }
 
-    /// Tries to auto-resolve one conflicted file during a merge, using the
-    /// semantic-narrow rules `merge_all` is built around: never touch a
-    /// generated/structural file (`NEVER_AUTO_RESOLVE`); JSON-aware merge
-    /// for `package.json`'s dependency blocks; a plain line-union merge for
-    /// anything matching a caller-supplied `--union` glob (nothing is
-    /// union-merged unless the caller explicitly named it -- pact does not
-    /// guess which files are safe to blindly concatenate). Returns `true`
-    /// and stages the file (`git add`) if it resolved, `false` (file left
-    /// untouched, still conflicted) otherwise.
+    /// Tries to auto-resolve one conflicted file, returning `true` and
+    /// staging it (`git add`) if it resolved -- see DESIGN.md ("pact-vcs >
+    /// Semantic auto-resolution").
     fn try_auto_resolve(&self, worktree_path: &Path, file: &str, union_globs: &[String]) -> Result<bool> {
         if is_never_auto_resolve(file) {
             return Ok(false);
@@ -953,12 +831,8 @@ impl WorkspaceManager {
     }
 
     /// Reads one side of a conflicted file from git's index -- stage 1 is
-    /// the common ancestor, 2 is "ours" (the integration branch, before
-    /// this merge), 3 is "theirs" (the branch being merged in). Returns
-    /// `Ok(None)` if that stage doesn't exist for this path (e.g. the file
-    /// was added fresh on only one side), which callers treat as "don't
-    /// understand this shape well enough to auto-resolve" rather than an
-    /// error.
+    /// the common ancestor, 2 is "ours", 3 is "theirs". `Ok(None)` if that
+    /// stage doesn't exist for this path.
     fn read_conflict_stage(&self, worktree_path: &Path, file: &str, stage: u8) -> Result<Option<String>> {
         let output = Command::new("git")
             .args(["show", &format!(":{stage}:{file}")])
@@ -971,16 +845,8 @@ impl WorkspaceManager {
         Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
     }
 
-    /// JSON-aware merge of `package.json`'s dependency blocks
-    /// (`PACKAGE_JSON_DEP_KEYS`) -- far and away the most common real
-    /// conflict from parallel agents (two agents both adding a package). A
-    /// dependency name added or changed on exactly one side is taken as-is;
-    /// changed to the *same* value on both sides is fine; changed to
-    /// *different* values on both sides is a real conflict this does not
-    /// try to guess at -- returns `Ok(None)` for the whole file in that
-    /// case, same as if anything *outside* the dependency keys differs
-    /// between the two sides. This only ever resolves the dependency-block
-    /// class of conflict; nothing else in the file is touched.
+    /// JSON-aware merge of `package.json`'s dependency blocks -- see
+    /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn try_resolve_package_json(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
         let (Some(base), Some(ours), Some(theirs)) = (
             self.read_conflict_stage(worktree_path, file, 1)?,
@@ -998,9 +864,6 @@ impl WorkspaceManager {
             return Ok(None);
         };
 
-        // Anything outside the dependency keys must be identical between
-        // ours and theirs, or this resolver doesn't understand the
-        // conflict well enough to touch it.
         let mut ours_stripped = ours_value.clone();
         let mut theirs_stripped = theirs_value.clone();
         if let (Some(o), Some(t)) = (ours_stripped.as_object_mut(), theirs_stripped.as_object_mut()) {
@@ -1081,15 +944,8 @@ impl WorkspaceManager {
         Ok(Some(result))
     }
 
-    /// Plain line-union merge for a `--union`-matched file: the result is
-    /// "ours" lines, in order, followed by any of "theirs" lines not
-    /// already present verbatim -- the same semantics as git's own
-    /// `merge=union` attribute driver, just applied here in Rust rather
-    /// than by mutating the repo's shared (cross-worktree)
-    /// `.gitattributes`/config to register a driver. Appropriate only for
-    /// genuinely order-independent, append-only content (barrel exports,
-    /// changelog entries): the caller's own `--union <glob>` is what scopes
-    /// this, pact does not try to guess which files qualify.
+    /// Plain line-union merge for a `--union`-matched file -- see
+    /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn try_resolve_union(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
         let (Some(ours), Some(theirs)) = (
             self.read_conflict_stage(worktree_path, file, 2)?,
@@ -1265,12 +1121,6 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Builds a commit subject (and, for multi-line/long task text, a body) from
-/// a workspace id and its task: `agent <id>: <first line of task>`, matching
-/// the existing `pact/<id>` branch-naming convention so a commit is
-/// traceable back to its workspace at a glance. The subject line is capped
-/// around 72 chars (git convention); if the task is longer or spans
-/// multiple lines, the full untruncated text follows in the commit body.
 fn commit_message(id: &str, task: &str) -> String {
     let task = task.trim();
     let first_line = task.lines().next().unwrap_or(task).trim();
@@ -1283,9 +1133,6 @@ fn commit_message(id: &str, task: &str) -> String {
     };
     let subject = format!("agent {id}: {subject_line}");
 
-    // Full text goes in the body whenever the subject alone doesn't already
-    // capture it losslessly -- either because there's more than one line,
-    // or because the single line itself had to be truncated to fit.
     if task == first_line && !truncated {
         subject
     } else {
@@ -1295,32 +1142,9 @@ fn commit_message(id: &str, task: &str) -> String {
 
 /// If `workspace` has a live agent process recorded, kills its whole
 /// process tree before the worktree it's running in gets removed out from
-/// under it, and waits (briefly) for it to actually be gone. Best-effort: a
-/// dead/already-exited PID is silently ignored, not an error.
-///
-/// Killing only the tracked PID is not enough: confirmed directly, a
-/// `claude` session running a Bash tool call spawns a child shell process,
-/// and killing just the parent left that child alive, still holding a
-/// handle into the workspace directory (as its own current_dir) for the
-/// rest of its life -- which made every subsequent `git worktree remove`
-/// and even a plain `remove_dir_all` fail with "used by another process."
-/// On Windows, `taskkill /T` terminates the full descendant tree in one
-/// call, which is what actually fixed it.
-///
-/// The Unix equivalent works because `pact-agents::run_and_stream` spawns
-/// every agent process via `command_group`'s `group_spawn` (added for
-/// issue #3's concurrent Ctrl-C handling), which calls `process_group(0)`
-/// -- making the child its own process group leader, so its pgid equals
-/// its pid. That means the *already-recorded* `agent_pid` (persisted to
-/// disk, readable from a totally different `pact` process than the one
-/// that spawned it) is sufficient on its own to kill the whole group:
-/// `kill(-pid, SIGKILL)` targets every process in that group, descendants
-/// included, without needing to persist a separate pgid. Implemented from
-/// documented POSIX process-group semantics and command_group's own source
-/// (see `pact-agents::supervisor`), but -- per issue #6 -- not yet
-/// exercised on real Unix hardware, since this project's dev environment
-/// is Windows-only; treat as implemented-not-live-verified until that
-/// happens.
+/// under it -- see DESIGN.md ("pact-agents > Process group kill").
+/// Best-effort: a dead/already-exited PID is silently ignored, not an
+/// error.
 fn kill_if_alive(workspace: &Workspace) {
     let Some(pid) = workspace.agent_pid else {
         return;
@@ -1340,16 +1164,10 @@ fn kill_if_alive(workspace: &Workspace) {
     } else {
         #[cfg(unix)]
         unsafe {
-            // Negative PID targets the whole process group -- see the doc
-            // comment above for why the group id and the recorded pid are
-            // the same number here.
             libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
         }
     }
 
-    // Wait for the OS to actually reap it -- killing a process doesn't
-    // mean its file handles (e.g. on its own current_dir) are released the
-    // instant the kill call returns.
     for _ in 0..20 {
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         if sys.process(sys_pid).is_none() {

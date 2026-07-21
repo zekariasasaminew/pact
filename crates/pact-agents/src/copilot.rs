@@ -10,29 +10,13 @@ impl AgentAdapter for CopilotAdapter {
         "pact-coord"
     }
 
-    /// Unlike Claude Code, no confirmed non-hanging alternative exists yet
-    /// (see the README and issue #2's investigation): `--allow-tool` works
-    /// for in-scope actions, but a task needing a tool outside that list
-    /// hangs (confirmed directly, 50s/zero output) rather than denying
-    /// cleanly the way Claude Code's `--allowedTools` does. Until that's
-    /// investigated further, this stays the only working default --
-    /// stated plainly rather than implying parity with Claude Code's
-    /// safer one.
+    /// See DESIGN.md ("pact-agents > Copilot CLI safety default").
     fn default_safety_description(&self) -> &'static str {
         "--allow-all-tools (can run any shell command and edit any file with no restriction)"
     }
 
-    /// `--allow-all-tools` has no gradient (unlike Claude Code's six
-    /// permission modes) -- Copilot CLI's own `--help` states it's
-    /// "required for non-interactive mode", so `safety_override` has
-    /// nothing meaningful to override here; it's accepted for interface
-    /// consistency but ignored.
-    ///
-    /// `mcp_config` is rendered to the same `{"mcpServers": {...}}` shape
-    /// Claude Code uses (confirmed identical), passed via
-    /// `--additional-mcp-config @<path>` -- the `@` prefix means "load
-    /// from file" per Copilot CLI's own docs; without it the argument
-    /// would be parsed as an inline JSON string instead.
+    /// `safety_override` is accepted for interface consistency but ignored
+    /// -- see DESIGN.md ("pact-agents > Copilot CLI safety default").
     fn build_command(
         &self,
         task: &str,
@@ -66,10 +50,8 @@ impl AgentAdapter for CopilotAdapter {
     }
 }
 
-/// Schema modeled directly against real output captured from
-/// `copilot -p ... --output-format json` (see README), including a real
-/// tool-call-forcing task to confirm `toolRequests`' field names --
-/// `name`/`arguments`, not Claude Code's `name`/`input`.
+/// Schema modeled against real captured output -- see DESIGN.md
+/// ("pact-agents > Copilot CLI output schema").
 fn parse_line(line: &str) -> Vec<AgentEvent> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -117,12 +99,9 @@ fn parse_line(line: &str) -> Vec<AgentEvent> {
     }
 }
 
-/// Unlike Claude Code (one content block per line), Copilot CLI can bundle
-/// response text *and* one or more tool calls into a single
-/// `assistant.message` event -- confirmed directly: a file-writing task
-/// produced one line with non-empty `content` alongside a non-empty
-/// `toolRequests` array. Returning a `Vec` here is what makes that safe to
-/// represent without dropping either half.
+/// Copilot CLI can bundle response text *and* tool calls into a single
+/// `assistant.message` event -- see DESIGN.md ("pact-agents > Copilot CLI
+/// output schema").
 fn parse_assistant_message(value: &Value) -> Vec<AgentEvent> {
     let data = match value.get("data") {
         Some(d) => d,

@@ -1,8 +1,5 @@
-//! Integration coverage for `WorkspaceManager::merge_all` (pact v0.2 P0
-//! #1) against a real, throwaway git repo -- no agent CLI involved, since
-//! `merge_all` operates purely on workspaces' committed git state. Each
-//! test gets its own temp repo so they can run in parallel without
-//! interfering with each other.
+//! Integration coverage for `WorkspaceManager::merge_all` against a real,
+//! throwaway git repo -- see DESIGN.md ("pact-vcs > merge_all").
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -69,11 +66,9 @@ fn init_repo_with_package_json() -> PathBuf {
     root
 }
 
-/// Same base as `init_repo`, plus a single-line `src/barrel.ts` -- kept
-/// deliberately tiny (no surrounding context) so two independent appends to
-/// it reliably produce a real git conflict, confirmed by hand first (see
-/// the file-level doc comment on the main conflict test) -- used by the
-/// `--union` test.
+/// Same base as `init_repo`, plus a single-line `src/barrel.ts` -- used by
+/// the `--union` test. See DESIGN.md ("pact-vcs > merge_all") for why a
+/// single-line file is used deliberately.
 fn init_repo_with_barrel() -> PathBuf {
     let root = init_repo();
     std::fs::write(root.join("src/barrel.ts"), "export {};\n").unwrap();
@@ -97,15 +92,8 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    // A appends a new line at the end of index.ts, well-separated (4 lines
-    // of untouched context) from anything C/D touch. B edits a completely
-    // different file. Both are genuinely compatible with everything else
-    // and must always merge, regardless of order. C and D both rewrite
-    // index.ts's *first* line differently -- a real, unavoidable conflict
-    // between exactly those two, confirmed by hand against real git before
-    // writing this (single-line-file appends turned out to conflict far
-    // more readily than multi-line context does -- see the trial report
-    // this whole feature is built against).
+    // See DESIGN.md ("pact-vcs > merge_all") for why this scenario is
+    // shaped the way it is (confirmed by hand against real git first).
     let a = manager.create_workspace("append L6").unwrap();
     std::fs::write(
         a.path.join("src/index.ts"),
@@ -264,10 +252,8 @@ fn merge_all_auto_resolves_package_json_dependency_conflict() {
     let repo = init_repo_with_package_json();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    // Both workspaces add a *different* new dependency next to the same
-    // existing one -- confirmed by hand against real git first: this is a
-    // genuine conflict (single existing entry gives git no unambiguous
-    // insertion point), not something a plain merge resolves on its own.
+    // Confirmed by hand against real git first -- see DESIGN.md
+    // ("pact-vcs > Semantic auto-resolution").
     let a = manager.create_workspace("add dep b").unwrap();
     std::fs::write(
         a.path.join("package.json"),

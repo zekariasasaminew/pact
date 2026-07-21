@@ -13,15 +13,9 @@ pub enum LinkMode {
     /// transparently copies first, so it can never corrupt the store entry
     /// or any other workspace sharing it.
     Reflink,
-    /// A hardlink, marked read-only at the destination. Because a hardlink
-    /// shares the same underlying file record as the store entry, marking
-    /// it read-only also freezes the canonical store copy after first use --
-    /// which is intentional, not a side effect to work around. The
-    /// tradeoff: a package that writes into its own installed files after
-    /// materialization (a native-build step, a binary downloader, a
-    /// git-hook installer) will fail loudly instead of silently corrupting
-    /// every other workspace sharing that store entry. That failure is the
-    /// point -- see the README's "known limitations" section.
+    /// A hardlink, marked read-only at the destination -- see DESIGN.md
+    /// ("pact-deps > ReadOnlyHardlink tradeoff") and the README's "known
+    /// limitations" section.
     ReadOnlyHardlink,
     /// A plain copy. Slowest, but always available and always safe.
     Copy,

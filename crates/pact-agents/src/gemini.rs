@@ -3,17 +3,9 @@ use serde_json::Value;
 use crate::adapter::{AgentAdapter, CoordConfig};
 use crate::event::AgentEvent;
 
-/// Built from a real installed `gemini` CLI (`@google/gemini-cli` 0.50.0,
-/// confirmed via `--help` and by actually running `gemini mcp add` and
-/// inspecting the file it wrote), **not live-verified against a real
-/// authenticated session** -- this environment has no Gemini API key or
-/// Google Cloud auth configured, and `gemini -p "..."` fails immediately
-/// with "Please set an Auth method...". That means the streaming JSON
-/// event schema below is inferred from the CLI's own naming conventions,
-/// not captured from real output the way every other adapter's schema
-/// was -- treat it the same way this project treated Codex before it was
-/// installed: real until proven otherwise, not real because it compiles.
-/// See issue #9.
+/// Built from a real installed `gemini` CLI, **not live-verified against a
+/// real authenticated session** -- see DESIGN.md ("pact-agents > Gemini
+/// adapter", issue #9).
 pub struct GeminiAdapter;
 
 impl AgentAdapter for GeminiAdapter {
@@ -21,34 +13,15 @@ impl AgentAdapter for GeminiAdapter {
         "pact-coord"
     }
 
-    /// No confirmed non-hanging alternative exists for this adapter
-    /// (unlike Claude Code) -- whether `--approval-mode default` denies
-    /// cleanly or hangs in headless mode couldn't be tested without real
-    /// auth. `yolo` (auto-accept everything) is the only thing that can be
-    /// stated with confidence won't hang, so -- same honest category as
-    /// Copilot CLI and Codex -- that's the default, not claimed as a
-    /// verified safer option.
+    /// See DESIGN.md ("pact-agents > Gemini adapter").
     fn default_safety_description(&self) -> &'static str {
         "--approval-mode yolo (can run any shell command and edit any file with no restriction -- \
          unconfirmed whether a safer mode hangs in headless mode without real auth to test against; \
          see issue #9)"
     }
 
-    /// `safety_override`, if given, is passed as a raw `--approval-mode`
-    /// value (`default`/`auto_edit`/`yolo`/`plan`, confirmed from
-    /// `gemini --help`).
-    ///
-    /// MCP config is the one genuinely different mechanism among all four
-    /// adapters: confirmed directly (by running `gemini mcp add --scope
-    /// project` and reading the file it produced) that Gemini CLI reads
-    /// `.gemini/settings.json`, relative to its *own working directory*,
-    /// automatically -- no CLI flag hands it over at all, unlike Claude
-    /// Code/Copilot CLI's `--mcp-config`/`--additional-mcp-config` or
-    /// Codex's inline `-c` overrides. The file's shape is identical to
-    /// Claude Code and Copilot CLI's `{"mcpServers": {...}}` (confirmed:
-    /// same `write_mcp_json_config` helper works unchanged), just written
-    /// to a fixed path under `workspace_path` instead of wherever
-    /// `coord.config_path` says.
+    /// See DESIGN.md ("pact-agents > Gemini adapter") for the MCP config
+    /// mechanism, which differs from every other adapter.
     fn build_command(
         &self,
         task: &str,
@@ -73,25 +46,13 @@ impl AgentAdapter for GeminiAdapter {
                     settings_path.display()
                 );
             }
-            // No flag needed -- gemini reads .gemini/settings.json from its
-            // cwd automatically, which `run_and_stream` already sets to
-            // `workspace_path` for every adapter.
         }
 
         ("gemini".to_string(), args)
     }
 
-    /// Inferred, not confirmed -- see this module's doc comment. Modeled
-    /// on the shape common to the other three streaming-NDJSON adapters
-    /// (an init/session event, assistant text, tool-call events, a final
-    /// result), using field names guessed from Gemini CLI's own
-    /// vocabulary (`-o stream-json`'s wrapper type is unknown, so this
-    /// guesses a flat `{"type": ...}` shape like Claude Code's and
-    /// Codex's). Deliberately defensive: any line that doesn't parse as
-    /// JSON, or whose "type" isn't one of these guesses, surfaces as
-    /// `Other` rather than being silently dropped -- exactly because this
-    /// schema is unverified and *will* need correcting once run against a
-    /// real session.
+    /// Inferred, not confirmed -- see DESIGN.md ("pact-agents > Gemini
+    /// adapter").
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         let value: Value = match serde_json::from_str(line) {
             Ok(v) => v,
