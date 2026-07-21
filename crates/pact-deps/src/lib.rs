@@ -63,13 +63,25 @@ fn prepare_npm(workspace_path: &Path) -> Result<()> {
     if !lockfile.exists() {
         tracing::warn!(
             "no package-lock.json in {}; installing without sharing since there's nothing \
-             stable to key a shared cache on",
+             stable to key a shared cache on, and with --no-package-lock so this workspace \
+             doesn't generate its own lockfile (which would otherwise show up as a spurious \
+             merge conflict against every other workspace that also has no lockfile)",
             workspace_path.display()
         );
         return passthrough::run(PackageManager::Npm, workspace_path).or_else(|_| {
             // PackageManager::Npm intentionally bails in passthrough::run;
             // fall back to a plain, unshared install directly here instead.
-            run_plain_npm_install(workspace_path)
+            // `write_lockfile: false` -- see issue #26: a lockfile
+            // generated here has different content per workspace (each
+            // ran `npm install` independently, resolving semver ranges at
+            // a possibly different moment), which merge-all's conflict
+            // detection then flags on every multi-agent Node run even
+            // when the two workspaces touched entirely disjoint files.
+            // The source repo not tracking a lockfile at all means there's
+            // no stable content to converge on, so the correct move is to
+            // never create one here in the first place, not to reconcile
+            // divergent generated ones after the fact.
+            run_plain_npm_install(workspace_path, false)
         });
     }
 
@@ -108,7 +120,12 @@ fn prepare_npm(workspace_path: &Path) -> Result<()> {
                 "populating the shared npm store failed for key '{key}', falling back to a \
                  normal (unshared) install for this workspace: {err:#}"
             );
-            return run_plain_npm_install(workspace_path);
+            // A real lockfile exists here (this is the store-population
+            // failure branch, past the no-lockfile early return above), so
+            // this workspace's install should behave exactly as if pact
+            // weren't involved at all: `npm install` may update the
+            // existing lockfile in place, same as it would outside pact.
+            return run_plain_npm_install(workspace_path, true);
         }
     };
 
@@ -119,16 +136,30 @@ fn prepare_npm(workspace_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_plain_npm_install(workspace_path: &Path) -> Result<()> {
-    let output = cmdutil::run("npm", &["install"], workspace_path)?;
+/// `write_lockfile: false` adds `--no-package-lock` so this install never
+/// creates or updates `package-lock.json` in `workspace_path` -- used for
+/// the no-committed-lockfile path, where a workspace-generated lockfile has
+/// no stable content to converge on across workspaces (see issue #26).
+fn run_plain_npm_install(workspace_path: &Path, write_lockfile: bool) -> Result<()> {
+    let args = npm_install_args(write_lockfile);
+    let output = cmdutil::run("npm", &args, workspace_path)?;
     if !output.status.success() {
         tracing::warn!(
-            "`npm install` exited with {}: {}",
+            "`npm {}` exited with {}: {}",
+            args.join(" "),
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
     }
     Ok(())
+}
+
+fn npm_install_args(write_lockfile: bool) -> Vec<&'static str> {
+    let mut args = vec!["install"];
+    if !write_lockfile {
+        args.push("--no-package-lock");
+    }
+    args
 }
 
 /// Derives `.pact-<repo>/store/npm` from a workspace path of the form
@@ -215,4 +246,19 @@ fn hash_file(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn npm_install_args_omits_lockfile_flag_when_writing_is_allowed() {
+        assert_eq!(npm_install_args(true), vec!["install"]);
+    }
+
+    #[test]
+    fn npm_install_args_adds_no_package_lock_flag_when_disallowed() {
+        assert_eq!(npm_install_args(false), vec!["install", "--no-package-lock"]);
+    }
 }

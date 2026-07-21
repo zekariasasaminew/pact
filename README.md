@@ -142,6 +142,14 @@ basic attributes to the underlying file record rather than the individual
 link, marking a hardlink read-only also freezes the canonical store entry
 itself after first use.
 
+If a workspace's repo has no committed `package-lock.json` at all, npm
+install still runs (so the agent has working `node_modules` from the
+start) but with `--no-package-lock`, and the content store is skipped —
+there's no stable lockfile hash to key a shared cache on, and letting each
+workspace generate its own lockfile independently would otherwise show up
+as a spurious merge conflict on `package-lock.json` at `merge-all` time
+even when the two workspaces touched entirely disjoint source files.
+
 ### Signaling scope for v1
 
 Advisory, glob-based, TTL-expiring file leases plus a threaded message log
