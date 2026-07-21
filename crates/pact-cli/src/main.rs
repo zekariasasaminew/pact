@@ -134,7 +134,14 @@ enum Command {
         /// not already present) -- e.g. a barrel export file. Only files
         /// you name here are ever touched this way; package.json's
         /// dependency blocks get their own JSON-aware merge automatically,
-        /// no flag needed, and lockfiles are never auto-resolved.
+        /// no flag needed, and lockfiles are never auto-resolved. This is a
+        /// naive line-level concat, not a code merge: for JS/TS files it
+        /// refuses (falls back to a real conflict) if the result would
+        /// contain two `module.exports =`/`export default` statements or a
+        /// redeclared binding, but nothing else -- CSS cascade, config keys
+        /// set twice, non-JS/TS languages -- is checked. Best suited to
+        /// genuinely append-only, order-independent content: logs,
+        /// CHANGELOG entries, ignore files.
         #[arg(long = "union")]
         union: Vec<String>,
 

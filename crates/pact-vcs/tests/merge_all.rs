@@ -371,6 +371,60 @@ fn merge_all_never_auto_resolves_lockfiles_even_with_matching_union_glob() {
     cleanup(&repo);
 }
 
+/// Regression test for a real Windows shakedown finding: two agents each
+/// append a disjoint export to the same CommonJS barrel and its
+/// `module.exports` line. Both sides touch the *same* last line
+/// differently, so git's plain 3-way merge always conflicts here (confirmed
+/// by hand, same lesson as `init_repo_with_barrel`'s doc comment) -- and
+/// the union resolver must recognize the merged result would carry two
+/// `module.exports =` assignments (second silently wins) and refuse it,
+/// rather than reporting a broken merge as `auto-resolved`.
+#[test]
+fn merge_all_union_rejects_conflicting_module_exports() {
+    let repo = init_repo();
+    std::fs::write(
+        repo.join("src/barrel.js"),
+        "const { add } = require('./add');\nconst { sub } = require('./sub');\nmodule.exports = { add, sub };\n",
+    )
+    .unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add js barrel"]);
+
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("add mul").unwrap();
+    std::fs::write(
+        a.path.join("src/barrel.js"),
+        "const { add } = require('./add');\nconst { sub } = require('./sub');\n\
+         const { mul } = require('./mul');\nmodule.exports = { add, sub, mul };\n",
+    )
+    .unwrap();
+
+    let b = manager.create_workspace("add div").unwrap();
+    std::fs::write(
+        b.path.join("src/barrel.js"),
+        "const { add } = require('./add');\nconst { sub } = require('./sub');\n\
+         const { div } = require('./div');\nmodule.exports = { add, sub, div };\n",
+    )
+    .unwrap();
+
+    let report = manager
+        .merge_all(None, None, &["src/barrel.js".to_string()], None, false)
+        .unwrap();
+
+    assert_eq!(report.merged.len(), 1, "expected exactly one of the two to merge cleanly");
+    assert_eq!(
+        report.skipped.len(),
+        1,
+        "a union merge that would carry two `module.exports =` statements must stay a real conflict, not be silently auto-resolved -- got merged={:?} skipped={:?}",
+        report.merged,
+        report.skipped
+    );
+    assert!(report.skipped[0].reason.contains("merge conflict"));
+
+    cleanup(&repo);
+}
+
 #[test]
 fn merge_all_accepts_a_stub_arbiter_resolution() {
     let repo = init_repo();
