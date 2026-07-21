@@ -307,6 +307,64 @@ fn merge_all_auto_resolves_package_json_dependency_conflict() {
     cleanup(&repo);
 }
 
+/// Regression test for issue #29: the JSON-aware package.json resolver used
+/// to reserialize through a BTreeMap-backed `serde_json::Value`, which
+/// alphabetized every top-level key (`dependencies` before `name`) and
+/// hardcoded 2-space indent regardless of the file's own convention. Uses a
+/// 4-space-indented file with the full standard npm key set, deliberately
+/// not already alphabetical, so either regression would show up.
+#[test]
+fn merge_all_package_json_merge_preserves_key_order_and_indent() {
+    let repo = init_repo();
+    let base = "{\n    \"name\": \"widget\",\n    \"version\": \"1.0.0\",\n    \
+                \"description\": \"a widget\",\n    \"main\": \"index.js\",\n    \
+                \"scripts\": {\n        \"test\": \"node test.js\"\n    },\n    \
+                \"dependencies\": {\n        \"a\": \"1.0.0\"\n    },\n    \
+                \"devDependencies\": {}\n}\n";
+    std::fs::write(repo.join("package.json"), base).unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add 4-space package.json"]);
+
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("add dep b").unwrap();
+    std::fs::write(
+        a.path.join("package.json"),
+        base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n        \"b\": \"2.0.0\"\n"),
+    )
+    .unwrap();
+
+    let b = manager.create_workspace("add dep c").unwrap();
+    std::fs::write(
+        b.path.join("package.json"),
+        base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n        \"c\": \"3.0.0\"\n"),
+    )
+    .unwrap();
+
+    let report = manager.merge_all(None, None, &[], None, false).unwrap();
+    assert_eq!(report.skipped.len(), 0, "expected both to merge via JSON-aware auto-resolution, got skipped={:?}", report.skipped);
+
+    let content = show(&repo, &format!("{}:package.json", report.target_branch));
+
+    let value: serde_json::Value = serde_json::from_str(&content).expect("merged package.json must be valid JSON");
+    let keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        keys,
+        vec!["name", "version", "description", "main", "scripts", "dependencies", "devDependencies"],
+        "top-level key order must be preserved across a merge, got {keys:?}\nfull content:\n{content}"
+    );
+
+    assert!(
+        content.contains("\n    \"name\": \"widget\""),
+        "expected the file's own 4-space indent to be preserved, got:\n{content}"
+    );
+    assert!(content.contains("\"a\": \"1.0.0\""));
+    assert!(content.contains("\"b\": \"2.0.0\""));
+    assert!(content.contains("\"c\": \"3.0.0\""));
+
+    cleanup(&repo);
+}
+
 #[test]
 fn merge_all_union_resolves_matched_file_conflict() {
     let repo = init_repo_with_barrel();

@@ -1059,7 +1059,26 @@ impl WorkspaceManager {
         }
 
         let merged_value = serde_json::Value::Object(merged_obj);
-        Ok(Some(serde_json::to_string_pretty(&merged_value)? + "\n"))
+
+        // `to_string_pretty` alone would do two things this resolver isn't
+        // supposed to do: reorder every top-level key alphabetically
+        // (serde_json's `Value::Object` is a plain `serde_json::Map`, which
+        // without the `preserve_order` feature is BTreeMap-backed) and
+        // hardcode 2-space indent regardless of the file's own convention.
+        // `merged_obj` above is built by cloning `ours_value`'s object and
+        // updating entries in place, so with `preserve_order` on, its key
+        // order already matches "ours" -- this only needs to match the
+        // indent width, not touch ordering.
+        let indent = detect_json_indent(&ours);
+        let mut buf = Vec::new();
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(&indent);
+        let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+        serde::Serialize::serialize(&merged_value, &mut serializer)
+            .context("serializing auto-resolved package.json")?;
+        let mut result =
+            String::from_utf8(buf).context("auto-resolved package.json was not valid UTF-8")?;
+        result.push('\n');
+        Ok(Some(result))
     }
 
     /// Plain line-union merge for a `--union`-matched file: the result is
@@ -1207,6 +1226,22 @@ fn binding_names(rest: &str) -> Vec<String> {
             vec![name]
         }
     }
+}
+
+/// Sniffs the indent unit (spaces or a tab) from the first indented line of
+/// a JSON file's text, so a re-serialized merge matches the file's own
+/// convention instead of always hardcoding 2 spaces. Falls back to 2
+/// spaces (serde_json's own default) if nothing indented is found, e.g. a
+/// single-line/minified file.
+fn detect_json_indent(text: &str) -> Vec<u8> {
+    for line in text.lines() {
+        let stripped = line.trim_start_matches([' ', '\t']);
+        let indent_len = line.len() - stripped.len();
+        if indent_len > 0 && !stripped.is_empty() {
+            return line.as_bytes()[..indent_len].to_vec();
+        }
+    }
+    b"  ".to_vec()
 }
 
 fn is_never_auto_resolve(path: &str) -> bool {
@@ -1478,5 +1513,29 @@ mod tests {
         // these (for different properties) is a legitimate union merge.
         let content = "module.exports.mul = require('./mul');\nmodule.exports.div = require('./div');\n";
         assert!(union_merge_is_safe("src/index.js", content));
+    }
+
+    #[test]
+    fn detect_json_indent_finds_two_space() {
+        let text = "{\n  \"a\": 1\n}\n";
+        assert_eq!(detect_json_indent(text), b"  ".to_vec());
+    }
+
+    #[test]
+    fn detect_json_indent_finds_four_space() {
+        let text = "{\n    \"a\": 1\n}\n";
+        assert_eq!(detect_json_indent(text), b"    ".to_vec());
+    }
+
+    #[test]
+    fn detect_json_indent_finds_tab() {
+        let text = "{\n\t\"a\": 1\n}\n";
+        assert_eq!(detect_json_indent(text), b"\t".to_vec());
+    }
+
+    #[test]
+    fn detect_json_indent_falls_back_to_two_space_for_minified_json() {
+        let text = "{\"a\":1}";
+        assert_eq!(detect_json_indent(text), b"  ".to_vec());
     }
 }
