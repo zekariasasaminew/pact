@@ -241,11 +241,6 @@ fn main() -> Result<()> {
         None => find_repo_root(&std::env::current_dir()?)?,
     };
 
-    // mcp-serve gets its own, self-contained tokio runtime rather than
-    // making the whole CLI async -- it's the only command that needs one
-    // (rmcp requires async), and every other command stays exactly as
-    // synchronous as it already is. See the README for why that tradeoff
-    // was made deliberately, not by default.
     if let Command::McpServe { agent_id, workspace } = cli.command {
         let runtime = tokio::runtime::Runtime::new()?;
         return runtime.block_on(pact_coord::serve(&repo_root, agent_id, workspace));
@@ -591,17 +586,9 @@ fn print_conflicts(conflicts: &[FileConflict]) {
     }
 }
 
-/// Parses one `--task <agent>:<text>` argument, splitting on the *first*
-/// `:` only so task text itself may freely contain colons (e.g.
-/// `claude:implement X: handle the edge case`). Returns the parsed
-/// `AgentKind`, the raw task text, and the original agent name (for
-/// warning messages, which want the user's own spelling).
-/// Parses one `--task` value into `(agent, task text, agent display name)`.
-/// A `<agent>:` prefix, when present and recognized, always wins -- that's
-/// what makes mixing agents in one `spawn-many` batch possible even when
-/// `--agent` also sets a default. `default` (from `--agent`) is what a task
-/// without a recognized prefix falls back to; without one, a prefix is
-/// mandatory, same as before `--agent` existed on this command.
+/// Parses one `--task` value into `(agent, task text, agent display name)`
+/// -- see DESIGN.md ("pact-cli") for the prefix-vs-`--agent`-default
+/// precedence rules.
 fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(AgentKind, String, String)> {
     if let Some((agent_name, task)) = raw.split_once(':') {
         if let Some(kind) = AgentKind::parse(agent_name) {
@@ -638,16 +625,13 @@ fn agent_label(kind: AgentKind) -> &'static str {
     }
 }
 
-/// Raw `type` values, as reported by an adapter's underlying CLI, that are
-/// real but uninteresting to a human watching the stream live -- confirmed
-/// noise, not a guess: a single Copilot CLI spawn produced 52 `[other]`
-/// lines to 1 real `[assistant]` line, almost all `session
-/// .background_tasks_changed`/`tool.execution_partial_result`; a 2-agent
-/// `spawn-many` run's log ballooned to 695 KB on the strength of these two
-/// alone. Suppressed only from the live terminal view by default -- the
-/// full unfiltered stream is always in the workspace's log file
-/// (`run_and_stream` writes every raw line there before any filtering),
-/// and `--verbose` restores them here too.
+/// Raw `type` values that are real but uninteresting to a human watching
+/// the stream live -- see DESIGN.md ("pact-cli > streamed event filtering")
+/// for the measurements that justified suppressing these two specifically.
+/// Suppressed only from the live terminal view by default; `--verbose`
+/// restores them, and the full unfiltered stream is always in the
+/// workspace's log file regardless (`run_and_stream` writes every raw line
+/// there before any filtering).
 const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] =
     &["session.background_tasks_changed", "tool.execution_partial_result"];
 
@@ -668,11 +652,8 @@ fn should_print_other(value: &serde_json::Value, verbose: bool) -> bool {
 }
 
 /// Same event formatting as `print_event`, prefixed with `label` so N
-/// interleaved concurrent agents' output stays attributable. No extra
-/// locking beyond what `println!`'s own internal `Stdout` lock already
-/// gives per call -- each event here becomes one complete line written in
-/// one call, so concurrent threads' lines interleave at line granularity,
-/// never mid-line.
+/// interleaved concurrent agents' output stays attributable -- see
+/// DESIGN.md ("pact-cli") for the line-granularity locking note.
 fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[{label}] [init] session {session_id}"),
@@ -689,12 +670,10 @@ fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
     }
 }
 
-/// Prints one streamed agent event. `Other` is deliberately not skipped by
-/// default -- an unrecognized event is far more likely to be a real
-/// message this adapter doesn't parse in detail yet (a tool-result echo,
-/// for instance) than something safe to drop silently. The exception is a
-/// short, confirmed list of known-noisy raw types (`should_print_other`),
-/// suppressed unless `--verbose` is passed.
+/// Prints one streamed agent event -- see DESIGN.md ("pact-cli") for why
+/// `Other` is not skipped by default except for the short, confirmed list
+/// of known-noisy raw types (`should_print_other`), suppressed unless
+/// `--verbose` is passed.
 fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[init] session {session_id}"),

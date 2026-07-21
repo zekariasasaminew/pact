@@ -29,20 +29,12 @@ pub fn send_message(
     Ok(conn.last_insert_rowid())
 }
 
-/// Returns every message addressed to `agent_id` (directly, or broadcast)
-/// that arrived since this agent last checked -- excluding the agent's own
-/// broadcasts, which it obviously doesn't need reflected back to it -- then
-/// advances its cursor. A cursor per agent (rather than a shared `read_at`
-/// column on the message itself) is what makes broadcasts work correctly:
-/// each recipient needs to see a message once independently of whether
-/// other recipients have already seen it, which a single mutable "read"
-/// flag on the row can't represent.
-///
-/// The cursor advances over every recipient-matching row, including the
-/// agent's own broadcasts, not just the ones actually returned -- otherwise
-/// an agent that only ever broadcasts (never receives anything else) would
-/// never advance past id 0 and every call would rescan the full messages
-/// table.
+/// Returns every message addressed to `agent_id` (directly, or broadcast),
+/// excluding the agent's own broadcasts, that arrived since this agent last
+/// checked, then advances its cursor -- see DESIGN.md ("pact-coord >
+/// Per-agent read cursors") for why it's a cursor per agent rather than a
+/// shared `read_at` column, and why the cursor advances over every
+/// recipient-matching row rather than just the ones actually returned.
 pub fn check_messages(conn: &Connection, agent_id: &str) -> Result<Vec<Message>> {
     let last_seen: i64 = conn
         .query_row(

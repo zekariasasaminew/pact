@@ -92,11 +92,10 @@ pub fn adapter(kind: AgentKind) -> Box<dyn AgentAdapter> {
 }
 
 /// Writes `{"mcpServers": {<name>: {"command": ..., "args": [...]}}}` to
-/// `path` -- the shape confirmed (by deliberately pointing both real CLIs
-/// at a broken command and observing a loud, non-silent failure) to work
-/// for both Claude Code's `--mcp-config` and Copilot CLI's
-/// `--additional-mcp-config @<path>`. Codex doesn't use this at all -- it
-/// takes inline config overrides instead of a file.
+/// `path`, the shape Claude Code's `--mcp-config` and Copilot CLI's
+/// `--additional-mcp-config @<path>` both expect -- see DESIGN.md
+/// ("pact-agents > MCP config format confirmation"). Codex doesn't use
+/// this at all -- it takes inline config overrides instead of a file.
 pub fn write_mcp_json_config(path: &Path, coord: &CoordConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

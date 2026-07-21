@@ -17,35 +17,12 @@ pub struct RunOutcome {
     pub summary: String,
 }
 
-/// Spawns `program args` in `cwd`, streaming its stdout as NDJSON.
-///
-/// Every raw stdout line is appended to `log_path` as-is (not the
-/// re-serialized `AgentEvent`) so schema drift or fields this parser
-/// doesn't know about yet aren't lost -- then parsed and handed to
-/// `on_event`. `on_pid` is called once, immediately after spawning, so the
-/// caller can persist the PID before this function blocks -- that's what
-/// lets a `teardown` invoked from a different process find and kill a
-/// still-running agent.
-///
-/// `supervisor` is where this child's whole process group is registered so
-/// a shared, process-wide Ctrl-C handler can kill it -- see
-/// `Supervisor`'s doc comment. Single-`spawn` and `spawn-many` both go
-/// through this function unchanged; only whether the caller hands it a
-/// freshly-created, single-use `Supervisor` or one shared across several
-/// concurrent calls differs.
-///
-/// stderr is drained on its own thread into the same log file (prefixed
-/// `[stderr] `) rather than left inherited or piped-but-undrained --
-/// either of those risks interleaved garbage in the terminal or a
-/// full-pipe deadlock if the child writes enough of it.
-///
-/// `parse_line` is adapter-supplied and returns zero or more events for one
-/// raw line -- not exactly one -- because not every adapter's schema maps
-/// one line to one event (confirmed necessary for Copilot CLI, whose
-/// `assistant.message` events can carry both response text and one or more
-/// tool calls in the same line; Claude Code's schema happens to be
-/// one-event-per-line, but this function doesn't assume that of anyone).
-#[allow(clippy::too_many_arguments)] // each parameter documented above; a params struct would only add indirection for a single internal call site
+/// Spawns `program args` in `cwd`, streaming its stdout as NDJSON to
+/// `on_event` and appending every raw line to `log_path` -- see DESIGN.md
+/// ("pact-agents > run_and_stream") for `on_pid`'s timing, the stderr
+/// draining approach, and why `parse_line` returns zero-or-more events per
+/// line rather than exactly one.
+#[allow(clippy::too_many_arguments)]
 pub fn run_and_stream(
     supervisor: &Supervisor,
     program: &str,
@@ -67,13 +44,8 @@ pub fn run_and_stream(
             .with_context(|| format!("opening log file {}", log_path.display()))?,
     ));
 
-    // On Windows, some agent CLIs (Copilot CLI, confirmed) ship as `.cmd`
-    // shims rather than a real `.exe` -- `std::process::Command` doesn't
-    // consult `PATHEXT` the way a real shell does, so `Command::new(program)`
-    // fails with "program not found" even though the CLI works fine typed
-    // interactively. Routing through `cmd /C` restores that resolution.
-    // Claude Code (a real PE executable) doesn't need this, but it's
-    // harmless for it either way.
+    // Windows .cmd shim resolution -- see DESIGN.md ("pact-deps > Windows
+    // .cmd shim resolution"), same rationale as cmdutil::run.
     let mut command = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(program);
@@ -138,12 +110,8 @@ pub fn run_and_stream(
     };
 
     Ok(saw_result.unwrap_or_else(|| {
-        // Not every adapter emits an explicit Result-shaped event -- Codex's
-        // `turn.completed`, confirmed directly, carries no success/failure
-        // signal at all, so it never produces one. Falling back to
-        // `success: false` unconditionally here would misreport every
-        // successful Codex run as a failure; the process's own exit code is
-        // the honest signal when no adapter-level Result was seen.
+        // No adapter-level Result event -- see DESIGN.md ("pact-agents >
+        // run_and_stream") for why the exit code is the fallback signal.
         match status {
             Some(status) => RunOutcome {
                 success: status.success(),

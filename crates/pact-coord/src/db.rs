@@ -10,19 +10,10 @@ use sha2::{Digest, Sha256};
 /// lock file.
 pub const DEFAULT_LEASE_TTL_SECONDS: i64 = 15 * 60;
 
-/// The coordination database is *not* placed under `.pact-<repo>/`
-/// alongside per-workspace bookkeeping (locks, metadata, logs). Those are
-/// blast-radius-limited to the one agent whose workspace they belong to;
-/// this database is depended on by *every* agent in the session. That
-/// directory sits directly inside the same tree as each workspace (e.g.
-/// `workspaces/<id>/../../state.db` is a trivially short relative path),
-/// and headless launches default to `bypassPermissions`, so a careless
-/// broad shell command in any one workspace could reach and corrupt state
-/// every other agent depends on. Placing it under the platform's local
-/// data directory, keyed by a hash of the repo root, isn't a hard security
-/// boundary (an agent's Bash tool can still reach anywhere given an
-/// absolute or crafted path) but removes it from being stumbled into by
-/// accident via `../..`-style relative paths, which is the realistic risk.
+/// Lives under the platform's local data directory, keyed by a hash of the
+/// repo root -- deliberately not under `.pact-<repo>/` with the
+/// per-workspace bookkeeping. See DESIGN.md ("pact-coord > Database
+/// placement").
 pub fn db_path(repo_root: &Path) -> Result<PathBuf> {
     let base = dirs::data_local_dir().context("could not determine platform data directory")?;
     let mut hasher = Sha256::new();
@@ -39,13 +30,7 @@ pub fn open(repo_root: &Path) -> Result<Connection> {
     let conn = Connection::open(&path)
         .with_context(|| format!("opening coordination database {}", path.display()))?;
 
-    // WAL because this file is opened concurrently by a separate OS
-    // process per running agent (each `pact mcp-serve` is its own
-    // process), not just separate threads in one process. busy_timeout
-    // means a writer under real contention blocks briefly instead of
-    // immediately erroring with SQLITE_BUSY -- prior art's "40-50
-    // concurrent agents" claim implies that contention is the normal case,
-    // not an edge case.
+    // WAL + busy_timeout -- see DESIGN.md ("pact-coord > WAL mode").
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
 
