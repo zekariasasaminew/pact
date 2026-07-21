@@ -632,8 +632,17 @@ fn agent_label(kind: AgentKind) -> &'static str {
 /// restores them, and the full unfiltered stream is always in the
 /// workspace's log file regardless (`run_and_stream` writes every raw line
 /// there before any filtering).
-const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] =
-    &["session.background_tasks_changed", "tool.execution_partial_result"];
+const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
+    "session.background_tasks_changed",
+    "tool.execution_partial_result",
+    // Per-token deltas streamed while a tool call's arguments are being
+    // generated -- confirmed the dominant source of remaining noise
+    // (issue #58): one real spawn-many log was 75%+ this single type,
+    // ~679 of 900 total lines. Same category as the other two: the
+    // information is already fully present in the final tool-call event,
+    // so the deltas are redundant for a human watching the stream live.
+    "assistant.tool_call_delta",
+];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
 /// only when it's a known-noisy type (see `SUPPRESSED_OTHER_EVENT_TYPES`)
@@ -767,6 +776,9 @@ mod tests {
         assert!(!should_print_other(&value, false));
 
         let value = serde_json::json!({"type": "tool.execution_partial_result", "data": {}});
+        assert!(!should_print_other(&value, false));
+
+        let value = serde_json::json!({"type": "assistant.tool_call_delta", "data": {}});
         assert!(!should_print_other(&value, false));
     }
 
