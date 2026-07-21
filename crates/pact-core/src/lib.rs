@@ -362,7 +362,16 @@ impl Orchestrator {
 
         let workspaces = &self.workspaces;
         let id = workspace.id.clone();
-        let mut coord_seen = false;
+        // Tracks the *last* status reported for this coord server, not the
+        // first -- a real coord connection reliably goes through a
+        // transient 'pending' status before 'connected' within a fraction
+        // of a second (confirmed: every single spawn in manual testing hit
+        // this), and warning on that transient value trained users to
+        // ignore pact WARNs in general, which made the genuinely bad case
+        // (coord stuck on 'pending', or 'failed', for the whole run) read
+        // almost identically to normal. Only what the server had settled
+        // on by the time the process actually exited matters here.
+        let mut coord_last_status: Option<String> = None;
         let outcome = pact_agents::run_and_stream(
             supervisor,
             &program,
@@ -373,14 +382,7 @@ impl Orchestrator {
             |event| {
                 if let AgentEvent::CoordStatus { name, status } = event {
                     if name == coord_name {
-                        coord_seen = true;
-                        if status != "connected" {
-                            tracing::warn!(
-                                "workspace {id}: coordination server '{coord_name}' reported \
-                                 status '{status}', not 'connected' -- file leases and \
-                                 messaging will not work for this session"
-                            );
-                        }
+                        coord_last_status = Some(status.clone());
                     }
                 }
                 on_event(event);
@@ -392,13 +394,8 @@ impl Orchestrator {
             },
         )?;
 
-        if coord.is_some() && !coord_seen {
-            tracing::warn!(
-                "workspace {}: coordination server '{coord_name}' never reported a status at \
-                 all -- file leases and messaging will not work for this session (this is \
-                 expected for adapters without a confirmed event schema, e.g. Codex; see README)",
-                workspace.id
-            );
+        if let Some(message) = coord_warning(coord.is_some(), coord_last_status.as_deref(), coord_name) {
+            tracing::warn!("workspace {}: {message}", workspace.id);
         }
 
         if let Err(err) = self.workspaces.set_agent_pid(&workspace.id, None) {
@@ -649,6 +646,34 @@ fn run_shell(dir: &Path, cmd: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+/// Decides what (if anything) to warn about a spawned agent's coordination
+/// connection, given the *last* status reported for `coord_name` over the
+/// whole run -- not the first. A real connection reliably goes through a
+/// transient `pending` status before `connected` within a fraction of a
+/// second, so warning on that transient value (as opposed to whatever it
+/// finally settled on) is a false positive that trains users to ignore
+/// pact WARNs, making the genuinely bad case -- stuck on `pending`, or
+/// `failed`, for the whole run -- read almost identically to normal.
+/// Returns `None` when there's nothing worth warning about: coord wasn't
+/// configured for this spawn at all, or it reached `connected`.
+fn coord_warning(coord_configured: bool, last_status: Option<&str>, coord_name: &str) -> Option<String> {
+    if !coord_configured {
+        return None;
+    }
+    match last_status {
+        None => Some(format!(
+            "coordination server '{coord_name}' never reported a status at all -- file leases \
+             and messaging will not work for this session (this is expected for adapters \
+             without a confirmed event schema, e.g. Codex; see README)"
+        )),
+        Some("connected") => None,
+        Some(status) => Some(format!(
+            "coordination server '{coord_name}' never reached 'connected' (last reported \
+             status: '{status}') -- file leases and messaging will not work for this session"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,5 +751,38 @@ mod tests {
         let dir = std::env::temp_dir();
         assert!(run_shell(&dir, if cfg!(windows) { "exit 0" } else { "true" }).unwrap());
         assert!(!run_shell(&dir, if cfg!(windows) { "exit 1" } else { "false" }).unwrap());
+    }
+
+    #[test]
+    fn coord_warning_is_none_when_coord_not_configured() {
+        assert_eq!(coord_warning(false, None, "pact-coord"), None);
+        assert_eq!(coord_warning(false, Some("pending"), "pact-coord"), None);
+    }
+
+    #[test]
+    fn coord_warning_is_none_when_last_status_is_connected() {
+        // The false-positive case this fixes: a normal spawn transitions
+        // pending -> connected within the run, so only the last status
+        // (connected) should be considered.
+        assert_eq!(coord_warning(true, Some("connected"), "pact-coord"), None);
+    }
+
+    #[test]
+    fn coord_warning_fires_when_status_never_settled_on_connected() {
+        let warning = coord_warning(true, Some("pending"), "pact-coord").unwrap();
+        assert!(warning.contains("never reached 'connected'"));
+        assert!(warning.contains("last reported status: 'pending'"));
+    }
+
+    #[test]
+    fn coord_warning_fires_on_explicit_failed_status() {
+        let warning = coord_warning(true, Some("failed"), "pact-coord").unwrap();
+        assert!(warning.contains("last reported status: 'failed'"));
+    }
+
+    #[test]
+    fn coord_warning_fires_when_no_status_ever_reported() {
+        let warning = coord_warning(true, None, "pact-coord").unwrap();
+        assert!(warning.contains("never reported a status at all"));
     }
 }
