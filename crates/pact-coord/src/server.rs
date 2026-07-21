@@ -80,13 +80,15 @@ impl CoordServer {
         text_result(body)
     }
 
-    #[tool(description = "Release file glob patterns you previously claimed with claim_files.")]
+    #[tool(
+        description = "Release file glob patterns you previously claimed with claim_files. Matches either the exact pattern string you originally claimed, or any pattern here that overlaps the same actual files -- so releasing a broader or differently-worded glob than the original claim still works."
+    )]
     fn release_files(
         &self,
         Parameters(params): Parameters<ReleaseFilesParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().unwrap();
-        let body = match leases::release_files(&conn, &self.agent_id, &params.globs) {
+        let body = match leases::release_files(&conn, &self.workspace_root, &self.agent_id, &params.globs) {
             Ok(n) => format!("released {n} lease(s)"),
             Err(e) => format!("error: {e:#}"),
         };
