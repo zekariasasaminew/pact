@@ -32,6 +32,15 @@ Invoke-WebRequest https://github.com/zekariasasaminew/pact/releases/latest/downl
 Expand-Archive pact.zip
 ```
 
+`latest` above always points at the most recent tagged, versioned
+release. To try unreleased work on `main` before the next tag (e.g. a
+just-merged fix) without building from source, download the same way
+from the [`edge` release](https://github.com/zekariasasaminew/pact/releases/tag/edge)
+instead of `latest` -- it's rebuilt automatically on every push to `main`
+via `.github/workflows/edge-release.yml`, so the tag and its assets move
+constantly. **Not a stable release channel** -- for anything you depend
+on, use a tagged `vX.Y.Z` release.
+
 Then, from inside (or with `--repo` pointing at) a git repository:
 
 ```sh

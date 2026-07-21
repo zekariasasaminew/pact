@@ -1,0 +1,103 @@
+name: Edge Release
+
+# Rebuilds and republishes a rolling "edge" prerelease on every push to
+# main (plus manual runs), so unreleased work between tagged versions is
+# installable without a Rust toolchain -- a separate, additive pipeline
+# from release.yml's tag-triggered, versioned releases; that one is
+# untouched by this. Named "edge", not "nightly": this fires on every
+# push, not once a day, and the tag moves to match.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: edge-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_ext: zip
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_ext: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive_ext: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive_ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p pact-cli
+
+      - name: Package (unix)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf "${{ github.workspace }}/pact-${{ matrix.target }}.tar.gz" pact
+
+      - name: Package (windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/pact.exe" -DestinationPath "pact-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pact-${{ matrix.target }}
+          path: pact-${{ matrix.target }}.${{ matrix.archive_ext }}
+
+  release:
+    name: publish edge release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Move the edge tag to this commit
+        run: |
+          git tag -f edge
+          git push origin edge --force
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish edge release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: edge
+          name: "edge (unreleased main @ ${{ github.sha }})"
+          prerelease: true
+          files: artifacts/*
+          body: |
+            Automatically rebuilt from the latest commit on `main` on every
+            push -- **not a stable release**. This tag and its assets move
+            with every push; re-download if you want the newest build.
+
+            Built from commit ${{ github.sha }}.
+
+            For pinned, versioned releases, see tags starting with `v` on
+            the [Releases page](https://github.com/${{ github.repository }}/releases).

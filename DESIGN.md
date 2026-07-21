@@ -883,3 +883,41 @@ creates a commit. A user checking a workspace's branch with `git log`
 before merging, to sanity-check what the agent did, would otherwise see
 an empty branch at the same commit it forked from and could reasonably
 conclude the agent did nothing.
+
+## CI and release infrastructure
+
+### Rolling `edge` release
+
+`release.yml` only builds on a pushed `v*` tag -- deliberately manual and
+infrequent, matching the "cut a release when a headline feature merges"
+cadence. The gap that leaves: real behavioral work lands on `main`
+between tags (16 commits' worth, at one point, all real fixes) with no
+installable build for anyone without a Rust toolchain to test against,
+which is exactly the audience the prebuilt-binary release path exists
+for in the first place.
+
+`edge-release.yml` closes that gap without touching `release.yml` at
+all -- a second, additive workflow, same build matrix, triggered on every
+push to `main` (plus manual `workflow_dispatch`) instead of a tag push.
+Named `edge`, not `nightly`: it fires on every push, not on a daily cron,
+so "nightly" would misdescribe the actual cadence. The `edge` git tag is
+force-moved to the new commit each run (`git tag -f edge && git push
+origin edge --force`) before `softprops/action-gh-release` republishes
+the release at that tag with `prerelease: true` -- that action updates an
+existing release in place (replacing same-named assets) rather than
+requiring a new tag per run, which is what makes a single rolling release
+possible instead of accumulating one release per push. `concurrency:
+cancel-in-progress` on the workflow avoids overlapping runs stepping on
+each other if pushes land in quick succession.
+
+Considered and rejected: adopting `cargo-dist` wholesale (the ecosystem-
+standard tool for this, with mature prerelease-version handling) --
+real value for a project wanting installer scripts, checksums, a
+Homebrew tap, but it replaces `release.yml` with its own generated
+workflow and config surface, a bigger lift than this problem justified
+at pact's current size. Also considered: pointing users at raw CI
+artifacts from the latest `main` run instead of a release -- no new
+workflow needed at all, but artifact downloads require GitHub auth even
+on a public repo, and have a 90-day retention window, making the
+Releases page a meaningfully better discovery path for the same
+information.
