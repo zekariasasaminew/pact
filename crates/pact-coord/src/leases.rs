@@ -118,9 +118,16 @@ pub fn claim_files(
         }
     }
 
+    // ON CONFLICT keyed on (holder, pattern) -- see the leases_holder_pattern
+    // unique index in db::open -- so a repeat claim from the same holder
+    // for the same pattern extends the existing row's expiry instead of
+    // accumulating a fresh one. Confirmed at 8-agent stress-test scale
+    // this used to matter: 8 agents x 2 identical claims each produced 160
+    // rows for what should have been at most 8.
     for pattern in patterns {
         conn.execute(
-            "INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(holder, pattern) DO UPDATE SET created_at = ?3, expires_at = ?4",
             (pattern, holder, now, expires_at),
         )?;
     }
@@ -200,5 +207,55 @@ mod tests {
         let root = std::env::temp_dir();
         let result = claim_files(&conn, &root, "agent-a", &[], None).unwrap();
         assert!(result.granted);
+    }
+
+    fn lease_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM leases", [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn repeat_claim_updates_existing_row_instead_of_inserting_a_duplicate() {
+        let conn = test_conn();
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);",
+        )
+        .unwrap();
+        let root = std::env::temp_dir();
+
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
+
+        assert_eq!(lease_count(&conn), 1, "3 identical claims from the same holder must not accumulate rows");
+    }
+
+    #[test]
+    fn repeat_claim_extends_the_expiry() {
+        let conn = test_conn();
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);",
+        )
+        .unwrap();
+        let root = std::env::temp_dir();
+
+        let first = claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(60)).unwrap();
+        let second = claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(3600)).unwrap();
+
+        assert!(second.expires_at >= first.expires_at);
+    }
+
+    #[test]
+    fn distinct_patterns_from_the_same_holder_get_separate_rows() {
+        let conn = test_conn();
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX leases_holder_pattern ON leases(holder, pattern);",
+        )
+        .unwrap();
+        let root = std::env::temp_dir();
+
+        claim_files(&conn, &root, "agent-a", &["a.txt".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["b.txt".to_string()], Some(900)).unwrap();
+
+        assert_eq!(lease_count(&conn), 2);
     }
 }
