@@ -1,11 +1,18 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::db::{self, DEFAULT_LEASE_TTL_SECONDS};
+
+/// Upper bound on an explicit `ttl_seconds` -- a lease is meant to
+/// self-expire well within one agent session, not become a de facto
+/// permanent lock. 24 hours comfortably covers any real session while still
+/// catching the obviously-wrong case (a caller passing milliseconds where
+/// seconds were expected lands well past this).
+const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct Conflict {
@@ -64,6 +71,17 @@ pub fn claim_files(
     patterns: &[String],
     ttl_seconds: Option<i64>,
 ) -> Result<ClaimResult> {
+    if let Some(ttl) = ttl_seconds {
+        if ttl <= 0 {
+            bail!("ttl_seconds must be positive, got {ttl}");
+        }
+        if ttl > MAX_LEASE_TTL_SECONDS {
+            bail!(
+                "ttl_seconds must be at most {MAX_LEASE_TTL_SECONDS} (24 hours), got {ttl}"
+            );
+        }
+    }
+
     let now = db::now_unix();
     conn.execute("DELETE FROM leases WHERE expires_at <= ?1", [now])?;
 
@@ -123,4 +141,64 @@ pub fn release_files(conn: &Connection, holder: &str, patterns: &[String]) -> Re
         )?;
     }
     Ok(released)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern TEXT NOT NULL,
+                holder TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn claim_files_rejects_negative_ttl() {
+        let conn = test_conn();
+        let root = std::env::temp_dir();
+        let err = claim_files(&conn, &root, "agent-a", &[], Some(-1)).unwrap_err();
+        assert!(err.to_string().contains("must be positive"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn claim_files_rejects_zero_ttl() {
+        let conn = test_conn();
+        let root = std::env::temp_dir();
+        let err = claim_files(&conn, &root, "agent-a", &[], Some(0)).unwrap_err();
+        assert!(err.to_string().contains("must be positive"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn claim_files_rejects_ttl_above_24_hours() {
+        let conn = test_conn();
+        let root = std::env::temp_dir();
+        let err = claim_files(&conn, &root, "agent-a", &[], Some(9_999_999_999)).unwrap_err();
+        assert!(err.to_string().contains("at most"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn claim_files_accepts_ttl_within_bounds() {
+        let conn = test_conn();
+        let root = std::env::temp_dir();
+        let result = claim_files(&conn, &root, "agent-a", &[], Some(3600)).unwrap();
+        assert!(result.granted);
+    }
+
+    #[test]
+    fn claim_files_accepts_default_ttl_when_omitted() {
+        let conn = test_conn();
+        let root = std::env::temp_dir();
+        let result = claim_files(&conn, &root, "agent-a", &[], None).unwrap();
+        assert!(result.granted);
+    }
 }
