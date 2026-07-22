@@ -12,12 +12,45 @@ mod leases;
 mod messages;
 mod server;
 
-pub use leases::{Conflict, ClaimResult};
+pub use leases::{ActiveLease, Conflict, ClaimResult};
 pub use messages::Message;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+
+/// One agent's pending (unread) message count, as of the moment
+/// `CoordStatus` was computed.
+#[derive(Debug, Clone)]
+pub struct AgentPending {
+    pub agent_id: String,
+    pub pending: i64,
+}
+
+/// A full snapshot of the coordination layer's current state, for `pact
+/// coord-status` (issue #64) -- makes the coord layer visible instead of a
+/// black box: every active lease, and every known agent's pending message
+/// count.
+#[derive(Debug, Clone)]
+pub struct CoordStatus {
+    pub active_leases: Vec<ActiveLease>,
+    pub pending_messages: Vec<AgentPending>,
+}
+
+/// Computes a `CoordStatus` snapshot. Read-only: unlike `check_messages`,
+/// looking at pending counts here never advances anyone's cursor.
+pub fn status(repo_root: &Path) -> Result<CoordStatus> {
+    let conn = db::open(repo_root)?;
+    let active_leases = leases::list_active_leases(&conn)?;
+    let pending_messages = messages::known_agent_ids(&conn)?
+        .into_iter()
+        .map(|agent_id| {
+            let pending = messages::pending_message_count(&conn, &agent_id)?;
+            Ok(AgentPending { agent_id, pending })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(CoordStatus { active_leases, pending_messages })
+}
 
 /// Opens the shared coordination database and serves the MCP protocol over
 /// stdio until the client (the agent CLI) disconnects. Blocks for the
@@ -78,4 +111,55 @@ fn pattern_matches(pattern: &str, file: &str) -> bool {
         .build()
         .map(|g| g.compile_matcher().is_match(file))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exercises `status` end-to-end against a real file-backed database
+    /// (via the same `db::open` every other public function here uses),
+    /// not just the individual `leases`/`messages` functions it composes --
+    /// confirms the plumbing between them is wired correctly.
+    #[test]
+    fn status_reports_active_leases_and_excludes_own_broadcasts_from_pending() {
+        let repo_root = std::env::temp_dir().join(format!("pact-coord-status-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        {
+            let conn = db::open(&repo_root).unwrap();
+            messages::send_message(&conn, "agent-a", None, "bcast", "hello").unwrap();
+            leases::claim_files(&conn, &repo_root, "agent-a", &["a.txt".to_string()], Some(900)).unwrap();
+        }
+
+        let snapshot = status(&repo_root).unwrap();
+
+        assert_eq!(snapshot.active_leases.len(), 1);
+        assert_eq!(snapshot.active_leases[0].holder, "agent-a");
+        assert_eq!(snapshot.active_leases[0].pattern, "a.txt");
+
+        let a_pending = snapshot
+            .pending_messages
+            .iter()
+            .find(|p| p.agent_id == "agent-a")
+            .map(|p| p.pending)
+            .unwrap_or(0);
+        assert_eq!(a_pending, 0, "agent-a must not see its own broadcast as pending");
+
+        let _ = std::fs::remove_dir_all(db::db_path(&repo_root).unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn status_is_empty_for_a_fresh_repo() {
+        let repo_root = std::env::temp_dir().join(format!("pact-coord-status-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        let snapshot = status(&repo_root).unwrap();
+        assert!(snapshot.active_leases.is_empty());
+        assert!(snapshot.pending_messages.is_empty());
+
+        let _ = std::fs::remove_dir_all(db::db_path(&repo_root).unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
 }

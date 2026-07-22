@@ -700,6 +700,31 @@ negative TTL silently produced an already-expired lease and an unbounded
 one produced an `expires_at` centuries out, both misleadingly returning
 `accepted: true` either way.
 
+### Coord status (issue #64)
+
+`pact_coord::status` gives `pact coord-status` a read-only snapshot of the
+coordination layer: every active (non-expired) lease, and a pending
+(unread) message count per known agent. Landed because pact-coord was
+otherwise a black box from outside an MCP client -- the only visibility
+was indirect, via `pact conflicts`' per-file lease/message enrichment,
+which only surfaces coordination context for files already flagged as
+conflicting.
+
+Two things worth knowing:
+
+- **"Known agent" has no dedicated table.** Agent identity is implicit
+  everywhere in this schema (a workspace id doubles as its MCP
+  `agent_id`), so `known_agent_ids` unions every place an id can appear --
+  lease holders, message senders/recipients, and `read_cursors` rows --
+  rather than querying one canonical source.
+- **Computing a pending count must not advance anyone's cursor.** Unlike
+  `check_messages` (which is the caller *reading* its own messages, and
+  correctly consumes them), a status view is a third party looking in --
+  looking shouldn't change what a later real `check_messages` call from
+  that agent would see. `pending_message_count` runs the identical
+  recipient-matching query `check_messages` does, but only counts, never
+  writes to `read_cursors`.
+
 ## pact-deps — dependency materialization
 
 Detects a workspace's package manager(s) and makes sure dependencies are

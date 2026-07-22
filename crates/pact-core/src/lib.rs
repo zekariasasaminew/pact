@@ -544,6 +544,13 @@ impl Orchestrator {
         Ok(conflicts)
     }
 
+    /// A full snapshot of the coordination layer's current state (issue
+    /// #64) -- active leases and every known agent's pending message
+    /// count, for `pact coord-status`.
+    pub fn coord_status(&self) -> Result<pact_coord::CoordStatus> {
+        pact_coord::status(&self.repo_root)
+    }
+
     pub fn teardown(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         // WorkspaceManager::remove_workspace already kills any live agent
         // process recorded against this workspace before removing it, and

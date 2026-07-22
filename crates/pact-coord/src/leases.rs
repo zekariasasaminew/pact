@@ -46,6 +46,33 @@ pub struct ClaimResult {
     pub conflicts: Vec<Conflict>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct ActiveLease {
+    pub pattern: String,
+    pub holder: String,
+    pub expires_at: i64,
+}
+
+/// Every currently-unexpired lease, for `pact coord-status` (issue #64) --
+/// unlike `claim_files`' own conflict-detection query (`holder != ?1 AND
+/// expires_at > ?2`, scoped to one caller), this has no holder filter: it's
+/// a full snapshot of "what does the coordination layer currently think is
+/// claimed," not one agent's view of potential conflicts.
+pub fn list_active_leases(conn: &Connection) -> Result<Vec<ActiveLease>> {
+    let now = db::now_unix();
+    let mut stmt = conn.prepare(
+        "SELECT pattern, holder, expires_at FROM leases WHERE expires_at > ?1 ORDER BY holder, pattern",
+    )?;
+    let rows = stmt.query_map([now], |row| {
+        Ok(ActiveLease {
+            pattern: row.get(0)?,
+            holder: row.get(1)?,
+            expires_at: row.get(2)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
 /// Expands a glob pattern against every file currently in `root`, returning
 /// paths relative to `root` with forward slashes (normalized across
 /// platforms). Overlap between two glob patterns is detected by expanding
@@ -375,5 +402,32 @@ mod tests {
         assert_eq!(released, 0);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_active_leases_excludes_expired_ones() {
+        let conn = test_conn();
+        let now = db::now_unix();
+        conn.execute(
+            "INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES ('a.txt', 'agent-a', ?1, ?2)",
+            (now - 100, now - 1),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES ('b.txt', 'agent-b', ?1, ?2)",
+            (now, now + 900),
+        )
+        .unwrap();
+
+        let active = list_active_leases(&conn).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].pattern, "b.txt");
+        assert_eq!(active[0].holder, "agent-b");
+    }
+
+    #[test]
+    fn list_active_leases_empty_when_no_leases() {
+        let conn = test_conn();
+        assert!(list_active_leases(&conn).unwrap().is_empty());
     }
 }
