@@ -483,7 +483,7 @@ impl WorkspaceManager {
             if path.extension().is_some_and(|e| e == "json") {
                 let contents = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
-                out.push(serde_json::from_str(&contents)?);
+                out.push(serde_json::from_str(strip_bom(&contents))?);
             }
         }
         out.sort_by_key(|w: &Workspace| w.created_at);
@@ -493,7 +493,7 @@ impl WorkspaceManager {
     pub fn get_workspace(&self, id: &str) -> Result<Workspace> {
         let contents = std::fs::read_to_string(self.meta_path(id))
             .with_context(|| format!("no workspace found with id '{id}'"))?;
-        Ok(serde_json::from_str(&contents)?)
+        Ok(serde_json::from_str(strip_bom(&contents))?)
     }
 
     /// Stages and commits everything in a workspace's working tree with a
