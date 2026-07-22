@@ -12,6 +12,7 @@ path = "src/main.rs"
 pact-core.workspace = true
 pact-agents.workspace = true
 pact-coord.workspace = true
+pact-deps.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true

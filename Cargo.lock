@@ -821,6 +821,7 @@ dependencies = [
  "pact-agents",
  "pact-coord",
  "pact-core",
+ "pact-deps",
  "pact-vcs",
  "serde_json",
  "tokio",
