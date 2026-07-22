@@ -4,6 +4,18 @@ A language-agnostic orchestrator for running multiple AI coding agent CLIs
 (Claude Code, GitHub Copilot CLI, Codex) in parallel on the same repository,
 without them fighting each other.
 
+**What "without fighting" means here:** each agent gets its own git
+worktree (real filesystem isolation, not just a hope that they touch
+different files), conflicts get detected and surfaced instead of
+discovered the hard way, and `merge-all` gets N agents' work back onto
+one branch automatically wherever it safely can. The file-lease/messaging
+layer that lets agents coordinate is advisory, not enforced -- it makes
+overlapping work visible and communicable between agents, it doesn't stop
+an agent that never checks it from editing a file another agent already
+claimed. Worktree isolation and merge-all's conflict handling are the
+parts that are real guarantees; coordination is a convention agents
+opt into.
+
 ![Two Claude Code agents running in parallel via pact spawn-many, hitting a real teardown safety check](docs/demo.gif)
 
 **[Getting started guide](GETTING_STARTED.md)** -- install to watching two
