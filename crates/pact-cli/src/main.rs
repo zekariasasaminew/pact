@@ -130,6 +130,11 @@ enum Command {
     /// from the same point in history. Informational only -- nothing here
     /// blocks anything, same as MCP leases being advisory.
     Conflicts,
+    /// Show the coordination layer's current state: every active file
+    /// lease and each known agent's pending (unread) message count.
+    /// Read-only -- unlike an agent calling check_messages, looking here
+    /// never marks anything as read.
+    CoordStatus,
     /// Merge every (or a chosen set of) active workspace onto a fresh
     /// integration branch. Auto-commits each workspace first, refuses any
     /// whose base commit is no longer part of this branch's history, then
@@ -460,6 +465,10 @@ fn main() -> Result<()> {
             let conflicts = orchestrator.detect_conflicts()?;
             print_conflicts(&conflicts);
         }
+        Command::CoordStatus => {
+            let status = orchestrator.coord_status()?;
+            print_coord_status(&status);
+        }
         Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
             let arbiter = match test_cmd {
@@ -582,6 +591,36 @@ fn print_conflicts(conflicts: &[FileConflict]) {
                 "    {} related coordination message(s) -- see the message log for context",
                 conflict.related_message_count
             );
+        }
+    }
+}
+
+/// Prints a `pact coord-status` snapshot -- see DESIGN.md ("pact-coord >
+/// Coord status") for why this exists (issue #64: the coordination layer
+/// was otherwise a black box from the outside).
+fn print_coord_status(status: &pact_coord::CoordStatus) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    if status.active_leases.is_empty() {
+        println!("no active leases");
+    } else {
+        println!("active leases:");
+        for lease in &status.active_leases {
+            let remaining = (lease.expires_at - now).max(0);
+            println!("  '{}' held by {} (expires in {}s)", lease.pattern, lease.holder, remaining);
+        }
+    }
+
+    let with_pending: Vec<_> = status.pending_messages.iter().filter(|p| p.pending > 0).collect();
+    if with_pending.is_empty() {
+        println!("no pending messages");
+    } else {
+        println!("pending messages:");
+        for agent in with_pending {
+            println!("  {}: {} unread", agent.agent_id, agent.pending);
         }
     }
 }
