@@ -713,6 +713,21 @@ negative TTL silently produced an already-expired lease and an unbounded
 one produced an `expires_at` centuries out, both misleadingly returning
 `accepted: true` either way.
 
+### Known scaling limit: `expand_glob` cost (issue #72)
+
+`expand_glob` walks the entire workspace file tree (`WalkDir::new(root)`)
+on every call, with no early pruning based on the glob's literal prefix.
+`claim_files`' conflict-detection path calls it once per incoming pattern
+*and* once per existing lease row being checked for overlap, so a single
+`claim_files` call can trigger several full tree walks -- O(files in
+workspace) per call, not O(1). Fine at the scale this has actually been
+tested at; flagged here as a deliberate, known tradeoff rather than a
+silent surprise, since the README cites MCP Agent Mail's 40-50-concurrent-
+agent scale as prior art without pact itself having been tested anywhere
+near that. Not optimizing preemptively -- revisit (glob-prefix-based
+pruning, or caching the file list per workspace between calls) only if
+real usage actually hits this as a bottleneck.
+
 ### Coord status (issue #64)
 
 `pact_coord::status` gives `pact coord-status` a read-only snapshot of the
