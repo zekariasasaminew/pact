@@ -693,6 +693,11 @@ const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
     // information is already fully present in the final tool-call event,
     // so the deltas are redundant for a human watching the stream live.
     "assistant.tool_call_delta",
+    // Session/skills metadata, not agent output -- confirmed noise
+    // (issue #80): reproduces on any spawn, even a trivial one-turn task,
+    // as 500-1000 byte raw JSON blobs that say nothing about what the
+    // agent is doing.
+    "session.skills_loaded",
 ];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
@@ -830,6 +835,9 @@ mod tests {
         assert!(!should_print_other(&value, false));
 
         let value = serde_json::json!({"type": "assistant.tool_call_delta", "data": {}});
+        assert!(!should_print_other(&value, false));
+
+        let value = serde_json::json!({"type": "session.skills_loaded", "data": {}});
         assert!(!should_print_other(&value, false));
     }
 
