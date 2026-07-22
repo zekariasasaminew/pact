@@ -803,7 +803,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "pact-agents"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "command-group",
@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "pact-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "pact-coord"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "pact-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "pact-agents",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "pact-deps"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "pact-vcs",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "pact-vcs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "globset",
