@@ -1003,6 +1003,32 @@ generated bash script and called its completion function with the exact
 positional arguments (`$1`/`$2`/`$3`) bash's own completion machinery
 passes, and `pact spawn --ag<TAB>` correctly completed to `--agent`.
 
+### `pact doctor` (issue #18)
+
+Reuses `pact_deps::run_shimmed` (`pact-deps`'s existing `cmd /C`
+Windows-shim-resolution helper, re-exported for this rather than
+re-derived) to run each tool's real version-check invocation and reports
+found/not-found per item. Every check but `git` uses `--version`; `go` is
+the one deliberate exception (`go version`, a subcommand, not a flag --
+confirmed by hand: `go --version` actually fails with `flag provided but
+not defined: -version`, so assuming a uniform `--version` convention
+across every tool would have been wrong for at least this one). A
+program not on `PATH` was confirmed, not assumed, to make
+`run_shimmed`/`cmd /C` return a failed exit status with an "is not
+recognized" stderr message rather than erroring the Rust call itself, so
+"not found" is a normal `Ok` result, not a caught error.
+
+`git`'s check additionally parses `X.Y` out of `git version X.Y.Z...` and
+requires `>= 2.5` (when `git worktree` was introduced) to report
+worktree support -- unparseable version strings are treated as "can't
+confirm, assume fine" rather than a false failure, since a `git` that
+responds to `--version` at all is already almost certainly new enough in
+real use. `git` is the only check that can make the command exit
+non-zero; every agent CLI and package manager is purely informational,
+per the issue's own acceptance criteria -- not everyone needs all of
+them, so a missing `copilot` or `poetry` isn't a failure the way a
+missing `git` is.
+
 ## CI and release infrastructure
 
 ### Rolling `edge` release

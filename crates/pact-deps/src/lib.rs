@@ -9,6 +9,7 @@ mod detect;
 mod passthrough;
 mod store;
 
+pub use cmdutil::run as run_shimmed;
 pub use detect::{detect, PackageManager};
 pub use store::{ContentStore, LinkMode};
 

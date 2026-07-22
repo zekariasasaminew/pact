@@ -1010,6 +1010,14 @@ powershell, elvish) prints a completion script to stdout -- e.g. `pact
 completions bash > /etc/bash_completion.d/pact`, or wherever your shell
 loads completions from, then start a new shell.
 
+**`pact doctor`** checks your environment before you hit a confusing
+failure three steps into a real `spawn`: whether `git` is installed and
+new enough for `worktree`, which agent CLIs (claude, copilot, codex,
+gemini) are on `PATH`, and which package-manager CLIs `pact-deps` already
+knows how to prep. Read-only -- doesn't install or fix anything. Only a
+missing/too-old `git` makes it exit non-zero; a missing agent CLI or
+package manager is informational, since not everyone needs all of them.
+
 ## Privacy
 
 **pact collects and sends no telemetry of any kind.** No usage data,
