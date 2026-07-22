@@ -1005,6 +1005,11 @@ before running either will show it at the same commit it forked from --
 that's this, not the agent having done nothing; `pact diff <id>` shows the
 uncommitted work directly.
 
+**Shell completions:** `pact completions <shell>` (bash, zsh, fish,
+powershell, elvish) prints a completion script to stdout -- e.g. `pact
+completions bash > /etc/bash_completion.d/pact`, or wherever your shell
+loads completions from, then start a new shell.
+
 ## Privacy
 
 **pact collects and sends no telemetry of any kind.** No usage data,

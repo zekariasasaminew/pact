@@ -987,6 +987,22 @@ existing `open` behavior, not something this issue introduced, and
 they're confirmed empty afterward (no real workspace, no lingering MCP
 config) by `crates/pact-cli/tests/spawn_dry_run.rs`.
 
+### Shell completions (issue #19)
+
+`pact completions <shell>` calls `clap_complete::generate` directly
+against `Cli`'s own `#[derive(Parser)]` definition (via
+`<Cli as clap::CommandFactory>::command()`), so the generated script can
+never drift out of sync with the real flag/subcommand set the way a
+hand-maintained completion script would. Handled as an early return in
+`main`, before `repo_root`/`Orchestrator::open` -- same reasoning as
+`McpServe`, but for a different reason: completions must work from
+anywhere, not just inside a git repo, since a user configuring their
+shell's completion path has no reason to be standing in one. Confirmed
+by hand, not just "the script generates without error": sourced the real
+generated bash script and called its completion function with the exact
+positional arguments (`$1`/`$2`/`$3`) bash's own completion machinery
+passes, and `pact spawn --ag<TAB>` correctly completed to `--agent`.
+
 ## CI and release infrastructure
 
 ### Rolling `edge` release

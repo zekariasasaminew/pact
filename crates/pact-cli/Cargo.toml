@@ -16,6 +16,7 @@ pact-deps.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
