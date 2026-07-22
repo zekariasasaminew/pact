@@ -391,7 +391,12 @@ fn merge_all_package_json_merge_handles_utf8_bom() {
     );
 
     let content = show(&repo, &format!("{}:package.json", report.target_branch));
-    let value: serde_json::Value = serde_json::from_str(&content).expect("merged package.json must be valid JSON");
+    assert!(
+        content.starts_with('\u{FEFF}'),
+        "the committed package.json had a BOM, so the merged output must preserve it (issue #79), got:\n{content:?}"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(content.trim_start_matches('\u{FEFF}')).expect("merged package.json must be valid JSON");
     let deps = value.get("dependencies").and_then(|d| d.as_object()).expect("dependencies object");
     assert_eq!(deps.get("a").and_then(|v| v.as_str()), Some("1.0.0"));
     assert_eq!(deps.get("b").and_then(|v| v.as_str()), Some("2.0.0"));
