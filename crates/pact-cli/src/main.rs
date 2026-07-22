@@ -243,6 +243,12 @@ enum Command {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Print a shell completion script for `pact` to stdout -- e.g. `pact
+    /// completions bash > /etc/bash_completion.d/pact` (or wherever your
+    /// shell loads completions from) to install it.
+    Completions {
+        shell: clap_complete::Shell,
+    },
 }
 
 fn main() -> Result<()> {
@@ -255,6 +261,12 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let verbose = cli.verbose;
+
+    if let Command::Completions { shell } = cli.command {
+        clap_complete::generate(shell, &mut <Cli as clap::CommandFactory>::command(), "pact", &mut std::io::stdout());
+        return Ok(());
+    }
+
     let repo_root = match cli.repo {
         Some(p) => p,
         None => find_repo_root(&std::env::current_dir()?)?,
@@ -566,6 +578,7 @@ fn main() -> Result<()> {
             println!("removed workspace {id}");
         }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
+        Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),
     }
 
     Ok(())
