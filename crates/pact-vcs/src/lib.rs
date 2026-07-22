@@ -838,7 +838,14 @@ impl WorkspaceManager {
     /// `serde_json::from_str` rejects a BOM outright, so an otherwise valid
     /// `package.json` stage would silently fail `try_resolve_package_json`'s
     /// parse and fall through to a real conflict instead of auto-resolving.
-    fn read_conflict_stage(&self, worktree_path: &Path, file: &str, stage: u8) -> Result<Option<String>> {
+    ///
+    /// The returned `bool` reports whether a BOM was present on this stage
+    /// before it was stripped -- issue #79: stripping it here for parsing
+    /// is correct, but the caller needs to know it was there in the first
+    /// place to restore it on write, or a BOM'd `package.json` gets
+    /// silently normalized to non-BOM on the first merge that needs
+    /// conflict resolution.
+    fn read_conflict_stage(&self, worktree_path: &Path, file: &str, stage: u8) -> Result<Option<(String, bool)>> {
         let output = Command::new("git")
             .args(["show", &format!(":{stage}:{file}")])
             .current_dir(worktree_path)
@@ -848,13 +855,14 @@ impl WorkspaceManager {
             return Ok(None);
         }
         let content = String::from_utf8_lossy(&output.stdout);
-        Ok(Some(strip_bom(&content).to_string()))
+        let had_bom = content.starts_with('\u{FEFF}');
+        Ok(Some((strip_bom(&content).to_string(), had_bom)))
     }
 
     /// JSON-aware merge of `package.json`'s dependency blocks -- see
     /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn try_resolve_package_json(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
-        let (Some(base), Some(ours), Some(theirs)) = (
+        let (Some((base, _)), Some((ours, ours_had_bom)), Some((theirs, _))) = (
             self.read_conflict_stage(worktree_path, file, 1)?,
             self.read_conflict_stage(worktree_path, file, 2)?,
             self.read_conflict_stage(worktree_path, file, 3)?,
@@ -947,13 +955,25 @@ impl WorkspaceManager {
         let mut result =
             String::from_utf8(buf).context("auto-resolved package.json was not valid UTF-8")?;
         result.push('\n');
+
+        // "ours" is the integration branch's existing convention (same
+        // reasoning `detect_json_indent(&ours)` above already uses for
+        // indent width) -- if its committed package.json had a BOM,
+        // restore it here. Otherwise the merged output silently drops it,
+        // even though nothing about resolving the dependency-block
+        // conflict was ever meant to change the file's encoding (issue
+        // #79).
+        if ours_had_bom {
+            result.insert(0, '\u{FEFF}');
+        }
+
         Ok(Some(result))
     }
 
     /// Plain line-union merge for a `--union`-matched file -- see
     /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
     fn try_resolve_union(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
-        let (Some(ours), Some(theirs)) = (
+        let (Some((ours, _)), Some((theirs, _))) = (
             self.read_conflict_stage(worktree_path, file, 2)?,
             self.read_conflict_stage(worktree_path, file, 3)?,
         ) else {
