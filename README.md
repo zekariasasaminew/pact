@@ -139,8 +139,8 @@ several child processes at once.
 ### Dependency sharing leans on what already exists
 
 Most package ecosystems already solved global dependency sharing — Cargo,
-Go modules, Maven, Gradle, uv, pnpm, yarn, poetry, and pipenv all use a
-global content-addressed or version-keyed cache by default. The gap is
+Go modules, Maven, Gradle, uv, pnpm, yarn, Bun, poetry, and pipenv all use
+a global content-addressed or version-keyed cache by default. The gap is
 narrower than "no ecosystem shares dependencies": it's specifically plain
 npm (flat, per-project `node_modules`) and plain pip/venv. So
 `pact-deps` (Phase 1) detects the package manager and passes through

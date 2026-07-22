@@ -849,6 +849,25 @@ other workspace sharing that store entry. That failure is the point.
 
 ### Package manager detection
 
+### Bun detector (issue #17)
+
+Bun's own lockfile changed format between versions -- older Bun writes a
+binary `bun.lockb`, current Bun (confirmed against a real installed 1.3.14
+CLI, not assumed) defaults to a text `bun.lock` instead. `detect()` checks
+for either, ahead of the pnpm/yarn/npm chain, so a Bun-managed project
+(which always also has a `package.json`) is never misreported as npm.
+Bun goes through `passthrough::run` like pnpm/yarn -- no custom content
+store, since Bun already has its own global cache, the same reasoning
+that keeps everything except npm on the passthrough path. Confirmed by
+hand: `bun install` defaults to `bun.lock`, not `bun.lockb`, on a fresh
+project; `bun install --frozen-lockfile` (verified against a real `bun
+install --help`, not assumed) against a project with a committed
+`bun.lock` correctly resolves `node_modules` without modifying the
+lockfile, mirroring `npm ci`'s reproducibility guarantee -- pnpm/yarn use
+`--prefer-offline` instead, a different (caching, not lockfile-strictness)
+guarantee, so this isn't an inconsistency, just a different real flag for
+a different real semantic gap Bun doesn't otherwise cover.
+
 ### No committed lockfile (issue #26)
 
 `prepare_npm`'s no-lockfile path used to run a plain `npm install`, which

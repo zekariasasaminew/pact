@@ -11,6 +11,11 @@ use crate::detect::PackageManager;
 /// returned as an error.
 pub fn run(manager: PackageManager, workspace_path: &Path) -> Result<()> {
     let (program, args): (&str, &[&str]) = match manager {
+        // Bun's global cache is used automatically (no --prefer-offline
+        // equivalent to opt into); --frozen-lockfile mirrors npm ci's
+        // reproducibility guarantee instead -- see DESIGN.md ("pact-deps >
+        // Bun detector").
+        PackageManager::Bun => ("bun", &["install", "--frozen-lockfile"]),
         PackageManager::Pnpm => ("pnpm", &["install", "--prefer-offline"]),
         PackageManager::Yarn => ("yarn", &["install", "--prefer-offline"]),
         PackageManager::Uv => ("uv", &["sync"]),
