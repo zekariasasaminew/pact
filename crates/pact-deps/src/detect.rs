@@ -5,6 +5,7 @@ use std::path::Path;
 /// `detect` returns a `Vec`, not a single value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
+    Bun,
     Pnpm,
     Yarn,
     Npm,
@@ -27,7 +28,9 @@ pub fn detect(project_root: &Path) -> Vec<PackageManager> {
     let mut found = Vec::new();
     let exists = |name: &str| project_root.join(name).exists();
 
-    if exists("pnpm-lock.yaml") {
+    if exists("bun.lockb") || exists("bun.lock") {
+        found.push(PackageManager::Bun);
+    } else if exists("pnpm-lock.yaml") {
         found.push(PackageManager::Pnpm);
     } else if exists("yarn.lock") {
         found.push(PackageManager::Yarn);
@@ -59,4 +62,57 @@ pub fn detect(project_root: &Path) -> Vec<PackageManager> {
     }
 
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pact-deps-detect-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn detects_bun_via_text_lockfile() {
+        let dir = scratch_dir("bun-lock");
+        fs::write(dir.join("package.json"), "{}").unwrap();
+        fs::write(dir.join("bun.lock"), "").unwrap();
+
+        assert_eq!(detect(&dir), vec![PackageManager::Bun]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detects_bun_via_binary_lockfile() {
+        let dir = scratch_dir("bun-lockb");
+        fs::write(dir.join("package.json"), "{}").unwrap();
+        fs::write(dir.join("bun.lockb"), []).unwrap();
+
+        assert_eq!(detect(&dir), vec![PackageManager::Bun]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bun_lockfile_takes_priority_over_bare_package_json_not_reported_as_npm() {
+        let dir = scratch_dir("bun-vs-npm");
+        fs::write(dir.join("package.json"), "{}").unwrap();
+        fs::write(dir.join("package-lock.json"), "{}").unwrap();
+        fs::write(dir.join("bun.lock"), "").unwrap();
+
+        let found = detect(&dir);
+        assert_eq!(found, vec![PackageManager::Bun], "a bun lockfile must win over an npm one, not report both");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bare_package_json_without_any_lockfile_is_still_npm() {
+        let dir = scratch_dir("bare-package-json");
+        fs::write(dir.join("package.json"), "{}").unwrap();
+
+        assert_eq!(detect(&dir), vec![PackageManager::Npm]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
