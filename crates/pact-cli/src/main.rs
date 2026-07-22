@@ -720,6 +720,7 @@ fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
 
 fn package_manager_label(pm: pact_deps::PackageManager) -> &'static str {
     match pm {
+        pact_deps::PackageManager::Bun => "bun",
         pact_deps::PackageManager::Pnpm => "pnpm",
         pact_deps::PackageManager::Yarn => "yarn",
         pact_deps::PackageManager::Npm => "npm",
