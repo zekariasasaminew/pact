@@ -607,3 +607,29 @@ fn merge_all_still_aborts_when_arbiter_declines() {
 
     cleanup(&repo);
 }
+
+/// Regression test for issue #78: a workspace meta JSON file with a leading
+/// UTF-8 BOM (e.g. hand-edited via PowerShell 5.1's `Set-Content -Encoding
+/// utf8`, which writes one by default) used to crash `list_workspaces`/
+/// `get_workspace` with `expected value at line 1 column 1` -- neither
+/// applied the `strip_bom` helper the codebase already had for this exact
+/// problem in `read_conflict_stage` (issue #57).
+#[test]
+fn list_workspaces_and_get_workspace_tolerate_a_bom_in_meta_json() {
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+    let ws = manager.create_workspace("some task").unwrap();
+
+    let meta_path = manager.state_dir().join("meta").join(format!("{}.json", ws.id));
+    let original = std::fs::read_to_string(&meta_path).unwrap();
+    std::fs::write(&meta_path, format!("\u{FEFF}{original}")).unwrap();
+
+    let workspaces = manager.list_workspaces().expect("list_workspaces must tolerate a BOM'd meta file");
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].id, ws.id);
+
+    let fetched = manager.get_workspace(&ws.id).expect("get_workspace must tolerate a BOM'd meta file");
+    assert_eq!(fetched.id, ws.id);
+
+    cleanup(&repo);
+}
