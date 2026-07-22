@@ -131,6 +131,27 @@ That last safety behavior is deliberate, not a bug: `teardown` won't
 silently discard uncommitted work. If a workspace is dirty, it tells you
 exactly what would be lost and asks for `--force` before proceeding.
 
+Once you're happy with what each workspace did, `pact merge-all` folds
+every active workspace onto a fresh integration branch instead of tearing
+them down individually -- see the main README's Usage section for the
+full flag reference.
+
+### A gotcha with `merge-all --union`
+
+`--union <glob>` lets you name files (e.g. a barrel/plugin-registration
+file) that are safe to resolve on conflict with a plain line-union merge:
+your lines, then any of theirs not already present, *appended at the end
+of the file*. That's fine for genuinely append-only content (logs,
+CHANGELOG entries), but if the union-mergeable region sits above other
+code -- a trailing `module.exports`, a file-final `start()`/`listen()`
+call -- only the first workspace's addition lands where you'd expect;
+every workspace after that gets appended past the trailing code instead
+of inside the intended block. The file still parses, but the structure
+is easy to be surprised by on first encounter. If you're using `--union`
+on a barrel file, keep any finalization step in a separate file agents
+don't touch, so there's nothing below the union-mergeable region to land
+after.
+
 ## What just happened
 
 Each `spawn`/`spawn-many` task got its own `git worktree` (so agents never
