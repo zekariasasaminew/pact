@@ -83,7 +83,41 @@ Output from both agents streams live, each line prefixed `[claude:0]` /
 for `copilot` or `codex` (or mix them: `--task copilot:"..."`) if you have
 those installed instead.
 
-## 5. See what happened, then clean up (1 minute)
+Every task needs an agent, either via a `<agent>:` prefix on the task
+itself or a batch-wide default:
+
+```sh
+pact spawn-many --agent claude \
+  --task "create a file named alpha.txt containing ALPHA" \
+  --task copilot:"create a file named beta.txt containing BETA"
+```
+
+Here `alpha.txt` runs on `claude` (the `--agent` default) and `beta.txt`
+runs on `copilot` (its explicit prefix overrides the default). At least
+one of `--agent` or a per-task prefix is required for every task.
+
+## 5. Check the coordination layer (30 seconds)
+
+While agents are running (or right after), `pact coord-status` shows
+what the shared MCP server currently knows -- every active file lease and
+each agent's unread message count:
+
+```sh
+pact coord-status
+```
+
+```
+active leases:
+  'src/*.ts' held by claude:0 (expires in 118s)
+no pending messages
+```
+
+This is read-only and purely informational, the same way `pact
+conflicts` is: leases are advisory, not enforced, so nothing here blocks
+an agent from touching a file another agent has claimed. It's a window
+into coordination state, not a lock you need to manage.
+
+## 6. See what happened, then clean up (1 minute)
 
 ```sh
 pact list                 # both workspaces, with a [dirty]/[clean] indicator
