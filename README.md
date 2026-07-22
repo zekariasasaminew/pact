@@ -10,6 +10,16 @@ without them fighting each other.
 agents work in parallel, in under 5 minutes, every command verified
 end-to-end.
 
+**Windows is a first-class target, not an afterthought.** Most tools in
+this space (parallel git-worktree agent orchestration) are built on tmux,
+which is POSIX-only and excludes Windows entirely. Pact ships a native
+Windows binary and has real Windows-specific correctness work behind it --
+`.cmd` shim resolution for npm/pnpm/yarn (`std::process::Command` doesn't
+consult `PATHEXT` the way a real shell does), a `MAX_PATH` fallback for
+the npm content store, and UTF-8 BOM handling for files written by
+PowerShell's own default encoding. Verified on Windows 10/11 with
+PowerShell 5.1, not just cross-compiled and assumed to work.
+
 ## Getting started
 
 Download a prebuilt binary -- no Rust toolchain, no MSVC linker/Build
