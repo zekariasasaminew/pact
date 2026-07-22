@@ -949,6 +949,8 @@ pact spawn "implement the thing" --agent claude --safety acceptEdits
 pact spawn "implement the thing" --coord-command /path/to/alt-coord --coord-arg --some-flag
 pact spawn-many --task claude:"implement X" --task claude:"implement Y"
 pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
+pact spawn "implement the thing" --dry-run          # preview only, nothing created/launched
+pact spawn-many --task claude:"X" --task copilot:"Y" --dry-run
 pact list                          # shows a [dirty]/[clean] indicator per workspace
 pact diff <id>                      # committed (vs. merge-base) + uncommitted changes
 pact conflicts                      # files touched by >1 workspace forked from the same commit
@@ -972,6 +974,13 @@ whichever adapter's own unattended-safety default is otherwise used (a
 warning is printed either way) -- see Design decisions for why headless
 mode requires *some* such setting for every adapter, not just Claude
 Code, and why their vocabularies aren't unified into one shared flag.
+
+`--dry-run` (on both `spawn` and `spawn-many`) previews the workspace
+id/branch/path that would be created, the package manager(s) detected for
+the repo, and the exact `program args...` that would be launched --
+including the resolved `--safety` flag and the coordination config path --
+without creating a workspace, running dependency prep, or launching
+anything.
 
 `spawn-many` runs N of the above concurrently from one invocation --
 repeatable `--task <agent>:<task text>`, one per agent instance you want,

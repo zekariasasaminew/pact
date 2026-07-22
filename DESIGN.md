@@ -937,6 +937,37 @@ before merging, to sanity-check what the agent did, would otherwise see
 an empty branch at the same commit it forked from and could reasonably
 conclude the agent did nothing.
 
+### `--dry-run` preview (issue #16)
+
+`spawn`/`spawn-many` immediately create a real workspace and can launch a
+real, billed agent session -- a user isn't always sure what an
+agent/task/safety combination will actually do before committing to it.
+`Orchestrator::spawn_preview` builds the same id/branch/path
+`create_workspace` would (via `WorkspaceManager::preview_workspace_location`,
+refactored out of `create_workspace` so both paths generate an id the
+same way), detects package managers against the *repo root*, not a
+not-yet-created workspace path (a fresh worktree starts as a clean
+checkout of `HEAD`, so this is a fair approximation unless the repo root's
+own working tree has uncommitted package-manager-file changes that
+wouldn't carry over), and calls the real `AgentAdapter::build_command` so
+the printed command can never drift from what a real spawn would launch.
+
+That last part has a side effect to account for: `build_command` for the
+Claude Code, Copilot, and Gemini adapters (not Codex, which inlines its
+MCP config as `-c` flags instead) unconditionally writes the MCP
+coordination config to `coord.config_path` as part of building the
+command, so the printed `--mcp-config <path>`/`--additional-mcp-config
+<path>` argument is real. `spawn_preview` deletes that file immediately
+after building the command, rather than changing `build_command`'s
+signature across every adapter just for this -- the alternative (a
+`write_config: bool` on the trait) was rejected as a bigger surface
+change than a single `remove_file` call justified. `state_dir`'s
+subdirectories (`workspaces/`, `mcp/`, `meta/`, `locks/`) still get
+created by `WorkspaceManager::open` regardless of `--dry-run` -- that's
+existing `open` behavior, not something this issue introduced, and
+they're confirmed empty afterward (no real workspace, no lingering MCP
+config) by `crates/pact-cli/tests/spawn_dry_run.rs`.
+
 ## CI and release infrastructure
 
 ### Rolling `edge` release
