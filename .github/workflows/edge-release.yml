@@ -48,6 +48,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
+        env:
+          PACT_EDGE_SHA: ${{ github.sha }}
         run: cargo build --release --target ${{ matrix.target }} -p pact-cli
 
       - name: Package (unix)
