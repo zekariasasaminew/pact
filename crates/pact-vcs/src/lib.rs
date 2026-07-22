@@ -208,10 +208,19 @@ impl WorkspaceManager {
         self.state_dir.join("meta").join(format!("{id}.json"))
     }
 
-    pub fn create_workspace(&self, task: &str) -> Result<Workspace> {
+    /// Computes the id/branch/path a call to `create_workspace` would use,
+    /// without touching git or disk -- lets a caller preview what a real
+    /// spawn would create (see issue #16's `--dry-run`) using the exact
+    /// same id-generation path `create_workspace` itself uses.
+    pub fn preview_workspace_location(&self) -> (String, String, PathBuf) {
         let id = short_id();
         let branch = format!("pact/{id}");
         let path = self.state_dir.join("workspaces").join(&id);
+        (id, branch, path)
+    }
+
+    pub fn create_workspace(&self, task: &str) -> Result<Workspace> {
+        let (id, branch, path) = self.preview_workspace_location();
 
         let base_commit = {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)

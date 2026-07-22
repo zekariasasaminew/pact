@@ -31,6 +31,17 @@ pub struct SpawnManyTask {
     pub task: String,
 }
 
+/// What `spawn`/`spawn-many` would do for one task, without doing any of
+/// it -- see `Orchestrator::spawn_preview` (issue #16's `--dry-run`).
+pub struct SpawnPreview {
+    pub workspace_id: String,
+    pub branch: String,
+    pub path: PathBuf,
+    pub package_managers: Vec<pact_deps::PackageManager>,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
 /// Points the generated MCP coordination config at an alternative command
 /// instead of `pact mcp-serve` -- see issue #10. Pact does no protocol
 /// translation: whatever this points at must speak the same tool contract
@@ -270,6 +281,54 @@ impl Orchestrator {
                     }
                 })
                 .collect()
+        })
+    }
+
+    /// Previews what `spawn`/`spawn-many` would do for one task -- the
+    /// workspace id/branch/path it would create, the package manager(s)
+    /// detected for the repo, and the exact `program args...` that would be
+    /// launched (matching `AgentAdapter::build_command`'s real output) --
+    /// without creating a workspace, running dependency prep, or launching
+    /// anything. See DESIGN.md ("pact-core > --dry-run preview") for why
+    /// `build_command`'s MCP-config-file side effect has to be cleaned up
+    /// here rather than left as a stray file.
+    pub fn spawn_preview(
+        &self,
+        agent: AgentKind,
+        task: &str,
+        safety_override: Option<&str>,
+        coord_override: Option<&CoordServerOverride>,
+    ) -> Result<SpawnPreview> {
+        let (workspace_id, branch, path) = self.workspaces.preview_workspace_location();
+        let package_managers = pact_deps::detect(&self.repo_root);
+        let adapter = pact_agents::adapter(agent);
+
+        let preview_workspace = Workspace {
+            id: workspace_id.clone(),
+            path: path.clone(),
+            branch: branch.clone(),
+            task: task.to_string(),
+            created_at: 0,
+            agent_pid: None,
+            base_commit: String::new(),
+        };
+        let coord_name = adapter.coord_server_name();
+        let coord = self
+            .coord_config(&preview_workspace, coord_name, coord_override)
+            .ok();
+
+        let (program, args) = adapter.build_command(task, safety_override, coord.as_ref(), &path);
+        if let Some(coord) = &coord {
+            let _ = std::fs::remove_file(&coord.config_path);
+        }
+
+        Ok(SpawnPreview {
+            workspace_id,
+            branch,
+            path,
+            package_managers,
+            program,
+            args,
         })
     }
 

@@ -63,6 +63,14 @@ enum Command {
         /// --coord-command isn't given.
         #[arg(long = "coord-arg")]
         coord_args: Vec<String>,
+
+        /// Print what this spawn would do -- the workspace id/branch/path
+        /// that would be created, detected package manager(s), and the
+        /// exact program/args that would be launched -- then exit without
+        /// creating a workspace, running dependency prep, or launching
+        /// anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Create N isolated agent workspaces and run N agent CLIs in them
     /// concurrently, streaming their combined output live with each line
@@ -104,6 +112,12 @@ enum Command {
         /// Argument for --coord-command, repeatable.
         #[arg(long = "coord-arg")]
         coord_args: Vec<String>,
+
+        /// Same as `spawn --dry-run`, applied to every task in this batch --
+        /// prints each task's preview and exits without creating any
+        /// workspace, running dependency prep, or launching anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List active agent workspaces
     List,
@@ -260,11 +274,23 @@ fn main() -> Result<()> {
             safety,
             coord_command,
             coord_args,
+            dry_run,
         } => {
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
                 anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, codex, or gemini)")
             })?;
             let adapter = pact_agents::adapter(kind);
+            let coord_override = coord_command.map(|command| CoordServerOverride {
+                command,
+                args: coord_args,
+            });
+
+            if dry_run {
+                let preview = orchestrator.spawn_preview(kind, &task, safety.as_deref(), coord_override.as_ref())?;
+                print_spawn_preview(&preview);
+                return Ok(());
+            }
+
             match &safety {
                 Some(s) => eprintln!(
                     "warning: running '{agent}' with an explicit safety override ({s}) -- \
@@ -276,10 +302,6 @@ fn main() -> Result<()> {
                     adapter.default_safety_description()
                 ),
             }
-            let coord_override = coord_command.map(|command| CoordServerOverride {
-                command,
-                args: coord_args,
-            });
 
             let (workspace, outcome) = orchestrator.spawn(
                 kind,
@@ -303,6 +325,7 @@ fn main() -> Result<()> {
             safety,
             coord_command,
             coord_args,
+            dry_run,
         } => {
             let default_agent = agent
                 .as_deref()
@@ -317,22 +340,24 @@ fn main() -> Result<()> {
                 .map(|raw| parse_task_spec(raw, default_agent))
                 .collect::<Result<Vec<_>>>()?;
 
-            let mut warned_agents = std::collections::HashSet::new();
-            for (kind, agent_name) in specs.iter().map(|(k, _, name)| (*k, name.clone())) {
-                if !warned_agents.insert(kind) {
-                    continue;
-                }
-                let adapter = pact_agents::adapter(kind);
-                match &safety {
-                    Some(s) => eprintln!(
-                        "warning: running '{agent_name}' with an explicit safety override ({s}) -- \
-                         verify this doesn't hang the session on a permission prompt in headless mode."
-                    ),
-                    None => eprintln!(
-                        "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
-                         Pass --safety explicitly to use a different setting.",
-                        adapter.default_safety_description()
-                    ),
+            if !dry_run {
+                let mut warned_agents = std::collections::HashSet::new();
+                for (kind, agent_name) in specs.iter().map(|(k, _, name)| (*k, name.clone())) {
+                    if !warned_agents.insert(kind) {
+                        continue;
+                    }
+                    let adapter = pact_agents::adapter(kind);
+                    match &safety {
+                        Some(s) => eprintln!(
+                            "warning: running '{agent_name}' with an explicit safety override ({s}) -- \
+                             verify this doesn't hang the session on a permission prompt in headless mode."
+                        ),
+                        None => eprintln!(
+                            "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
+                             Pass --safety explicitly to use a different setting.",
+                            adapter.default_safety_description()
+                        ),
+                    }
                 }
             }
 
@@ -358,6 +383,20 @@ fn main() -> Result<()> {
                 command,
                 args: coord_args,
             });
+
+            if dry_run {
+                for (index, task) in batch.iter().enumerate() {
+                    let preview = orchestrator.spawn_preview(
+                        task.agent,
+                        &task.task,
+                        safety.as_deref(),
+                        coord_override.as_ref(),
+                    )?;
+                    println!("task #{index} ({}):", agent_label(task.agent));
+                    print_spawn_preview(&preview);
+                }
+                return Ok(());
+            }
 
             let results = orchestrator.spawn_many(
                 batch,
@@ -665,6 +704,34 @@ fn distinct_overlapping_task_count(overlaps: &[PredictedOverlap]) -> usize {
         .flat_map(|o| o.task_indices.iter().copied())
         .collect::<std::collections::HashSet<usize>>()
         .len()
+}
+
+fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
+    println!("would create workspace {} ({})", preview.workspace_id, preview.branch);
+    println!("  path: {}", preview.path.display());
+    if preview.package_managers.is_empty() {
+        println!("  package managers: none detected");
+    } else {
+        let names: Vec<&str> = preview.package_managers.iter().map(|pm| package_manager_label(*pm)).collect();
+        println!("  package managers: {}", names.join(", "));
+    }
+    println!("  command: {} {}", preview.program, preview.args.join(" "));
+}
+
+fn package_manager_label(pm: pact_deps::PackageManager) -> &'static str {
+    match pm {
+        pact_deps::PackageManager::Pnpm => "pnpm",
+        pact_deps::PackageManager::Yarn => "yarn",
+        pact_deps::PackageManager::Npm => "npm",
+        pact_deps::PackageManager::Uv => "uv",
+        pact_deps::PackageManager::Poetry => "poetry",
+        pact_deps::PackageManager::Pipenv => "pipenv",
+        pact_deps::PackageManager::PipPlain => "pip",
+        pact_deps::PackageManager::Cargo => "cargo",
+        pact_deps::PackageManager::GoModules => "go modules",
+        pact_deps::PackageManager::Maven => "maven",
+        pact_deps::PackageManager::Gradle => "gradle",
+    }
 }
 
 fn agent_label(kind: AgentKind) -> &'static str {
