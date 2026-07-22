@@ -974,3 +974,29 @@ workflow needed at all, but artifact downloads require GitHub auth even
 on a public repo, and have a 90-day retention window, making the
 Releases page a meaningfully better discovery path for the same
 information.
+
+### `edge` build version string (issue #86)
+
+An `edge` binary's `--version` used to print the plain `Cargo.toml`
+version (e.g. `pact 0.2.0`) -- identical to the last tagged release,
+since `CARGO_PKG_VERSION` isn't bumped between tags. Found during an
+outside R3 shakedown: no way to tell an `edge` download apart from a
+real release, or recover which commit it was built from, after the fact.
+
+`pact-cli/build.rs` reads `PACT_EDGE_SHA` (an env var, unset for normal
+builds) and emits `cargo:rustc-env=PACT_VERSION=<version>[-edge.<short
+sha>]`; `Cli`'s `#[command(version = env!("PACT_VERSION"))]` uses that
+instead of clap's default `CARGO_PKG_VERSION` wiring. `edge-release.yml`
+sets `PACT_EDGE_SHA: ${{ github.sha }}` on the build step; `release.yml`
+sets nothing, so a tagged build's `PACT_VERSION` falls straight through
+to the plain `CARGO_PKG_VERSION` with no behavior change. Confirmed by
+hand: building locally with `PACT_EDGE_SHA` set produces `pact
+0.3.0-edge.e4ef6a0`; building without it produces the unchanged `pact
+0.3.0`.
+
+A build script over a `const fn`/`option_env!` match was necessary, not
+just convenient -- `option_env!` alone can't format a runtime string (no
+owned-`String` concatenation in a `const` context without a crate like
+`const_format`), so computing the final string at build time and handing
+it to the binary via `env!` was the simplest path that needed no new
+dependency.
