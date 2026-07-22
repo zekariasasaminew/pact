@@ -22,6 +22,19 @@ it's just "serialize access to a resource, and don't leave it stuck locked
 forever if the holder died." `pact-deps` reuses it verbatim to guard
 concurrent population of a shared dependency store entry.
 
+### PID reuse (issue #70)
+
+A PID-only liveness check has a real gap: if the original holder died and
+the OS later recycles that PID for an unrelated process before anyone
+tries to steal the lock, the check sees a "live" process and refuses to
+steal an actually-abandoned lock. Fixed by recording the holder's process
+start time (`sysinfo::Process::start_time`, cross-platform) alongside the
+PID in the lock file -- a live process whose start time doesn't match the
+recorded one is a different process that happens to share the PID, not
+the original holder, so the lock is stolen. A lock file written before
+this field existed (bare PID) falls back to the old PID-only check rather
+than erroring, so it's compatible with a lock held across an upgrade.
+
 ### Workspace lifecycle
 
 `create_workspace` captures `base_commit` (`git rev-parse HEAD`) under the
