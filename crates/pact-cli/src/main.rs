@@ -249,6 +249,14 @@ enum Command {
     Completions {
         shell: clap_complete::Shell,
     },
+    /// Check whether your environment is actually ready for `pact`: is
+    /// `git` new enough for `worktree`, which agent CLIs (claude, copilot,
+    /// codex, gemini) are installed, and which package-manager CLIs
+    /// `pact-deps` already knows how to prep. Read-only -- doesn't install
+    /// or fix anything. A missing agent CLI or package manager is
+    /// informational, not a failure, since not everyone needs all of them;
+    /// only a missing (or too-old) `git` makes this exit non-zero.
+    Doctor,
 }
 
 fn main() -> Result<()> {
@@ -265,6 +273,10 @@ fn main() -> Result<()> {
     if let Command::Completions { shell } = cli.command {
         clap_complete::generate(shell, &mut <Cli as clap::CommandFactory>::command(), "pact", &mut std::io::stdout());
         return Ok(());
+    }
+
+    if let Command::Doctor = cli.command {
+        return run_doctor();
     }
 
     let repo_root = match cli.repo {
@@ -579,6 +591,7 @@ fn main() -> Result<()> {
         }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),
+        Command::Doctor => unreachable!("handled above, before the orchestrator opens"),
     }
 
     Ok(())
@@ -719,6 +732,113 @@ fn distinct_overlapping_task_count(overlaps: &[PredictedOverlap]) -> usize {
         .len()
 }
 
+struct DoctorCheck {
+    label: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+const AGENT_CHECKS: &[DoctorCheck] = &[
+    DoctorCheck { label: "claude", program: "claude", args: &["--version"] },
+    DoctorCheck { label: "copilot", program: "copilot", args: &["--version"] },
+    DoctorCheck { label: "codex", program: "codex", args: &["--version"] },
+    DoctorCheck { label: "gemini", program: "gemini", args: &["--version"] },
+];
+
+// `go`'s version flag is a subcommand (`go version`), not `--version` --
+// verified by hand, `go --version` fails with "flag provided but not
+// defined: -version".
+const PACKAGE_MANAGER_CHECKS: &[DoctorCheck] = &[
+    DoctorCheck { label: "npm", program: "npm", args: &["--version"] },
+    DoctorCheck { label: "pnpm", program: "pnpm", args: &["--version"] },
+    DoctorCheck { label: "yarn", program: "yarn", args: &["--version"] },
+    DoctorCheck { label: "bun", program: "bun", args: &["--version"] },
+    DoctorCheck { label: "uv", program: "uv", args: &["--version"] },
+    DoctorCheck { label: "poetry", program: "poetry", args: &["--version"] },
+    DoctorCheck { label: "pipenv", program: "pipenv", args: &["--version"] },
+    DoctorCheck { label: "pip", program: "pip", args: &["--version"] },
+    DoctorCheck { label: "cargo", program: "cargo", args: &["--version"] },
+    DoctorCheck { label: "go", program: "go", args: &["version"] },
+    DoctorCheck { label: "mvn", program: "mvn", args: &["--version"] },
+    DoctorCheck { label: "gradle", program: "gradle", args: &["--version"] },
+];
+
+/// Runs `check` and returns its first output line trimmed, or `None` if
+/// the program isn't on `PATH`/failed to report a version -- see DESIGN.md
+/// ("pact-cli > `pact doctor` (issue #18)").
+fn doctor_check_version(check: &DoctorCheck) -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let output = pact_deps::run_shimmed(check.program, check.args, &cwd).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap_or("").trim();
+    if !line.is_empty() {
+        return Some(line.to_string());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
+}
+
+fn print_doctor_group(title: &str, checks: &[DoctorCheck]) {
+    println!("{title}:");
+    for check in checks {
+        match doctor_check_version(check) {
+            Some(version) => println!("  {}: found, {version}", check.label),
+            None => println!("  {}: not found", check.label),
+        }
+    }
+}
+
+/// `git worktree` (which every workspace depends on) needs git >= 2.5 --
+/// parses the leading `X.Y` out of `git version X.Y.Z...` and treats
+/// anything unparseable as "can't confirm", not a hard failure, since a
+/// git that responds to `--version` at all is almost certainly new enough
+/// in practice.
+fn git_version_supports_worktree(version_line: &str) -> Option<bool> {
+    let version = version_line.strip_prefix("git version ")?;
+    let mut parts = version.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    Some((major, minor) >= (2, 5))
+}
+
+fn run_doctor() -> Result<()> {
+    let git_check = DoctorCheck { label: "git", program: "git", args: &["--version"] };
+    let git_version = doctor_check_version(&git_check);
+
+    let git_ok = match &git_version {
+        Some(version) => {
+            let worktree_ok = git_version_supports_worktree(version).unwrap_or(true);
+            println!(
+                "git: found, {version}{}",
+                if worktree_ok { " (worktree supported)" } else { " (too old for `git worktree` -- need >= 2.5)" }
+            );
+            worktree_ok
+        }
+        None => {
+            println!("git: not found -- required, pact can't create any workspace without it");
+            false
+        }
+    };
+
+    println!();
+    print_doctor_group("agent CLIs", AGENT_CHECKS);
+    println!();
+    print_doctor_group("package managers", PACKAGE_MANAGER_CHECKS);
+
+    if !git_ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
     println!("would create workspace {} ({})", preview.workspace_id, preview.branch);
     println!("  path: {}", preview.path.display());
@@ -851,6 +971,26 @@ fn find_repo_root(start: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_version_supports_worktree_true_for_a_recent_version() {
+        assert_eq!(git_version_supports_worktree("git version 2.46.0.windows.1"), Some(true));
+    }
+
+    #[test]
+    fn git_version_supports_worktree_false_for_a_too_old_version() {
+        assert_eq!(git_version_supports_worktree("git version 2.4.9"), Some(false));
+    }
+
+    #[test]
+    fn git_version_supports_worktree_true_exactly_at_the_minimum() {
+        assert_eq!(git_version_supports_worktree("git version 2.5.0"), Some(true));
+    }
+
+    #[test]
+    fn git_version_supports_worktree_none_for_unparseable_input() {
+        assert_eq!(git_version_supports_worktree("not a git version string"), None);
+    }
 
     #[test]
     fn parse_task_spec_uses_explicit_prefix_with_no_default() {
