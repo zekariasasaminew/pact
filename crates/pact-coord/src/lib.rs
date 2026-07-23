@@ -10,14 +10,17 @@
 mod db;
 mod leases;
 mod messages;
+mod operations;
 mod server;
 
 pub use leases::{ActiveLease, Conflict, ClaimResult};
 pub use messages::Message;
+pub use operations::{HistoryFilter, Operation};
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde_json::Value;
 
 /// One agent's pending (unread) message count, as of the moment
 /// `CoordStatus` was computed.
@@ -100,6 +103,31 @@ pub fn message_count_involving(repo_root: &Path, agent_ids: &[String]) -> Result
     let params = rusqlite::params_from_iter(agent_ids.iter());
     let count: i64 = stmt.query_row(params, |row| row.get(0))?;
     Ok(count as usize)
+}
+
+/// Records one significant coordination-layer event -- see DESIGN.md
+/// ("pact-coord > Operation log / `pact history` (issue #84)"). A plain
+/// synchronous open, same as `leases_matching`/`message_count_involving`:
+/// `pact-core` calls this from the main `pact` process (`merge_all`,
+/// `arbiter_decision`, `teardown`), never inside an `mcp-serve`
+/// subprocess, which logs its own operations (`claim`/`release`/
+/// `broadcast`/`message`) directly against the connection it already
+/// holds instead of going through this entry point.
+pub fn log_operation(
+    repo_root: &Path,
+    op_type: &str,
+    workspace_id: Option<&str>,
+    detail: &Value,
+) -> Result<()> {
+    let conn = db::open(repo_root)?;
+    operations::log_operation(&conn, op_type, workspace_id, detail)
+}
+
+/// Queries the operation log for `pact history` -- see
+/// `operations::query_operations` for the filter semantics.
+pub fn history(repo_root: &Path, filter: &HistoryFilter) -> Result<Vec<Operation>> {
+    let conn = db::open(repo_root)?;
+    operations::query_operations(&conn, filter)
 }
 
 /// Matches a single concrete file path against a glob pattern -- unlike
