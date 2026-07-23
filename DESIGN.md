@@ -676,6 +676,21 @@ file and passed via `--mcp-config` -- confirmed against the real CLI: a
 malformed config is rejected with a loud error before the session starts,
 so getting the file wrong is never a silent no-op.
 
+**`--safety plan` isn't a strict workspace-isolation guarantee (issue
+#103).** Confirmed by hand during the 2026-07-23 stress-testing campaign:
+a real `pact spawn --safety plan` against an edit task correctly left
+the target file untouched (plan mode really is read-only for the repo).
+But Claude Code's own plan-mode feature separately wrote a real file to
+the **host user's** `~/.claude/plans/<generated-slug>.md` -- outside the
+isolated `.pact-<repo>/workspaces/<id>` worktree entirely, invisible to
+`pact teardown`, never cleaned up. Not something pact's own code causes
+or can prevent -- Claude Code CLI's own architecture decides where plan
+documents go, apparently always this fixed global location regardless of
+cwd -- so the fix here is a documented caveat (CLI help text, README),
+not a code change: don't treat `--safety plan` as a guarantee that
+*nothing* happens outside the workspace, only that the target repo isn't
+edited.
+
 **The coordination MCP tools need their own allowlist entry (issue
 #104).** The 2026-07-23 Claude Code stress-testing campaign found that
 `DEFAULT_ALLOWED_TOOLS` never included `mcp__pact-coord__*` -- meaning

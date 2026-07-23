@@ -42,12 +42,16 @@ enum Command {
 
         /// Raw safety/approval override passed straight through to the
         /// chosen agent's own vocabulary: Claude Code's --permission-mode
-        /// values (acceptEdits, bypassPermissions, ...), Codex's
+        /// values (acceptEdits, bypassPermissions, plan, ...), Codex's
         /// --sandbox values (read-only, workspace-write, danger-full-access).
         /// Ignored by Copilot CLI, which has no gradient. Defaults to each
         /// adapter's own unattended-safety setting -- see the README for
         /// why that default differs by adapter (Claude Code has a real
-        /// safer default; Copilot CLI and Codex don't yet).
+        /// safer default; Copilot CLI and Codex don't yet). Claude Code's
+        /// "plan" mode is read-only for the target repo, but its own
+        /// plan-document feature may still write a real file to the host
+        /// user's ~/.claude/plans/, outside this workspace's isolation and
+        /// pact's own cleanup -- confirmed by hand, see DESIGN.md.
         #[arg(long)]
         safety: Option<String>,
 
