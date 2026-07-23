@@ -6,10 +6,14 @@ use crate::event::AgentEvent;
 pub struct ClaudeCodeAdapter;
 
 /// Common safe operations covering every ecosystem `pact-deps` already
-/// knows how to prepare -- see DESIGN.md ("pact-agents > Claude Code
-/// safety default").
+/// knows how to prepare, plus every tool this adapter's own coordination
+/// MCP server exposes -- see DESIGN.md ("pact-agents > Claude Code safety
+/// default", issue #104) for why the `mcp__pact-coord__*` entry is
+/// required, not optional: without it, `claim_files`/`release_files`/
+/// `send_message`/`check_messages` are silently denied by Claude Code's
+/// own permission gate, even though the MCP server itself is reachable.
 const DEFAULT_ALLOWED_TOOLS: &str =
-    "Read Write Edit Glob Grep Bash(git *) Bash(npm *) Bash(pnpm *) Bash(yarn *) Bash(cargo *) Bash(go *) Bash(pip *) Bash(uv *) Bash(mvn *) Bash(gradle *)";
+    "Read Write Edit Glob Grep Bash(git *) Bash(npm *) Bash(pnpm *) Bash(yarn *) Bash(cargo *) Bash(go *) Bash(pip *) Bash(uv *) Bash(mvn *) Bash(gradle *) mcp__pact-coord__*";
 
 impl AgentAdapter for ClaudeCodeAdapter {
     fn coord_server_name(&self) -> &'static str {
@@ -167,5 +171,24 @@ mod tests {
         assert!(args.contains(&"--allowedTools".to_string()));
         let mode_idx = args.iter().position(|a| a == "--permission-mode").unwrap();
         assert_eq!(args[mode_idx + 1], "bypassPermissions");
+    }
+
+    /// Regression test for issue #104: a real spawn at default safety
+    /// denied every coordination MCP tool call, because
+    /// `DEFAULT_ALLOWED_TOOLS` never listed them.
+    #[test]
+    fn default_allowlist_includes_the_coordination_mcp_tools() {
+        let (_, args) = ClaudeCodeAdapter.build_command(
+            "do the thing",
+            None,
+            None,
+            std::path::Path::new("/tmp/workspace"),
+        );
+        let idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert!(
+            args[idx + 1].contains("mcp__pact-coord__*"),
+            "expected the coordination MCP tools to be allowed by default, got: {}",
+            args[idx + 1]
+        );
     }
 }
