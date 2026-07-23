@@ -679,6 +679,25 @@ confidence won't hang, so -- same honest category as Copilot CLI and Codex
 `safety_override`, if given, is passed as a raw `--approval-mode` value
 (`default`/`auto_edit`/`yolo`/`plan`, confirmed from `gemini --help`).
 
+**The untrusted-directory approval downgrade (found on a later
+verification pass, issue #9):** `--approval-mode yolo` alone isn't
+actually yolo mode -- confirmed directly, running it against a fresh
+scratch repo Gemini CLI hadn't seen before printed `Approval mode
+overridden to "default" because the current folder is not trusted.` to
+stderr *before* even reaching the auth check, then would have hung
+waiting for interactive confirmation in a real authenticated session
+(the exact hang class this codebase already tracks carefully for Copilot
+CLI's `--allow-tool`). `--skip-trust` (confirmed present and doing
+exactly this in `gemini --help`'s own text: "Trust the current workspace
+for this session") fixes it -- re-run with the flag added, the downgrade
+message disappears, leaving only the expected, unrelated auth failure.
+`build_command` now always includes `--skip-trust` alongside whatever
+`--approval-mode` value is in effect, default or overridden -- an
+unattended `pact spawn --agent gemini` has no human available to accept
+a trust prompt any more than it has one available to accept a tool-call
+confirmation, so both need to be preempted, not just the one that was
+originally assumed to matter.
+
 **MCP config**: the one genuinely different mechanism among all four
 adapters. Confirmed directly (by running `gemini mcp add --scope project`
 and reading the file it produced) that Gemini CLI reads

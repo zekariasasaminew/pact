@@ -382,17 +382,36 @@ reported it as a clean `failed` outcome using the process's actual exit
 code, the same fallback Codex's missing Result-event schema already
 relies on.
 
-What's unconfirmed: the streaming JSON event schema (`parse_line`
+A real headless-safety gap was found and fixed on a later verification
+pass (still short of authentication, same environment): `--approval-mode
+yolo` alone silently downgrades to `default` (interactive confirmation)
+in a directory Gemini CLI hasn't been told to trust yet -- confirmed
+directly, `gemini`'s own stderr prints `Approval mode overridden to
+"default" because the current folder is not trusted.` before it even
+reaches the auth check. `default` mode would hang forever waiting for a
+confirmation prompt that can never come in headless mode -- the same
+class of footgun this codebase already tracks carefully for Copilot
+CLI's own hanging `--allow-tool` behavior. `--skip-trust` (confirmed
+against real `gemini --help` output) fixes it: re-running with the flag
+added, the trust-override message disappears entirely, leaving only the
+(expected, unrelated) auth failure. `build_command` now always passes
+`--skip-trust` alongside `--approval-mode`, not just an assumption --
+verified by hand, not merely reasoned about, exactly the standard the
+other three adapters were already held to.
+
+What's still unconfirmed: the streaming JSON event schema (`parse_line`
 is modeled on the shape common to the other three adapters, deliberately
 defensive -- anything unrecognized surfaces as `Other` rather than being
 dropped, precisely because this guess *will* need correcting once run for
-real) and whether a safer approval mode hangs in headless mode the way
-Copilot CLI's does or denies cleanly the way Claude Code's does. Default
-safety is `--approval-mode yolo` -- not claimed as a verified safer
-option, the same honest category Copilot CLI and Codex are already in.
-This adapter stays open as issue #9 rather than closed, until it can
-actually be run against a real session and upgraded to live-verified the
-same way Codex was.
+real) and whether a safer approval mode denies cleanly rather than
+hanging. Default safety is `--approval-mode yolo --skip-trust` -- not
+claimed as a verified safer option, the same honest category Copilot CLI
+and Codex are already in. This adapter stays open as issue #9 rather
+than closed, blocked specifically on Gemini API credentials (a
+`GEMINI_API_KEY` or completed Google OAuth login) becoming available in
+this environment -- not on effort, and not something to complete on the
+user's behalf without being asked, since it's an identity/credential
+decision.
 
 ### Real parallel launch: OS threads, not async/tokio
 
