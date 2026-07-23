@@ -970,7 +970,7 @@ pact spawn-many --task claude:"implement X" --task claude:"implement Y"
 pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
 pact spawn "implement the thing" --dry-run          # preview only, nothing created/launched
 pact spawn-many --task claude:"X" --task copilot:"Y" --dry-run
-pact list                          # shows a [dirty]/[clean] indicator per workspace
+pact list                          # [dirty]/[clean] per workspace, plus agent pid liveness if recorded
 pact diff <id>                      # committed (vs. merge-base) + uncommitted changes
 pact conflicts                      # files touched by >1 workspace forked from the same commit
 pact coord-status                   # active leases + each agent's pending message count
