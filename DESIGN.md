@@ -595,6 +595,21 @@ file and passed via `--mcp-config` -- confirmed against the real CLI: a
 malformed config is rejected with a loud error before the session starts,
 so getting the file wrong is never a silent no-op.
 
+**The coordination MCP tools need their own allowlist entry (issue
+#104).** The 2026-07-23 Claude Code stress-testing campaign found that
+`DEFAULT_ALLOWED_TOOLS` never included `mcp__pact-coord__*` -- meaning
+`claim_files`/`release_files`/`send_message`/`check_messages` were
+silently denied by Claude Code's own permission gate on every real,
+default-safety spawn, even though the MCP server itself connects and
+registers its tools correctly. Confirmed the fix directly, not just
+reasoned about it: a real 2-agent `spawn-many` at plain default safety
+now completes claim/broadcast/check/claim end-to-end with the correct
+conflict detected, zero denials. `mcp__pact-coord__*`'s wildcard syntax
+was itself confirmed against a direct `claude --allowedTools "...
+mcp__pact-coord__*"` invocation in the exact same default permission
+mode this adapter already uses (not `bypassPermissions` -- the
+curated-allowlist safety posture didn't need weakening to fix this).
+
 ### Claude Code output schema
 
 `parse_line` is modeled directly against real output captured from
