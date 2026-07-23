@@ -100,6 +100,20 @@ pub struct SkippedWorkspace {
     pub reason: String,
 }
 
+/// A `skipped` workspace whose skip was specifically a real merge
+/// conflict (never the moving-base check) -- the structured subset of
+/// `SkippedWorkspace` that's actually resumable via
+/// `WorkspaceManager::resolve_conflict`, since a moving-base skip needs a
+/// rebased/recreated workspace, not a retried merge. See DESIGN.md
+/// ("pact-vcs > Persisted conflicts (issue #85)").
+#[derive(Debug, Clone)]
+pub struct ConflictedWorkspace {
+    pub id: String,
+    pub branch: String,
+    pub target_branch: String,
+    pub files: Vec<String>,
+}
+
 /// The result of one `WorkspaceManager::merge_all` run -- see that method's
 /// doc comment for the phases that produce this.
 #[derive(Debug, Clone)]
@@ -115,6 +129,11 @@ pub struct MergeReport {
     /// Workspaces left out either by the moving-base check (real and
     /// dry runs both) or by a genuine merge conflict (real runs only).
     pub skipped: Vec<SkippedWorkspace>,
+    /// The subset of `skipped` that were a real merge conflict, in the
+    /// structured shape `resolve_conflict` needs -- always empty for
+    /// `--dry-run` (nothing is actually attempted, so nothing can conflict)
+    /// and for a moving-base-only skip.
+    pub conflicted: Vec<ConflictedWorkspace>,
     /// Populated only for `--dry-run`: the merge order that *would* be
     /// used, after sequencing and the moving-base check, without any git
     /// state actually being touched.
@@ -128,6 +147,18 @@ enum MergeOutcome {
         arbiter_resolved: Vec<String>,
     },
     Conflict {
+        files: Vec<String>,
+    },
+}
+
+/// The result of one `WorkspaceManager::resolve_conflict` attempt.
+#[derive(Debug, Clone)]
+pub enum ResolveOutcome {
+    Resolved {
+        auto_resolved: Vec<String>,
+        arbiter_resolved: Vec<String>,
+    },
+    StillConflicted {
         files: Vec<String>,
     },
 }
@@ -636,6 +667,7 @@ impl WorkspaceManager {
                 base_commit: head,
                 merged: Vec::new(),
                 skipped,
+                conflicted: Vec::new(),
                 planned: sized.into_iter().map(|(_, w)| w.id).collect(),
                 dry_run: true,
             });
@@ -665,6 +697,7 @@ impl WorkspaceManager {
         }
 
         let mut merged = Vec::new();
+        let mut conflicted = Vec::new();
         for (_, workspace) in sized {
             match self.merge_branch_into(&integration_path, &workspace.branch, union_globs, arbiter, &workspace.task)? {
                 MergeOutcome::Merged { auto_resolved, arbiter_resolved } => merged.push(MergedWorkspace {
@@ -673,11 +706,19 @@ impl WorkspaceManager {
                     auto_resolved,
                     arbiter_resolved,
                 }),
-                MergeOutcome::Conflict { files } => skipped.push(SkippedWorkspace {
-                    id: workspace.id,
-                    branch: workspace.branch,
-                    reason: format!("merge conflict in: {}", files.join(", ")),
-                }),
+                MergeOutcome::Conflict { files } => {
+                    skipped.push(SkippedWorkspace {
+                        id: workspace.id.clone(),
+                        branch: workspace.branch.clone(),
+                        reason: format!("merge conflict in: {}", files.join(", ")),
+                    });
+                    conflicted.push(ConflictedWorkspace {
+                        id: workspace.id,
+                        branch: workspace.branch,
+                        target_branch: branch_name.clone(),
+                        files,
+                    });
+                }
             }
         }
 
@@ -694,9 +735,68 @@ impl WorkspaceManager {
             base_commit: head,
             merged,
             skipped,
+            conflicted,
             planned: Vec::new(),
             dry_run: false,
         })
+    }
+
+    /// Retries merging `workspace_id`'s branch into `target_branch` -- the
+    /// "resumable conflict" verb, see DESIGN.md ("pact-vcs > Persisted
+    /// conflicts (issue #85)"). `target_branch` must already exist as a
+    /// real branch (it does, for anything `merge_all` reported as
+    /// conflicted -- see `ConflictedWorkspace::target_branch` -- since
+    /// `merge_all` never deletes the branch it built, only the throwaway
+    /// worktree). Reuses `merge_branch_into` directly, so a resolution
+    /// (auto-resolve, `--union`, or Arbiter) behaves identically to the
+    /// original attempt inside `merge_all` -- there's no separate "resolve"
+    /// code path to drift out of sync. On success, the commit lands
+    /// directly on `target_branch` (the resolve worktree's checked-out
+    /// branch *is* `target_branch`, not a copy), so no separate step is
+    /// needed to publish the result the way `merge_all` republishes its
+    /// own throwaway integration branch.
+    pub fn resolve_conflict(
+        &self,
+        target_branch: &str,
+        workspace_id: &str,
+        union_globs: &[String],
+        arbiter: Option<&ArbiterResolver<'_>>,
+    ) -> Result<ResolveOutcome> {
+        let workspace = self.get_workspace(workspace_id)?;
+        let resolve_path = self.state_dir.join("integration").join(format!("resolve-{}", short_id()));
+
+        {
+            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
+                .context("acquiring git worktree lock")?;
+            let output = Command::new("git")
+                .args(["worktree", "add"])
+                .arg(&resolve_path)
+                .arg(target_branch)
+                .current_dir(&self.repo_root)
+                .output()
+                .context("failed to spawn `git worktree add` for conflict resolution")?;
+            if !output.status.success() {
+                bail!(
+                    "failed to check out target branch '{target_branch}' for conflict resolution:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        let outcome = self.merge_branch_into(&resolve_path, &workspace.branch, union_globs, arbiter, &workspace.task);
+
+        {
+            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
+                .context("acquiring git worktree lock")?;
+            self.remove_worktree_retrying(&resolve_path)?;
+        }
+
+        match outcome? {
+            MergeOutcome::Merged { auto_resolved, arbiter_resolved } => {
+                Ok(ResolveOutcome::Resolved { auto_resolved, arbiter_resolved })
+            }
+            MergeOutcome::Conflict { files } => Ok(ResolveOutcome::StillConflicted { files }),
+        }
     }
 
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
