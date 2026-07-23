@@ -5,7 +5,10 @@ use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
 use anyhow::{bail, Context, Result};
 
-pub use pact_vcs::{ArbiterResolver, ConflictedWorkspace, MergedWorkspace, MergeReport, ResolveOutcome, SkippedWorkspace};
+pub use pact_vcs::{
+    agent_process_alive, ArbiterResolver, ConflictedWorkspace, MergedWorkspace, MergeReport, ResolveOutcome,
+    SkippedWorkspace,
+};
 
 /// A `resolve_conflict` attempt's result -- see DESIGN.md ("pact-coord >
 /// Persisted conflicts / `pact resolve` (issue #85)").
