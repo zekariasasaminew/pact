@@ -868,6 +868,62 @@ near that. Not optimizing preemptively -- revisit (glob-prefix-based
 pruning, or caching the file list per workspace between calls) only if
 real usage actually hits this as a bottleneck.
 
+### Known limitation: intermittent MCP connection status under concurrency (issue #105)
+
+Found during the 2026-07-23 Claude Code stress-testing campaign: under a
+concurrent `spawn-many` batch, one or more agents can end up with their
+`pact-coord` MCP connection status stuck at `pending` (or reported
+`failed`) for the whole session -- silently losing all coordination
+capability, no retry, no warning beyond a log line. Reproduced at 1/6
+batches at 2-agent concurrency, 40% of agents at 5- and 10-agent
+concurrency.
+
+**Three concrete angles investigated, none of which reduced the rate:**
+
+1. Switching `mcp-serve`'s tokio runtime from the default multi-threaded
+   one to `new_current_thread()` (a real, worth-keeping improvement on
+   its own merits -- one stdio server serving one client has no use for a
+   worker thread pool -- but it didn't move the failure rate).
+2. Staggering concurrent launches (400ms apart, individual `spawn` calls
+   instead of one `spawn-many`) -- made it *worse* (7/10), not better.
+3. Switching to a faster/cheaper model (Haiku) to keep investigation
+   costs down -- made it *worse* too (6/10 vs. Sonnet's 4/10), which
+   points at *why*: a faster model reaches Claude Code's own status
+   snapshot sooner after subprocess launch, giving less runway either
+   way -- consistent with a one-shot-snapshot explanation, not a
+   pact-side slowness explanation.
+
+**Decisive diagnostic: `pact mcp-serve` itself is confirmed fast and
+100% reliable, entirely apart from Claude Code.** A small script sent a
+real MCP `initialize` request directly to N concurrent `mcp-serve`
+subprocesses over stdio, no agent CLI involved at all. Solo: 47ms. At
+10-way concurrency: 140-203ms across all 10, zero failures. This rules
+out pact's own subprocess -- database open/migration, the tokio runtime,
+process startup -- as the bottleneck; it was never the slow part.
+
+**Working theory, not confirmed further:** Claude Code reports an MCP
+server's status exactly once, in its very first `system/init` event --
+there's no follow-up event if the connection settles a moment later. The
+actual failures are likely real OS-level CPU scheduling contention (many
+concurrent, genuinely-inferencing `claude.exe` processes competing for
+cores) delaying Claude Code's *own* process from promptly reading its
+already-ready child's response within whatever internal timeout it
+applies to that one-time snapshot -- a boundary pact's own process can't
+see across or influence.
+
+**Consequence for a real user:** running `spawn-many` with several
+Claude Code agents (5+) carries a real, roughly 20-50%-per-agent (highly
+environment-dependent) chance that one or more agents silently proceed
+with zero coordination capability for their entire session -- no
+`claim_files`/`send_message`/`check_messages` availability, no retry, no
+visible signal beyond a `WARN`-level log line most users won't be
+watching for. Every *other* safety net (worktree isolation, `merge-all`'s
+real conflict detection, Weaver's pre-flight text-overlap warning) still
+applies regardless -- this removes one layer, not all of them.
+
+Left open, documented, not fixed -- revisit if a different angle
+presents itself, or if Claude Code's own MCP client behavior changes.
+
 ### Coord status (issue #64)
 
 `pact_coord::status` gives `pact coord-status` a read-only snapshot of the
