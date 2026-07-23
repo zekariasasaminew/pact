@@ -249,6 +249,60 @@ reports a file as resolved. `pact-vcs` treats anything not in the returned
 list as still conflicted and aborts the merge exactly as if this hook
 didn't exist.
 
+### Persisted conflicts (issue #85)
+
+From the same outside strategic-notes review that produced issue #84:
+jj (Jujutsu) treats a conflict as a first-class object in the change
+graph, resolvable later instead of a terminal error. `merge_all` today
+skips a conflicted workspace and moves on (issue #27 made the skip vs.
+hard-failure distinction visible at the exit-code level), but the
+conflict itself didn't outlive that one `merge_all` call -- `abort_merge`
+runs `git merge --abort` in the throwaway integration worktree, which
+discards the three-way stage content entirely. What *is* worth
+persisting isn't that stage content -- it's fully reconstructible on
+demand by re-running the merge, since neither the conflicted workspace's
+own branch nor its recorded base commit is ever deleted -- but a durable,
+queryable record that the conflict happened and its current status
+(open/resolved/abandoned), matching the issue's own "Proposed shape."
+
+**`ConflictedWorkspace`** is the structured subset of `skipped` that was
+specifically a real merge conflict (`MergeOutcome::Conflict`), not a
+moving-base skip -- `merge_all` pushes to both `skipped` (existing,
+freeform `reason` string, unchanged for backward compatibility) and
+`conflicted` (new, structured: `id`, `branch`, `target_branch`, `files`)
+at the same call site, from the same match arm, so there's no string
+parsing anywhere to tell the two skip kinds apart. Only a real conflict
+is resumable -- a moving-base skip means the workspace's base is no
+longer part of history, which retrying the same merge wouldn't fix.
+
+**`resolve_conflict`** retries a conflicted workspace's branch against
+`target_branch` (which the caller already knows, from `ConflictedWorkspace`
+or a persisted record built from it -- see DESIGN.md, "pact-coord >
+Persisted conflicts / `pact resolve`"). It checks out the *existing*
+`target_branch` directly (`git worktree add <path> <branch>`, no `-b`) --
+deliberately different from `merge_all`'s own integration worktree, which
+always creates a *new* branch. Checking out the real, existing branch
+means a successful `merge_branch_into` call inside it commits directly
+onto `target_branch`'s own history, with no separate "publish" step
+needed the way `merge_all` doesn't need one for its own throwaway
+integration branch either. Reuses `merge_branch_into` verbatim rather
+than a separate resolve-specific merge implementation, so a retry
+(auto-resolve, `--union`, Arbiter) behaves identically to the original
+attempt -- there's exactly one merge-conflict-resolution code path in
+this codebase, not two that could drift apart. Confirmed by hand against
+a real repo, not just reasoned about: a genuine conflict (same line of a
+multi-line file edited two ways) correctly stays `StillConflicted` on a
+same-state retry, and correctly resolves once the conflicted workspace's
+own branch is changed to no longer disagree with `target_branch`'s
+current content -- see `crates/pact-vcs/tests/resolve_conflict.rs`.
+
+Explicitly not attempted: two worktrees can't check out the same branch
+at once, so `resolve_conflict` would fail loudly (a real `git worktree
+add` error, not silent corruption) if `target_branch` somehow already had
+a live worktree elsewhere -- not expected in practice, since `merge_all`
+always removes its own integration worktree before returning, but worth
+naming as the actual failure mode rather than assuming it can't happen.
+
 ## pact-core — Orchestrator
 
 ### spawn / spawn_many concurrency
@@ -817,6 +871,60 @@ long-lived repo. The issue didn't ask for a retention/cleanup policy, and
 inventing one unprompted would be scope creep past what was asked --
 noted here as a known limitation, not silently ignored, revisit if a
 real repo's `operations` table actually becomes a problem in practice.
+
+### Persisted conflicts / `pact resolve` (issue #85)
+
+Companion to issue #84 above, and explicitly sequenced after it landed --
+this builds on the same coord DB and the same `db::open`-per-call
+pattern, rather than inventing separate storage. See DESIGN.md ("pact-vcs
+> Persisted conflicts (issue #85)") for the git-level mechanics
+(`ConflictedWorkspace`, `resolve_conflict`); this section covers what's
+specific to persistence and the CLI surface.
+
+**Storage:** a new `conflicts` table, alongside `operations`/`leases`/
+`messages` in the same coord DB -- `workspace_id`, `target_branch`,
+`files` (JSON array), `created_at`, `status` (`open`/`resolved`/
+`abandoned`), `resolved_at`. `pact-core::merge_all` persists one row per
+`ConflictedWorkspace` right after the merge attempt, best-effort (a
+persistence failure warns, doesn't fail the whole `merge_all` call --
+same posture as operation-log writes).
+
+**Naming:** `PersistedConflict`, deliberately not `Conflict` -- that name
+is already taken by `leases::Conflict` (an advisory lease-overlap
+warning inside `claim_files`'s response), a completely different
+concept. A third, also-unrelated "conflict" already exists in this
+codebase too: `pact_core::FileConflict` (issue #8's cross-workspace
+file-touch report, driving the pre-existing `pact conflicts` command,
+which is informational-only and has nothing to do with `merge_all`).
+Three genuinely different concepts sharing an English word is a real
+source of confusion worth naming explicitly, not just in code -- this is
+exactly why the issue itself insisted `pact resolve` be a new verb
+distinct from the existing `pact conflicts`, and why this section spells
+out the naming collision by name.
+
+**What "resolved" means:** a persisted conflict becomes `resolved` only
+when `pact resolve <id>` retries the merge and it succeeds (cleanly, via
+auto-resolve, or via Arbiter) -- not when a user manually decides it
+doesn't matter anymore (that's `abandoned`, a separate explicit action,
+`pact resolve <id> --abandon`). Every retry, successful or not, is logged
+as a `conflict_resolve` operation (reusing issue #84's log), so `pact
+history` shows the attempt happened even when it didn't resolve anything.
+
+**Retention:** no automatic expiry, matching issue #84's own precedent of
+not inventing an unprompted cleanup policy -- `abandoned` is the manual
+escape hatch for "not worth resolving," not a TTL.
+
+**CLI surface:** `pact resolve` (no workspace id) lists every open
+conflict; `pact resolve <id>` retries the most recent open one for that
+workspace, taking the exact same `--union`/`--test-cmd`/`--arbiter-agent`/
+`--arbiter-safety` flags as `merge-all` (extracted into a shared
+`build_arbiter_config` helper in `pact-cli` so the two commands can't
+drift in how they parse an equivalent flag set) -- this directly answers
+the issue's own open question about Arbiter's relationship to a
+persisted conflict: yes, standalone, outside a live `merge-all` run,
+using the identical mechanism. Exit code 2 on a still-conflicted retry,
+mirroring `merge-all`'s own "skipped, not a hard failure" exit-code
+convention (issue #27) rather than a plain error.
 
 ## pact-deps — dependency materialization
 

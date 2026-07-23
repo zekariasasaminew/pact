@@ -957,6 +957,9 @@ pact conflicts                      # files touched by >1 workspace forked from 
 pact coord-status                   # active leases + each agent's pending message count
 pact history                        # every claim/release/message/merge-all/teardown, newest first
 pact history --workspace <id> --type merge_all --json
+pact resolve                        # lists every open conflict merge-all recorded
+pact resolve <id>                   # retries that workspace's branch against its target branch
+pact resolve <id> --abandon         # marks it abandoned instead of retrying
 pact teardown <id>                  # refuses if the workspace has uncommitted changes
 pact teardown <id> --force          # tear down anyway, discarding uncommitted changes
 pact teardown <id> --keep-branch    # skip deleting the workspace's branch
@@ -1014,6 +1017,17 @@ creates a commit, with a message derived from the workspace's task
 before running either will show it at the same commit it forked from --
 that's this, not the agent having done nothing; `pact diff <id>` shows the
 uncommitted work directly.
+
+**A real merge conflict `merge-all` skips is resumable, not lost.**
+`pact resolve` (no id) lists every open conflict it recorded; `pact
+resolve <id>` retries that workspace's branch against the target branch
+it conflicted against, with the same `--union`/`--test-cmd`/
+`--arbiter-agent`/`--arbiter-safety` flags `merge-all` itself takes --
+useful once you've fixed the underlying disagreement in the workspace's
+branch, or want to point Arbiter at just this one conflict standalone.
+`pact resolve <id> --abandon` marks it abandoned instead of retrying. A
+moving-base skip (the workspace's recorded base is no longer part of
+history) isn't resumable this way -- only a real merge conflict is.
 
 **Shell completions:** `pact completions <shell>` (bash, zsh, fish,
 powershell, elvish) prints a completion script to stdout -- e.g. `pact
