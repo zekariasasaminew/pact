@@ -753,6 +753,71 @@ Two things worth knowing:
   recipient-matching query `check_messages` does, but only counts, never
   writes to `read_cursors`.
 
+### Operation log / `pact history` (issue #84)
+
+From an outside strategic-notes review surveying jj (Jujutsu)'s data
+model: jj's operation log makes every operation a versioned, replayable
+event. Pact's coord DB (leases + messages, both already timestamped rows)
+was most of the way to this shape already, but there was no way to ask
+"what happened in this session" as a whole -- only `coord-status`'s
+current-state snapshot and `conflicts`' per-file enrichment.
+
+**What "operation" means here, precisely:** one already-happened,
+significant coordination-layer event -- `claim`, `release`, `broadcast`,
+`message`, `merge_all`, `arbiter_decision`, `teardown`. Deliberately
+excludes `check_messages`: it's a read, not an event that changed
+anything, and the issue's own proposed shape didn't list it either.
+`merge_all` is logged as **one row per invocation**, not one row per
+workspace merged/skipped within it -- the per-workspace outcome (merged
+ids, skipped ids + reasons) lives inside that one row's JSON `detail`
+column. A `merge-all` run is one event from a user's perspective ("what
+happened when I ran this"); splitting it into N rows would make
+reconstructing "this was one call" require correlating rows back
+together for no real benefit, since the detail blob already carries the
+per-workspace breakdown the issue asked for.
+
+**Storage: reuses the existing coord SQLite DB**, not a new one -- a new
+`operations` table (`id`, `created_at`, `op_type`, `workspace_id`
+nullable since `merge_all` spans multiple workspaces, `detail` as a JSON
+text blob) alongside `leases`/`messages`/`read_cursors` in `db::open`'s
+schema. This is exactly the "reuse what's already there" option the
+issue itself favored, and it means every existing concurrency guarantee
+(WAL mode, `busy_timeout`, one file per repo keyed by `db::db_path`)
+applies to operations for free, no new infrastructure.
+
+**Where logging happens, by process:** `claim`/`release`/`broadcast`/
+`message` are logged inside `pact-coord`'s own MCP tool handlers
+(`server.rs`), right where `leases::`/`messages::` are already called
+with the connection in hand. `merge_all`/`arbiter_decision`/`teardown`
+happen in the main `pact` process (`pact-core`), never inside an
+`mcp-serve` subprocess, so they go through a new `pact_coord::log_operation`
+entry point that opens its own short-lived connection against the same
+`db::open(repo_root)` path -- the same pattern `pact_coord::status`/
+`leases_matching`/`message_count_involving` already use for read access
+from `pact-core`, just for a write instead.
+
+**Query surface: `pact history`** (over `pact session-log`: shorter, a
+familiar git-like mental model). Filters: `--workspace <id>`, `--since
+<unix-seconds>`, `--type <op_type>`, `--limit <n>`. Human-readable output
+by default (one line per operation: timestamp, type, workspace, a short
+summary derived from `detail`); `--json` for the raw rows. No dedicated
+`--outcome` filter in this first cut -- "outcome" (success/failure) only
+means something for `merge_all`/`arbiter_decision`, and extracting it
+generically would mean parsing type-specific fields out of an opaque
+JSON blob; `--type merge_all` plus reading the printed detail covers the
+same need without that complexity. Can be added later if it's actually
+missed.
+
+**Explicit non-goals**, per the issue's own scope: read-only query only,
+no undo, no "fork from any past state," no replay-as-mutation -- pact is
+a single-orchestrator-per-run tool, not jj's multi-user concurrency
+model, so none of jj's distributed-operation-log machinery applies here.
+Also explicitly not solved here: unbounded row growth over a very
+long-lived repo. The issue didn't ask for a retention/cleanup policy, and
+inventing one unprompted would be scope creep past what was asked --
+noted here as a known limitation, not silently ignored, revisit if a
+real repo's `operations` table actually becomes a problem in practice.
+
 ## pact-deps — dependency materialization
 
 Detects a workspace's package manager(s) and makes sure dependencies are

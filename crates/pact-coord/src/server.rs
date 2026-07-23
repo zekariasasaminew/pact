@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{leases, messages};
+use crate::{leases, messages, operations};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClaimFilesParams {
@@ -58,6 +58,16 @@ fn error_result(body: String) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::error(vec![Content::text(body)]))
 }
 
+/// Best-effort operation-log write -- a logging failure must never break
+/// the tool call it's attached to, so this only warns, matching the
+/// `set_agent_pid` precedent in `pact-core` for "record this, but don't
+/// let recording it become a new way to fail."
+fn log_op(conn: &Connection, op_type: &str, agent_id: &str, detail: serde_json::Value) {
+    if let Err(err) = operations::log_operation(conn, op_type, Some(agent_id), &detail) {
+        tracing::warn!("failed to record {op_type} operation for {agent_id}: {err:#}");
+    }
+}
+
 #[tool_router]
 impl CoordServer {
     pub fn new(conn: Connection, agent_id: String, workspace_root: PathBuf) -> Self {
@@ -84,10 +94,21 @@ impl CoordServer {
             &params.globs,
             params.ttl_seconds,
         ) {
-            Ok(result) => text_result(
-                serde_json::to_string_pretty(&result)
-                    .unwrap_or_else(|e| format!("error serializing result: {e}")),
-            ),
+            Ok(result) => {
+                log_op(
+                    &conn,
+                    "claim",
+                    &self.agent_id,
+                    serde_json::json!({
+                        "patterns": params.globs,
+                        "has_conflicts": result.has_conflicts,
+                    }),
+                );
+                text_result(
+                    serde_json::to_string_pretty(&result)
+                        .unwrap_or_else(|e| format!("error serializing result: {e}")),
+                )
+            }
             Err(e) => error_result(format!("error: {e:#}")),
         }
     }
@@ -101,7 +122,15 @@ impl CoordServer {
     ) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().unwrap();
         match leases::release_files(&conn, &self.workspace_root, &self.agent_id, &params.globs) {
-            Ok(n) => text_result(format!("released {n} lease(s)")),
+            Ok(n) => {
+                log_op(
+                    &conn,
+                    "release",
+                    &self.agent_id,
+                    serde_json::json!({ "patterns": params.globs, "released": n }),
+                );
+                text_result(format!("released {n} lease(s)"))
+            }
             Err(e) => error_result(format!("error: {e:#}")),
         }
     }
@@ -121,7 +150,16 @@ impl CoordServer {
             &params.subject,
             &params.body,
         ) {
-            Ok(id) => text_result(format!("sent message {id}")),
+            Ok(id) => {
+                let op_type = if params.to.is_some() { "message" } else { "broadcast" };
+                log_op(
+                    &conn,
+                    op_type,
+                    &self.agent_id,
+                    serde_json::json!({ "to": params.to, "subject": params.subject }),
+                );
+                text_result(format!("sent message {id}"))
+            }
             Err(e) => error_result(format!("error: {e:#}")),
         }
     }

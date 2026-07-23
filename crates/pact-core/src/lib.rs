@@ -462,13 +462,54 @@ impl Orchestrator {
             self.run_arbiter(arbiter.expect("resolver only invoked when arbiter is Some"), worktree_path, task_text, files)
         };
         let resolver_ref: Option<&ArbiterResolver<'_>> = if arbiter.is_some() { Some(&resolver) } else { None };
-        self.workspaces.merge_all(ids, target_branch, union_globs, resolver_ref, dry_run)
+        let report = self.workspaces.merge_all(ids, target_branch, union_globs, resolver_ref, dry_run)?;
+        self.log_operation(
+            "merge_all",
+            None,
+            serde_json::json!({
+                "target_branch": report.target_branch,
+                "dry_run": report.dry_run,
+                "merged": report.merged.iter().map(|w| &w.id).collect::<Vec<_>>(),
+                "skipped": report.skipped.iter().map(|w| serde_json::json!({"id": w.id, "reason": w.reason})).collect::<Vec<_>>(),
+                "planned": report.planned,
+            }),
+        );
+        Ok(report)
+    }
+
+    /// Best-effort operation-log write -- see DESIGN.md ("pact-coord >
+    /// Operation log / `pact history` (issue #84)"). Never fails the
+    /// caller: recording history must not become a new way for
+    /// `merge_all`/`teardown`/Arbiter to fail.
+    fn log_operation(&self, op_type: &str, workspace_id: Option<&str>, detail: serde_json::Value) {
+        if let Err(err) = pact_coord::log_operation(&self.repo_root, op_type, workspace_id, &detail) {
+            tracing::warn!("failed to record {op_type} operation: {err:#}");
+        }
     }
 
     /// Invokes the Arbiter fallback for one workspace's still-unresolved
-    /// conflicted files -- see DESIGN.md ("pact-core > Arbiter -- agent
-    /// invocation") for the acceptance criteria. Never partially accepted.
+    /// conflicted files, then records an `arbiter_decision` operation --
+    /// see DESIGN.md ("pact-coord > Operation log / `pact history` (issue
+    /// #84)"). `workspace_id` is derived from `worktree_path`'s final path
+    /// component, which is always the workspace id (see
+    /// `WorkspaceManager::preview_workspace_location`), rather than
+    /// widening `ArbiterResolver`'s signature just to pass it through.
     fn run_arbiter(&self, config: &ArbiterConfig, worktree_path: &Path, task_text: &str, files: &[String]) -> Vec<String> {
+        let resolved = self.run_arbiter_inner(config, worktree_path, task_text, files);
+        let workspace_id = worktree_path.file_name().and_then(|n| n.to_str());
+        self.log_operation(
+            "arbiter_decision",
+            workspace_id,
+            serde_json::json!({
+                "files": files,
+                "accepted": !resolved.is_empty(),
+                "resolved_files": resolved,
+            }),
+        );
+        resolved
+    }
+
+    fn run_arbiter_inner(&self, config: &ArbiterConfig, worktree_path: &Path, task_text: &str, files: &[String]) -> Vec<String> {
         let prompt = build_arbiter_prompt(task_text, files);
         let adapter = pact_agents::adapter(config.agent);
         let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
@@ -614,7 +655,15 @@ impl Orchestrator {
         // WorkspaceManager::remove_workspace already kills any live agent
         // process recorded against this workspace before removing it, and
         // refuses on uncommitted changes unless `force` is set.
-        self.workspaces.remove_workspace(id, keep_branch, force)
+        self.workspaces.remove_workspace(id, keep_branch, force)?;
+        self.log_operation("teardown", Some(id), serde_json::json!({ "keep_branch": keep_branch, "force": force }));
+        Ok(())
+    }
+
+    /// The operation log for `pact history` -- see DESIGN.md ("pact-coord
+    /// > Operation log / `pact history` (issue #84)").
+    pub fn history(&self, filter: &pact_coord::HistoryFilter) -> Result<Vec<pact_coord::Operation>> {
+        pact_coord::history(&self.repo_root, filter)
     }
 }
 

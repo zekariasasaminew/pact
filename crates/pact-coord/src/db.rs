@@ -62,7 +62,15 @@ pub fn open(repo_root: &Path) -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS read_cursors (
             agent_id TEXT PRIMARY KEY,
             last_seen_message_id INTEGER NOT NULL DEFAULT 0
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS operations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at INTEGER NOT NULL,
+            op_type TEXT NOT NULL,
+            workspace_id TEXT,
+            detail TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS operations_workspace_id ON operations(workspace_id);",
     )?;
 
     Ok(conn)

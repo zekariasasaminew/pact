@@ -954,10 +954,20 @@ pact spawn-many --task claude:"X" --task copilot:"Y" --dry-run
 pact list                          # shows a [dirty]/[clean] indicator per workspace
 pact diff <id>                      # committed (vs. merge-base) + uncommitted changes
 pact conflicts                      # files touched by >1 workspace forked from the same commit
+pact coord-status                   # active leases + each agent's pending message count
+pact history                        # every claim/release/message/merge-all/teardown, newest first
+pact history --workspace <id> --type merge_all --json
 pact teardown <id>                  # refuses if the workspace has uncommitted changes
 pact teardown <id> --force          # tear down anyway, discarding uncommitted changes
 pact teardown <id> --keep-branch    # skip deleting the workspace's branch
 ```
+
+`pact coord-status` shows the coordination layer's *current* state (active
+leases, unread message counts); `pact history` shows what *happened* --
+every claim, release, broadcast, direct message, `merge-all` invocation,
+Arbiter decision, and teardown recorded against this repo, filterable by
+`--workspace`, `--since <unix-seconds>`, `--type`, and `--limit`. Both are
+read-only.
 
 `spawn` creates the worktree, best-effort prepares dependencies for every
 package manager it detects (pass-through install for ecosystems with their

@@ -149,6 +149,30 @@ enum Command {
     /// Read-only -- unlike an agent calling check_messages, looking here
     /// never marks anything as read.
     CoordStatus,
+    /// Show the coordination layer's operation log: every claim, release,
+    /// broadcast, direct message, merge-all invocation, arbiter decision,
+    /// and teardown recorded this session (and any prior session against
+    /// the same repo -- the log isn't cleared between runs). Read-only
+    /// query only -- no undo, no replay-as-mutation.
+    History {
+        /// Only operations recorded against this workspace id.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Only operations at or after this Unix timestamp (seconds).
+        #[arg(long)]
+        since: Option<i64>,
+        /// Only operations of this type (claim, release, broadcast,
+        /// message, merge_all, arbiter_decision, teardown).
+        #[arg(long = "type")]
+        op_type: Option<String>,
+        /// Show at most this many operations (newest first).
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Print raw JSON rows instead of a human-readable summary line
+        /// per operation.
+        #[arg(long)]
+        json: bool,
+    },
     /// Merge every (or a chosen set of) active workspace onto a fresh
     /// integration branch. Auto-commits each workspace first, refuses any
     /// whose base commit is no longer part of this branch's history, then
@@ -532,6 +556,11 @@ fn main() -> Result<()> {
             let status = orchestrator.coord_status()?;
             print_coord_status(&status);
         }
+        Command::History { workspace, since, op_type, limit, json } => {
+            let filter = pact_coord::HistoryFilter { workspace_id: workspace, since, op_type, limit };
+            let operations = orchestrator.history(&filter)?;
+            print_history(&operations, json);
+        }
         Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
             let arbiter = match test_cmd {
@@ -657,6 +686,77 @@ fn print_conflicts(conflicts: &[FileConflict]) {
                 conflict.related_message_count
             );
         }
+    }
+}
+
+/// Prints `pact history` results -- see DESIGN.md ("pact-coord >
+/// Operation log / `pact history` (issue #84)"). `--json` prints the raw
+/// rows; otherwise a compact, type-specific one-line summary derived from
+/// each operation's `detail`, falling back to the raw JSON for any
+/// `op_type` this doesn't have a specific summary for.
+fn print_history(operations: &[pact_coord::Operation], json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(operations).unwrap_or_else(|e| format!("error serializing result: {e}"))
+        );
+        return;
+    }
+
+    if operations.is_empty() {
+        println!("no operations recorded");
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    for op in operations {
+        let age = (now - op.created_at).max(0);
+        let workspace = op.workspace_id.as_deref().unwrap_or("-");
+        println!("{age}s ago  {:<17} {workspace:<10} {}", op.op_type, history_summary(op));
+    }
+}
+
+fn history_summary(op: &pact_coord::Operation) -> String {
+    let d = &op.detail;
+    match op.op_type.as_str() {
+        "claim" => format!(
+            "{} (conflicts: {})",
+            d.get("patterns").cloned().unwrap_or_default(),
+            d.get("has_conflicts").and_then(|v| v.as_bool()).unwrap_or(false)
+        ),
+        "release" => format!(
+            "{} ({} released)",
+            d.get("patterns").cloned().unwrap_or_default(),
+            d.get("released").and_then(|v| v.as_i64()).unwrap_or(0)
+        ),
+        "broadcast" => format!("\"{}\"", d.get("subject").and_then(|v| v.as_str()).unwrap_or("")),
+        "message" => format!(
+            "to {}: \"{}\"",
+            d.get("to").and_then(|v| v.as_str()).unwrap_or("?"),
+            d.get("subject").and_then(|v| v.as_str()).unwrap_or("")
+        ),
+        "merge_all" => format!(
+            "-> {}: merged {}, skipped {}{}",
+            d.get("target_branch").and_then(|v| v.as_str()).unwrap_or("?"),
+            d.get("merged").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0),
+            d.get("skipped").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0),
+            if d.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false) { " (dry run)" } else { "" }
+        ),
+        "arbiter_decision" => format!(
+            "{}: {}",
+            d.get("files").cloned().unwrap_or_default(),
+            if d.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false) { "accepted" } else { "rejected" }
+        ),
+        "teardown" => format!(
+            "force={} keep_branch={}",
+            d.get("force").and_then(|v| v.as_bool()).unwrap_or(false),
+            d.get("keep_branch").and_then(|v| v.as_bool()).unwrap_or(false)
+        ),
+        _ => d.to_string(),
     }
 }
 
