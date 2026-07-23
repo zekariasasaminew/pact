@@ -463,13 +463,15 @@ impl Orchestrator {
         target_branch: Option<&str>,
         union_globs: &[String],
         arbiter: Option<&ArbiterConfig>,
+        require_passing_tests: Option<&str>,
         dry_run: bool,
     ) -> Result<MergeReport> {
         let resolver = |worktree_path: &Path, task_text: &str, files: &[String]| -> Vec<String> {
             self.run_arbiter(arbiter.expect("resolver only invoked when arbiter is Some"), worktree_path, task_text, files)
         };
         let resolver_ref: Option<&ArbiterResolver<'_>> = if arbiter.is_some() { Some(&resolver) } else { None };
-        let report = self.workspaces.merge_all(ids, target_branch, union_globs, resolver_ref, dry_run)?;
+        let report =
+            self.workspaces.merge_all(ids, target_branch, union_globs, resolver_ref, require_passing_tests, dry_run)?;
         self.log_operation(
             "merge_all",
             None,
