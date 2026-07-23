@@ -239,6 +239,41 @@ enum Command {
         #[arg(long = "arbiter-safety")]
         arbiter_safety: Option<String>,
     },
+    /// Without a workspace id, lists every open conflict `merge-all`
+    /// skipped (which files, which target branch, when). With one,
+    /// retries merging that workspace's branch into the target branch it
+    /// conflicted against -- same auto-resolve/`--union`/Arbiter flags as
+    /// `merge-all` itself, so a retry behaves identically to the original
+    /// attempt. `--abandon` marks it abandoned instead of retrying.
+    Resolve {
+        /// Workspace id (as shown by an argument-less `pact resolve`).
+        /// Omit to list every open conflict instead of acting on one.
+        workspace: Option<String>,
+
+        /// Mark the conflict abandoned instead of retrying it. Requires a
+        /// workspace id.
+        #[arg(long)]
+        abandon: bool,
+
+        /// Same as `merge-all --union`, applied to this retry.
+        #[arg(long = "union")]
+        union: Vec<String>,
+
+        /// Same as `merge-all --test-cmd` -- enables the Arbiter fallback
+        /// for this retry specifically.
+        #[arg(long = "test-cmd")]
+        test_cmd: Option<String>,
+
+        /// Same as `merge-all --arbiter-agent`. Ignored unless --test-cmd
+        /// is set.
+        #[arg(long = "arbiter-agent", default_value = "claude")]
+        arbiter_agent: String,
+
+        /// Same as `merge-all --arbiter-safety`. Ignored unless
+        /// --test-cmd is set.
+        #[arg(long = "arbiter-safety")]
+        arbiter_safety: Option<String>,
+    },
     /// Tear down an agent workspace
     Teardown {
         /// Workspace id (as shown by `list`)
@@ -563,21 +598,7 @@ fn main() -> Result<()> {
         }
         Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
-            let arbiter = match test_cmd {
-                Some(test_cmd) => {
-                    let agent = AgentKind::parse(&arbiter_agent).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, or gemini)"
-                        )
-                    })?;
-                    Some(pact_core::ArbiterConfig {
-                        agent,
-                        safety_override: arbiter_safety,
-                        test_cmd,
-                    })
-                }
-                None => None,
-            };
+            let arbiter = build_arbiter_config(test_cmd, &arbiter_agent, arbiter_safety)?;
             let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), &union, arbiter.as_ref(), dry_run)?;
             print_merge_report(&report);
             // Exit 1 is reserved for a hard/unexpected failure (the `?`
@@ -589,6 +610,43 @@ fn main() -> Result<()> {
             // 50%-successful run identically to a crash.
             if !report.skipped.is_empty() {
                 std::process::exit(2);
+            }
+        }
+        Command::Resolve { workspace, abandon, union, test_cmd, arbiter_agent, arbiter_safety } => {
+            let Some(workspace_id) = workspace else {
+                if abandon {
+                    bail!("--abandon requires a workspace id");
+                }
+                let open = orchestrator.open_conflicts()?;
+                print_open_conflicts(&open);
+                return Ok(());
+            };
+
+            if abandon {
+                if orchestrator.abandon_conflict(&workspace_id)? {
+                    println!("abandoned the open conflict for workspace {workspace_id}");
+                } else {
+                    println!("no open conflict recorded for workspace {workspace_id}");
+                }
+                return Ok(());
+            }
+
+            let arbiter = build_arbiter_config(test_cmd, &arbiter_agent, arbiter_safety)?;
+            let resolution = orchestrator.resolve_conflict(&workspace_id, &union, arbiter.as_ref())?;
+            match resolution.outcome {
+                pact_core::ResolveOutcome::Resolved { auto_resolved, arbiter_resolved } => {
+                    println!("resolved: workspace {workspace_id} merged cleanly");
+                    if !auto_resolved.is_empty() {
+                        println!("  auto-resolved: {}", auto_resolved.join(", "));
+                    }
+                    if !arbiter_resolved.is_empty() {
+                        println!("  arbiter-resolved: {}", arbiter_resolved.join(", "));
+                    }
+                }
+                pact_core::ResolveOutcome::StillConflicted { files } => {
+                    println!("still conflicted: {}", files.join(", "));
+                    std::process::exit(2);
+                }
             }
         }
         Command::Teardown {
@@ -657,6 +715,46 @@ fn print_merge_report(report: &MergeReport) {
             println!("  {} ({}): {}", workspace.id, workspace.branch, workspace.reason);
         }
     }
+    if !report.conflicted.is_empty() {
+        println!("(a real conflict, not just a moving base, is resumable later: `pact resolve <id>`)");
+    }
+}
+
+fn print_open_conflicts(open: &[pact_coord::PersistedConflict]) {
+    if open.is_empty() {
+        println!("no open conflicts");
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    println!("open conflicts:");
+    for conflict in open {
+        let age = (now - conflict.created_at).max(0);
+        println!(
+            "  {} -> {} ({age}s ago): {}",
+            conflict.workspace_id,
+            conflict.target_branch,
+            conflict.files.join(", ")
+        );
+    }
+}
+
+/// Builds an `ArbiterConfig` from `merge-all`/`resolve`'s shared
+/// `--test-cmd`/`--arbiter-agent`/`--arbiter-safety` flags -- `None`
+/// unless `--test-cmd` is given, since presence of that flag is what
+/// turns Arbiter on at all for either command.
+fn build_arbiter_config(
+    test_cmd: Option<String>,
+    arbiter_agent: &str,
+    arbiter_safety: Option<String>,
+) -> Result<Option<pact_core::ArbiterConfig>> {
+    let Some(test_cmd) = test_cmd else { return Ok(None) };
+    let agent = AgentKind::parse(arbiter_agent).ok_or_else(|| {
+        anyhow::anyhow!("unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, or gemini)")
+    })?;
+    Ok(Some(pact_core::ArbiterConfig { agent, safety_override: arbiter_safety, test_cmd }))
 }
 
 fn short(sha: &str) -> &str {
@@ -756,6 +854,15 @@ fn history_summary(op: &pact_coord::Operation) -> String {
             d.get("force").and_then(|v| v.as_bool()).unwrap_or(false),
             d.get("keep_branch").and_then(|v| v.as_bool()).unwrap_or(false)
         ),
+        "conflict_resolve" => {
+            let target = d.get("target_branch").and_then(|v| v.as_str()).unwrap_or("?");
+            if d.get("abandoned").and_then(|v| v.as_bool()).unwrap_or(false) {
+                format!("-> {target}: abandoned")
+            } else {
+                let resolved = d.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+                format!("-> {target}: {}", if resolved { "resolved" } else { "still conflicted" })
+            }
+        }
         _ => d.to_string(),
     }
 }
