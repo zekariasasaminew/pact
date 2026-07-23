@@ -580,13 +580,17 @@ impl WorkspaceManager {
     /// integration branch" -- see DESIGN.md ("pact-vcs > merge_all") for
     /// the phase breakdown and the trial report this is built against.
     /// `ids`, if given, restricts the run to those workspaces instead of
-    /// every active one.
+    /// every active one. `require_passing_tests`, if given, gates each
+    /// workspace's *clean* merge on this command passing in the
+    /// integration worktree before it's accepted -- see DESIGN.md
+    /// ("pact-vcs > Test-gated merge (issue #65)").
     pub fn merge_all(
         &self,
         ids: Option<&[String]>,
         target_branch: Option<&str>,
         union_globs: &[String],
         arbiter: Option<&ArbiterResolver<'_>>,
+        require_passing_tests: Option<&str>,
         dry_run: bool,
     ) -> Result<MergeReport> {
         let mut selected: Vec<Workspace> = match ids {
@@ -699,13 +703,27 @@ impl WorkspaceManager {
         let mut merged = Vec::new();
         let mut conflicted = Vec::new();
         for (_, workspace) in sized {
+            let commit_before = run_git_text(&integration_path, &["rev-parse", "HEAD"])?;
             match self.merge_branch_into(&integration_path, &workspace.branch, union_globs, arbiter, &workspace.task)? {
-                MergeOutcome::Merged { auto_resolved, arbiter_resolved } => merged.push(MergedWorkspace {
-                    id: workspace.id,
-                    branch: workspace.branch,
-                    auto_resolved,
-                    arbiter_resolved,
-                }),
+                MergeOutcome::Merged { auto_resolved, arbiter_resolved } => {
+                    if let Some(test_cmd) = require_passing_tests {
+                        if !run_shell(&integration_path, test_cmd)? {
+                            self.reset_integration_worktree(&integration_path, &commit_before)?;
+                            skipped.push(SkippedWorkspace {
+                                id: workspace.id,
+                                branch: workspace.branch,
+                                reason: format!("merged cleanly but failed the required test command ('{test_cmd}')"),
+                            });
+                            continue;
+                        }
+                    }
+                    merged.push(MergedWorkspace {
+                        id: workspace.id,
+                        branch: workspace.branch,
+                        auto_resolved,
+                        arbiter_resolved,
+                    })
+                }
                 MergeOutcome::Conflict { files } => {
                     skipped.push(SkippedWorkspace {
                         id: workspace.id.clone(),
@@ -907,6 +925,27 @@ impl WorkspaceManager {
                 );
             }
         }
+    }
+
+    /// Undoes one accepted-then-rejected merge in `--require-passing-tests`
+    /// gating (issue #65) -- a plain hard reset back to the commit the
+    /// integration worktree was at before this workspace's merge landed.
+    /// Safe specifically because this worktree is never shared with
+    /// anything else (unlike the repo's own checkout), so nothing else can
+    /// observe the now-discarded commit in between.
+    fn reset_integration_worktree(&self, worktree_path: &Path, commit_before: &str) -> Result<()> {
+        let output = Command::new("git")
+            .args(["reset", "--hard", commit_before])
+            .current_dir(worktree_path)
+            .output()
+            .context("failed to spawn `git reset --hard` after a failed test-gate")?;
+        if !output.status.success() {
+            bail!(
+                "failed to reset the integration worktree after a failed test-gate:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
     }
 
     /// Tries to auto-resolve one conflicted file, returning `true` and
@@ -1325,6 +1364,30 @@ fn kill_if_alive(workspace: &Workspace) {
 /// non-zero exit (e.g. `diff --stat` against a ref with no differences is
 /// still success, but callers here care about "no meaningful output" more
 /// than "git considered this an error").
+/// Runs `cmd` as a shell command in `dir` (`cmd /C` on Windows, `sh -c`
+/// elsewhere), returning whether it exited successfully -- see DESIGN.md
+/// ("pact-vcs > Test-gated merge (issue #65)"). A local copy of the same
+/// small helper `pact-core`'s Arbiter uses (`run_shell`), not shared: this
+/// crate has no dependency on `pact-core` and the alternative -- adding
+/// one just for a 15-line function -- would be backwards, `pact-core`
+/// depends on `pact-vcs`, not the other way around.
+fn run_shell(dir: &Path, cmd: &str) -> Result<bool> {
+    let mut command = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    let output = command
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("failed to spawn required test command '{cmd}'"))?;
+    Ok(output.status.success())
+}
+
 fn run_git_text(dir: &std::path::Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
