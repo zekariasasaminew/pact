@@ -313,6 +313,12 @@ actually do to my machine?" below.
   own vocabulary (Claude Code's `--permission-mode` values, Codex's
   `--sandbox` values, Gemini CLI's `--approval-mode` values; Copilot CLI
   has no gradient to override).
+- **Claude Code's `--safety plan` isn't a strict "nothing happens outside
+  the workspace" guarantee.** It's genuinely read-only for the target
+  repo -- confirmed by hand, a real edit task left the file untouched --
+  but Claude Code's own plan-mode feature may still write a plan document
+  to the host user's `~/.claude/plans/`, outside the isolated worktree
+  entirely and outside anything `pact teardown` tracks or cleans up.
 
 ### One AgentAdapter trait, not one unified safety enum
 
