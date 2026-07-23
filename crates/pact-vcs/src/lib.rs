@@ -1,6 +1,6 @@
 mod lock;
 
-pub use lock::PidLock;
+pub use lock::{agent_process_alive, PidLock};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
