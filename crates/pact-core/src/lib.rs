@@ -571,11 +571,11 @@ impl Orchestrator {
     /// `WorkspaceManager::preview_workspace_location`), rather than
     /// widening `ArbiterResolver`'s signature just to pass it through.
     fn run_arbiter(&self, config: &ArbiterConfig, worktree_path: &Path, task_text: &str, files: &[String]) -> Vec<String> {
-        let resolved = self.run_arbiter_inner(config, worktree_path, task_text, files);
-        let workspace_id = worktree_path.file_name().and_then(|n| n.to_str());
+        let identifier = worktree_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        let resolved = self.run_arbiter_inner(config, worktree_path, identifier, task_text, files);
         self.log_operation(
             "arbiter_decision",
-            workspace_id,
+            Some(identifier),
             serde_json::json!({
                 "files": files,
                 "accepted": !resolved.is_empty(),
@@ -585,12 +585,30 @@ impl Orchestrator {
         resolved
     }
 
-    fn run_arbiter_inner(&self, config: &ArbiterConfig, worktree_path: &Path, task_text: &str, files: &[String]) -> Vec<String> {
+    fn run_arbiter_inner(
+        &self,
+        config: &ArbiterConfig,
+        worktree_path: &Path,
+        identifier: &str,
+        task_text: &str,
+        files: &[String],
+    ) -> Vec<String> {
         let prompt = build_arbiter_prompt(task_text, files);
         let adapter = pact_agents::adapter(config.agent);
         let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
 
-        let log_path = worktree_path.join(".pact-arbiter.jsonl");
+        // Written to the same stable `state_dir/logs/` location a normal
+        // workspace's own log uses -- deliberately NOT inside
+        // `worktree_path` (the throwaway integration/resolve worktree),
+        // which gets torn down unconditionally once merge_all/resolve_conflict
+        // finishes. A log that survived Arbiter's own early returns but
+        // still lived inside that worktree would have been destroyed by
+        // the *caller's* cleanup moments later regardless -- see DESIGN.md
+        // ("pact-core > Arbiter diagnosability", issue #106). Deleted only
+        // on a genuinely accepted resolution (the single `remove_file`
+        // call at the bottom of this function); every failure path below
+        // leaves it in place for inspection.
+        let log_path = self.workspaces.state_dir().join("logs").join(format!("arbiter-{identifier}.jsonl"));
         let supervisor = Supervisor::new();
         let outcome = pact_agents::run_and_stream(
             &supervisor,
@@ -602,16 +620,22 @@ impl Orchestrator {
             |_event| {},
             |_pid| {},
         );
-        let _ = std::fs::remove_file(&log_path);
 
         match outcome {
             Ok(run) if run.success => {}
             Ok(run) => {
-                tracing::warn!("arbiter agent reported failure resolving {files:?}: {}", run.summary);
+                tracing::warn!(
+                    "arbiter agent reported failure resolving {files:?}: {} (log kept at {})",
+                    run.summary,
+                    log_path.display()
+                );
                 return Vec::new();
             }
             Err(err) => {
-                tracing::warn!("arbiter agent failed to run for {files:?}: {err:#}");
+                tracing::warn!(
+                    "arbiter agent failed to run for {files:?}: {err:#} (log kept at {})",
+                    log_path.display()
+                );
                 return Vec::new();
             }
         }
@@ -621,11 +645,14 @@ impl Orchestrator {
         // matter what it said.
         for file in files {
             let Ok(content) = std::fs::read_to_string(worktree_path.join(file)) else {
-                tracing::warn!("arbiter: could not re-read {file} after the agent ran");
+                tracing::warn!("arbiter: could not re-read {file} after the agent ran (log kept at {})", log_path.display());
                 return Vec::new();
             };
             if content.contains("<<<<<<<") || content.contains("=======") || content.contains(">>>>>>>") {
-                tracing::warn!("arbiter left conflict markers in {file}, not accepting its resolution");
+                tracing::warn!(
+                    "arbiter left conflict markers in {file}, not accepting its resolution (log kept at {})",
+                    log_path.display()
+                );
                 return Vec::new();
             }
         }
@@ -633,23 +660,31 @@ impl Orchestrator {
         for file in files {
             let add = Command::new("git").args(["add", "--", file]).current_dir(worktree_path).output();
             if !matches!(add, Ok(ref o) if o.status.success()) {
-                tracing::warn!("arbiter: failed to stage {file} after resolution");
+                tracing::warn!("arbiter: failed to stage {file} after resolution (log kept at {})", log_path.display());
                 return Vec::new();
             }
         }
 
         match run_shell(worktree_path, &config.test_cmd) {
-            Ok(true) => files.to_vec(),
+            Ok(true) => {
+                let _ = std::fs::remove_file(&log_path);
+                files.to_vec()
+            }
             Ok(false) => {
                 tracing::warn!(
                     "arbiter's resolution for {files:?} failed the test command ('{}') -- not \
-                     accepting it",
-                    config.test_cmd
+                     accepting it, log kept at {} for inspection",
+                    config.test_cmd,
+                    log_path.display()
                 );
                 Vec::new()
             }
             Err(err) => {
-                tracing::warn!("failed to run the arbiter test command '{}': {err:#}", config.test_cmd);
+                tracing::warn!(
+                    "failed to run the arbiter test command '{}': {err:#} (log kept at {})",
+                    config.test_cmd,
+                    log_path.display()
+                );
                 Vec::new()
             }
         }
