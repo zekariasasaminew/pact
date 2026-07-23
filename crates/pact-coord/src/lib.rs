@@ -11,11 +11,13 @@ mod db;
 mod leases;
 mod messages;
 mod operations;
+mod persisted_conflicts;
 mod server;
 
 pub use leases::{ActiveLease, Conflict, ClaimResult};
 pub use messages::Message;
 pub use operations::{HistoryFilter, Operation};
+pub use persisted_conflicts::PersistedConflict;
 
 use std::path::{Path, PathBuf};
 
@@ -128,6 +130,38 @@ pub fn log_operation(
 pub fn history(repo_root: &Path, filter: &HistoryFilter) -> Result<Vec<Operation>> {
     let conn = db::open(repo_root)?;
     operations::query_operations(&conn, filter)
+}
+
+/// Persists a real merge conflict `merge-all` skipped -- see DESIGN.md
+/// ("pact-coord > Persisted conflicts / `pact resolve` (issue #85)").
+pub fn record_conflict(repo_root: &Path, workspace_id: &str, target_branch: &str, files: &[String]) -> Result<()> {
+    let conn = db::open(repo_root)?;
+    persisted_conflicts::record_conflict(&conn, workspace_id, target_branch, files)?;
+    Ok(())
+}
+
+/// Every currently-open persisted conflict, for `pact resolve` (no
+/// workspace id given) to list.
+pub fn open_conflicts(repo_root: &Path) -> Result<Vec<PersistedConflict>> {
+    let conn = db::open(repo_root)?;
+    persisted_conflicts::list_open_conflicts(&conn)
+}
+
+/// The most recent open conflict for `workspace_id`, if any -- what `pact
+/// resolve <id>` acts on.
+pub fn open_conflict_for_workspace(repo_root: &Path, workspace_id: &str) -> Result<Option<PersistedConflict>> {
+    let conn = db::open(repo_root)?;
+    persisted_conflicts::open_conflict_for_workspace(&conn, workspace_id)
+}
+
+pub fn mark_conflict_resolved(repo_root: &Path, conflict_id: i64) -> Result<()> {
+    let conn = db::open(repo_root)?;
+    persisted_conflicts::mark_resolved(&conn, conflict_id)
+}
+
+pub fn mark_conflict_abandoned(repo_root: &Path, conflict_id: i64) -> Result<()> {
+    let conn = db::open(repo_root)?;
+    persisted_conflicts::mark_abandoned(&conn, conflict_id)
 }
 
 /// Matches a single concrete file path against a glob pattern -- unlike
