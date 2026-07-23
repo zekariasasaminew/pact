@@ -3,9 +3,16 @@ use std::process::Command;
 
 use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
-pub use pact_vcs::{ArbiterResolver, MergedWorkspace, MergeReport, SkippedWorkspace};
+pub use pact_vcs::{ArbiterResolver, ConflictedWorkspace, MergedWorkspace, MergeReport, ResolveOutcome, SkippedWorkspace};
+
+/// A `resolve_conflict` attempt's result -- see DESIGN.md ("pact-coord >
+/// Persisted conflicts / `pact resolve` (issue #85)").
+pub struct ConflictResolution {
+    pub conflict_id: i64,
+    pub outcome: ResolveOutcome,
+}
 
 /// Configuration for the Arbiter fallback resolver -- entirely opt-in,
 /// see DESIGN.md ("pact-core > Arbiter -- agent invocation").
@@ -474,7 +481,74 @@ impl Orchestrator {
                 "planned": report.planned,
             }),
         );
+        for conflict in &report.conflicted {
+            if let Err(err) =
+                pact_coord::record_conflict(&self.repo_root, &conflict.id, &conflict.target_branch, &conflict.files)
+            {
+                tracing::warn!("failed to persist conflict for workspace {}: {err:#}", conflict.id);
+            }
+        }
         Ok(report)
+    }
+
+    /// Every currently-open persisted conflict -- what `pact resolve` (no
+    /// workspace id) lists. See DESIGN.md ("pact-coord > Persisted
+    /// conflicts / `pact resolve` (issue #85)").
+    pub fn open_conflicts(&self) -> Result<Vec<pact_coord::PersistedConflict>> {
+        pact_coord::open_conflicts(&self.repo_root)
+    }
+
+    /// Retries the most recent open conflict recorded against
+    /// `workspace_id`. On success, marks the persisted conflict resolved;
+    /// on a repeat conflict, leaves it open. Either way, records a
+    /// `conflict_resolve` operation so the attempt itself shows up in
+    /// `pact history` even when it didn't resolve anything.
+    pub fn resolve_conflict(
+        &self,
+        workspace_id: &str,
+        union_globs: &[String],
+        arbiter: Option<&ArbiterConfig>,
+    ) -> Result<ConflictResolution> {
+        let Some(conflict) = pact_coord::open_conflict_for_workspace(&self.repo_root, workspace_id)? else {
+            bail!("no open conflict recorded for workspace {workspace_id}");
+        };
+
+        let resolver = |worktree_path: &Path, task_text: &str, files: &[String]| -> Vec<String> {
+            self.run_arbiter(arbiter.expect("resolver only invoked when arbiter is Some"), worktree_path, task_text, files)
+        };
+        let resolver_ref: Option<&ArbiterResolver<'_>> = if arbiter.is_some() { Some(&resolver) } else { None };
+        let outcome = self.workspaces.resolve_conflict(&conflict.target_branch, workspace_id, union_globs, resolver_ref)?;
+
+        let resolved = matches!(outcome, ResolveOutcome::Resolved { .. });
+        if resolved {
+            if let Err(err) = pact_coord::mark_conflict_resolved(&self.repo_root, conflict.id) {
+                tracing::warn!("failed to mark conflict {} resolved: {err:#}", conflict.id);
+            }
+        }
+        self.log_operation(
+            "conflict_resolve",
+            Some(workspace_id),
+            serde_json::json!({ "target_branch": conflict.target_branch, "resolved": resolved }),
+        );
+
+        Ok(ConflictResolution { conflict_id: conflict.id, outcome })
+    }
+
+    /// Marks the most recent open conflict for `workspace_id` abandoned
+    /// without retrying it -- the manual escape hatch for a conflict
+    /// that's not worth resolving. Returns `false` if there was no open
+    /// conflict to abandon.
+    pub fn abandon_conflict(&self, workspace_id: &str) -> Result<bool> {
+        let Some(conflict) = pact_coord::open_conflict_for_workspace(&self.repo_root, workspace_id)? else {
+            return Ok(false);
+        };
+        pact_coord::mark_conflict_abandoned(&self.repo_root, conflict.id)?;
+        self.log_operation(
+            "conflict_resolve",
+            Some(workspace_id),
+            serde_json::json!({ "target_branch": conflict.target_branch, "abandoned": true }),
+        );
+        Ok(true)
     }
 
     /// Best-effort operation-log write -- see DESIGN.md ("pact-coord >
