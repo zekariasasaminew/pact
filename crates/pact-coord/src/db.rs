@@ -70,7 +70,17 @@ pub fn open(repo_root: &Path) -> Result<Connection> {
             workspace_id TEXT,
             detail TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS operations_workspace_id ON operations(workspace_id);",
+        CREATE INDEX IF NOT EXISTS operations_workspace_id ON operations(workspace_id);
+        CREATE TABLE IF NOT EXISTS conflicts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id TEXT NOT NULL,
+            target_branch TEXT NOT NULL,
+            files TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            resolved_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS conflicts_workspace_id ON conflicts(workspace_id);",
     )?;
 
     Ok(conn)
