@@ -238,6 +238,18 @@ enum Command {
         /// set.
         #[arg(long = "arbiter-safety")]
         arbiter_safety: Option<String>,
+
+        /// Gates each workspace's clean merge on this command passing in
+        /// the integration worktree (e.g. "npm test", "cargo test")
+        /// before it's accepted -- a failure undoes just that one merge
+        /// and skips the workspace, same as a real conflict. Runs once
+        /// per accepted workspace, not once at the end against the fully
+        /// merged branch -- see the README for why. Distinct from
+        /// --test-cmd: that verifies an Arbiter-proposed conflict
+        /// resolution; this gates every clean merge, Arbiter-resolved or
+        /// not. The two can be the same command or different ones.
+        #[arg(long = "require-passing-tests")]
+        require_passing_tests: Option<String>,
     },
     /// Without a workspace id, lists every open conflict `merge-all`
     /// skipped (which files, which target branch, when). With one,
@@ -596,10 +608,17 @@ fn main() -> Result<()> {
             let operations = orchestrator.history(&filter)?;
             print_history(&operations, json);
         }
-        Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety } => {
+        Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
             let arbiter = build_arbiter_config(test_cmd, &arbiter_agent, arbiter_safety)?;
-            let report = orchestrator.merge_all(ids.as_deref(), into.as_deref(), &union, arbiter.as_ref(), dry_run)?;
+            let report = orchestrator.merge_all(
+                ids.as_deref(),
+                into.as_deref(),
+                &union,
+                arbiter.as_ref(),
+                require_passing_tests.as_deref(),
+                dry_run,
+            )?;
             print_merge_report(&report);
             // Exit 1 is reserved for a hard/unexpected failure (the `?`
             // above already exits 1 on one, via anyhow::Result's
