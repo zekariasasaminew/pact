@@ -96,6 +96,20 @@ impl Drop for PidLock {
     }
 }
 
+/// Whether a process with this PID currently exists -- used by `pact list`
+/// to surface a workspace's recorded `agent_pid` liveness (issue #108: a
+/// crashed `pact` can leave its agent process tree running as an orphan,
+/// with nothing to notice automatically). Unlike `steal_if_stale`, there's
+/// no recorded start time to disambiguate a genuinely still-running agent
+/// from an unrelated process that later reused the same PID -- acceptable
+/// here since this is a purely informational display, not lock-stealing
+/// logic that would misbehave on a false positive.
+pub fn agent_process_alive(pid: u32) -> bool {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+}
+
 /// Builds this process' own lock-file contents: `<pid>:<start_time>`. Falls
 /// back to a bare PID (the pre-fix format) if this process' own start time
 /// can't be looked up (e.g. a `sysinfo` snapshot that doesn't include it,
@@ -133,6 +147,16 @@ fn parse_holder_token(token: &str) -> Option<(u32, Option<u64>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_process_alive_true_for_the_current_process() {
+        assert!(agent_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn agent_process_alive_false_for_an_implausible_pid() {
+        assert!(!agent_process_alive(u32::MAX));
+    }
 
     #[test]
     fn parse_holder_token_reads_new_format_with_start_time() {

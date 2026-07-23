@@ -550,6 +550,18 @@ fn main() -> Result<()> {
                     workspace.path.display()
                 );
                 println!("    task: {}", workspace.task);
+                // A recorded agent_pid that's still alive is either a
+                // normal in-progress spawn, or -- if the `pact` process
+                // that launched it crashed -- an orphan `teardown --force`
+                // hasn't cleaned up yet (issue #108). Can't distinguish
+                // those two cases from here, so surface the raw fact
+                // rather than guessing; a stale (dead) pid is worth
+                // knowing about too, since it means metadata wasn't
+                // cleared after the agent actually finished.
+                if let Some(pid) = workspace.agent_pid {
+                    let status = if pact_core::agent_process_alive(pid) { "running" } else { "not running" };
+                    println!("    agent pid: {pid} ({status})");
+                }
             }
         }
         Command::Diff { id } => {

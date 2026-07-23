@@ -90,6 +90,44 @@ is still sitting there orphaned. In that case it falls back to removing
 the directory directly, also with retries, since it's the same underlying
 handle-release race, just past the point where git itself can help.
 
+### A crashed `pact` orphans its agent process tree (issue #108)
+
+Found during the 2026-07-23 Claude Code stress-testing campaign, then
+isolated further afterward: forcibly killing the top-level `pact`
+process mid-run does not clean up its child process tree (a real
+`cmd.exe` -> `claude.exe` -> `pact mcp-serve` chain on Windows) -- all
+three survived as orphans, confirmed via live process inspection.
+`pact teardown --force` *does* correctly recover afterward (a real
+tree-kill of whatever PID it has recorded, confirmed working), so this
+isn't unrecoverable, just not automatic.
+
+**Isolated with zero pact code involved:** a minimal standalone program
+using `command-group` directly (spawn a grouped child via
+`Command::group_spawn`, do nothing else, get killed externally) showed
+the exact same thing -- the grouped child (a plain `ping`) survived a
+`taskkill /F` of its parent. `command-group`'s own Windows
+implementation does correctly set `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+(confirmed by reading its source directly), which is supposed to
+guarantee exactly this cleanup at the OS level. That it didn't fire here
+is either a real `command-group`/Windows nested-job-object limitation,
+or specific to the fact that this testing happened from inside another
+live Claude Code session (whose own process tree may itself already sit
+inside a job object pact's new job then nests under) -- not
+conclusively separated from pact's own code, since there's no clean way
+to test "outside any other job object" from within this environment.
+
+**Fix shipped: visibility, not a claimed cure.** Rather than chase the
+exact Windows kernel mechanics further, `pact list` now reports a
+workspace's recorded `agent_pid` liveness directly
+(`pact_vcs::agent_process_alive`, the same `sysinfo`-based liveness
+check `PidLock` already uses, minus the start-time disambiguation --
+acceptable here since this is informational display, not lock-stealing
+logic a false positive could break). Deliberately not claiming to
+distinguish "orphaned" from "legitimately still running" -- pact
+structurally can't tell those apart from a PID alone, so it surfaces the
+raw fact (running / not running) and lets the user investigate, rather
+than guessing at a classification it can't back up.
+
 ### commit_all
 
 Stages and commits everything in a workspace's working tree (staged,
