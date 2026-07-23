@@ -166,6 +166,58 @@ which one merges first (and therefore which one the *other* conflicts
 against) isn't specified -- the test asserts that exactly one of them
 merged, not which one.
 
+### Test-gated merge (issue #65)
+
+Batty (a nearby competitor) has test gating without N-way merge; pact had
+N-way merge without test gating. `merge-all --require-passing-tests <cmd>`
+closes that gap. Design decisions, made with the user directly rather
+than assumed (a real fork with real tradeoffs, not a default to pick
+silently):
+
+**Gating scope: per-workspace, not a single gate on the final integration
+branch.** After each workspace merges cleanly (git-level, no conflict),
+`merge_all` runs `<cmd>` in the integration worktree right there, before
+moving to the next workspace. A failure resets the integration worktree
+back to the commit it was at before that one merge (`git reset --hard`,
+safe since this worktree is never shared with anything else) and treats
+the workspace as skipped -- the exact same "skip and continue" shape
+`merge_all` already uses for a real conflict, no new rollback concept
+needed. The alternative -- one test run against the fully-merged branch
+at the end -- would catch cross-workspace interaction bugs a per-workspace
+run can't see, but raises a real, unsolved question this codebase has
+never had to answer anywhere else: which of N already-merged workspaces
+caused a failure discovered only after all of them landed, and how do you
+undo just that one? Deliberately not attempted here; per-workspace
+gating ships the well-scoped half of the idea now rather than blocking on
+designing rollback-after-the-fact.
+
+**A distinct flag, not a repurposed `--test-cmd`.** Arbiter's existing
+`--test-cmd` means "verify an agent-proposed conflict *resolution*
+worked" -- a fundamentally different question from "should this
+workspace's own clean merge be *allowed to land at all*", even though
+both run a test command. Reusing the name would have silently changed
+`--test-cmd`'s existing meaning for anyone already using Arbiter.
+`--require-passing-tests <cmd>` is the new, separate flag; `--test-cmd`
+is untouched.
+
+**Interaction with Arbiter:** if both are given, a workspace that Arbiter
+resolves (auto-resolve, `--union`, or Arbiter itself accepting a
+conflict resolution) *also* has to pass `--require-passing-tests` before
+being accepted -- Arbiter's own `--test-cmd` verifies its proposed
+resolution compiles/passes in isolation; `--require-passing-tests` is
+this feature's separate, subsequent gate on the merge as a whole, run
+after Arbiter's own verification succeeds. The two commands can be the
+same string or different ones; nothing requires them to match.
+
+**Cost:** running a real test suite once per accepted workspace multiplies
+wall time for a large batch -- already opt-in via the flag (`merge_all`
+behaves exactly as before when it's omitted, no extra cost or behavior
+change), so this is a cost a caller explicitly chooses. No cheaper
+"just check it compiles" tier below "run the full suite" in this first
+cut -- `<cmd>` can already be an arbitrarily cheap command (`cargo check`
+instead of `cargo test`) if a caller wants that tradeoff, so a separate
+tier wasn't necessary to build.
+
 ### Semantic auto-resolution
 
 `merge_branch_into` tries a plain `git merge` first. On a real conflict, it

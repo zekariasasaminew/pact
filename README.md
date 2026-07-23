@@ -960,6 +960,7 @@ pact history --workspace <id> --type merge_all --json
 pact resolve                        # lists every open conflict merge-all recorded
 pact resolve <id>                   # retries that workspace's branch against its target branch
 pact resolve <id> --abandon         # marks it abandoned instead of retrying
+pact merge-all --require-passing-tests "npm test"   # gate every clean merge on tests passing
 pact teardown <id>                  # refuses if the workspace has uncommitted changes
 pact teardown <id> --force          # tear down anyway, discarding uncommitted changes
 pact teardown <id> --keep-branch    # skip deleting the workspace's branch
@@ -1017,6 +1018,16 @@ creates a commit, with a message derived from the workspace's task
 before running either will show it at the same commit it forked from --
 that's this, not the agent having done nothing; `pact diff <id>` shows the
 uncommitted work directly.
+
+**`merge-all --require-passing-tests <cmd>` gates every clean merge on a
+real test command, not just a text-level conflict check.** Runs `<cmd>`
+in the integration worktree right after each workspace merges cleanly;
+a failure undoes just that one merge and skips the workspace, same as a
+real conflict, then moves on to the next -- one rejected workspace never
+blocks the rest of the batch. Distinct from Arbiter's `--test-cmd` (which
+verifies an agent-proposed *conflict resolution*, not every clean merge)
+-- the two can be the same command or different ones, and both can be
+given together.
 
 **A real merge conflict `merge-all` skips is resumable, not lost.**
 `pact resolve` (no id) lists every open conflict it recorded; `pact
