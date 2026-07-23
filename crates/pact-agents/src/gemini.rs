@@ -3,8 +3,12 @@ use serde_json::Value;
 use crate::adapter::{AgentAdapter, CoordConfig};
 use crate::event::AgentEvent;
 
-/// Built from a real installed `gemini` CLI, **not live-verified against a
-/// real authenticated session** -- see DESIGN.md ("pact-agents > Gemini
+/// Its CLI flags (`-p`, `-o stream-json`, `--approval-mode`) are confirmed
+/// against a real installed `gemini` CLI's own `--help` output and a real
+/// invocation, including the `--skip-trust` fix below -- but the JSON
+/// output schema `parse_line` assumes is still inferred, not confirmed:
+/// no `GEMINI_API_KEY`/OAuth credentials were available to get a real
+/// response past the auth check. See DESIGN.md ("pact-agents > Gemini
 /// adapter", issue #9).
 pub struct GeminiAdapter;
 
@@ -15,13 +19,13 @@ impl AgentAdapter for GeminiAdapter {
 
     /// See DESIGN.md ("pact-agents > Gemini adapter").
     fn default_safety_description(&self) -> &'static str {
-        "--approval-mode yolo (can run any shell command and edit any file with no restriction -- \
-         unconfirmed whether a safer mode hangs in headless mode without real auth to test against; \
-         see issue #9)"
+        "--approval-mode yolo --skip-trust (can run any shell command and edit any file with no \
+         restriction)"
     }
 
     /// See DESIGN.md ("pact-agents > Gemini adapter") for the MCP config
-    /// mechanism, which differs from every other adapter.
+    /// mechanism, which differs from every other adapter, and for the
+    /// `--skip-trust` fix.
     fn build_command(
         &self,
         task: &str,
@@ -34,6 +38,7 @@ impl AgentAdapter for GeminiAdapter {
             task.to_string(),
             "-o".to_string(),
             "stream-json".to_string(),
+            "--skip-trust".to_string(),
         ];
         args.push("--approval-mode".to_string());
         args.push(safety_override.unwrap_or("yolo").to_string());
@@ -126,6 +131,22 @@ mod tests {
         assert_eq!(program, "gemini");
         let idx = args.iter().position(|a| a == "--approval-mode").unwrap();
         assert_eq!(args[idx + 1], "yolo");
+    }
+
+    /// Confirmed by hand against a real `gemini` CLI (issue #9): without
+    /// `--skip-trust`, an untrusted directory silently downgrades
+    /// `--approval-mode yolo` to `default` (interactive confirmation),
+    /// which would hang forever in headless mode -- the same class of
+    /// footgun this codebase already tracks carefully for other adapters.
+    #[test]
+    fn always_passes_skip_trust_to_avoid_the_untrusted_directory_approval_downgrade() {
+        let (_, args) = GeminiAdapter.build_command(
+            "do the thing",
+            None,
+            None,
+            std::path::Path::new("/tmp/workspace"),
+        );
+        assert!(args.iter().any(|a| a == "--skip-trust"));
     }
 
     #[test]
