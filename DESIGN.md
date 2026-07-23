@@ -1186,6 +1186,18 @@ full unfiltered stream is unaffected either way -- `run_and_stream`
 already writes every raw line to the workspace's log file before any
 filtering happens.
 
+Every entry up through `session.skills_loaded` came from Copilot CLI
+shakedowns specifically -- nobody had looked at Claude Code's *own* raw
+`[other]` stream for its own noise until a real `pact spawn-many
+--agent claude` run (capturing fresh output for a `docs/demo.gif`
+refresh) turned up two more (issue #100): `rate_limit_event` (account
+rate-limit metadata, not agent output) and `user` -- in headless mode
+there's no real interactive user turn, so every `"type":"user"` event is
+the SDK echoing a tool result back to itself, already covered by the
+`[tool]`/`[assistant]` events. Smaller scale than issue #58's 75%+
+finding (4 lines in one small 2-agent run), but the same category of
+confirmed, not-agent-output noise, added to the same list.
+
 ### Workspace commit lifecycle (issue #35)
 
 Neither `spawn` nor `spawn-many` commits anything -- an agent's changes

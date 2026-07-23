@@ -1125,6 +1125,16 @@ const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
     // as 500-1000 byte raw JSON blobs that say nothing about what the
     // agent is doing.
     "session.skills_loaded",
+    // The first four entries above were all found via Copilot CLI
+    // shakedowns -- these two are Claude Code's own, confirmed by hand
+    // during a real spawn-many run (issue #100). Account rate-limit
+    // metadata, not agent output.
+    "rate_limit_event",
+    // In headless mode there's no real interactive user turn, so every
+    // `"type":"user"` event observed is the SDK echoing a tool result back
+    // to itself -- duplicates what the `[tool]`/`[assistant]` events
+    // already surfaced (issue #100).
+    "user",
 ];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
@@ -1285,6 +1295,12 @@ mod tests {
         assert!(!should_print_other(&value, false));
 
         let value = serde_json::json!({"type": "session.skills_loaded", "data": {}});
+        assert!(!should_print_other(&value, false));
+
+        let value = serde_json::json!({"type": "rate_limit_event", "data": {}});
+        assert!(!should_print_other(&value, false));
+
+        let value = serde_json::json!({"type": "user", "message": {}});
         assert!(!should_print_other(&value, false));
     }
 
