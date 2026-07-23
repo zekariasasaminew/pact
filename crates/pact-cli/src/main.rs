@@ -1157,16 +1157,36 @@ const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
 ];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
-/// only when it's a known-noisy type (see `SUPPRESSED_OTHER_EVENT_TYPES`)
-/// and `--verbose` wasn't passed. Anything not on that list still prints
-/// unconditionally: an unrecognized event is far more likely to be a real
-/// message an adapter doesn't parse in detail yet than something safe to
-/// drop silently, so only specifically-confirmed noise is ever suppressed.
+/// for a known-noisy type (see `SUPPRESSED_OTHER_EVENT_TYPES`), a
+/// non-`init` `system` event, or an `assistant` event (see below), and
+/// `--verbose` wasn't passed. Anything else still prints unconditionally:
+/// an unrecognized event is far more likely to be a real message an
+/// adapter doesn't parse in detail yet than something safe to drop
+/// silently, so only specifically-confirmed noise is ever suppressed.
 fn should_print_other(value: &serde_json::Value, verbose: bool) -> bool {
     if verbose {
         return true;
     }
     match value.get("type").and_then(serde_json::Value::as_str) {
+        // Claude Code's `system` events with `subtype: "init"` never reach
+        // here at all -- `parse_line` converts those to `AgentEvent::Init`
+        // before the generic `Other` fallback. Every `system` event that
+        // *does* land here is therefore, by construction, some other
+        // subtype -- `thinking_tokens` (issue #102), `task_started`/
+        // `task_notification` (background bash tasks), and presumably
+        // more not yet observed. None of the other three adapters use
+        // `"type":"system"` for anything, so this is safe across all of
+        // them, not just Claude Code.
+        Some("system") => false,
+        // Same reasoning for `assistant`: a real text or tool-call block
+        // is already surfaced as `AssistantText`/`ToolUse` before ever
+        // reaching `Other` (see `parse_assistant`). The only way an
+        // `assistant`-typed value lands here is a thinking-only turn
+        // (extended thinking, no text/tool_use block yet) -- confirmed
+        // empty `thinking` content in every capture so far (redacted by
+        // the API), just a large opaque `signature` blob (issue #102).
+        // No other adapter uses a bare `"type":"assistant"` discriminator.
+        Some("assistant") => false,
         Some(t) => !SUPPRESSED_OTHER_EVENT_TYPES.contains(&t),
         None => true,
     }
@@ -1323,9 +1343,32 @@ mod tests {
         assert!(!should_print_other(&value, false));
     }
 
+    /// Regression test for issue #102: `system` events with a subtype
+    /// other than `init` (which never reaches `should_print_other` at
+    /// all -- it's consumed into `AgentEvent::Init` first), and
+    /// thinking-only `assistant` turns, both leak through as raw `[other]`
+    /// noise unless suppressed here.
+    #[test]
+    fn should_print_other_suppresses_non_init_system_events_and_thinking_only_assistant_turns() {
+        let value = serde_json::json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 50});
+        assert!(!should_print_other(&value, false));
+
+        let value = serde_json::json!({"type": "system", "subtype": "task_started"});
+        assert!(!should_print_other(&value, false));
+
+        let value = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": ""}]}});
+        assert!(!should_print_other(&value, false));
+    }
+
     #[test]
     fn should_print_other_shows_known_noisy_types_when_verbose() {
         let value = serde_json::json!({"type": "session.background_tasks_changed", "data": {}});
+        assert!(should_print_other(&value, true));
+
+        let value = serde_json::json!({"type": "system", "subtype": "thinking_tokens"});
+        assert!(should_print_other(&value, true));
+
+        let value = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": ""}]}});
         assert!(should_print_other(&value, true));
     }
 

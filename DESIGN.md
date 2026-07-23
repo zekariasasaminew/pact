@@ -1350,6 +1350,25 @@ the SDK echoing a tool result back to itself, already covered by the
 finding (4 lines in one small 2-agent run), but the same category of
 confirmed, not-agent-output noise, added to the same list.
 
+The 2026-07-23 Claude Code stress-testing campaign found two more
+(issue #102), and this time a plain string in
+`SUPPRESSED_OTHER_EVENT_TYPES` wasn't the right shape for the fix:
+`system` events with a `subtype` other than `init` (`thinking_tokens`,
+`task_started`/`task_notification` from background bash tasks, and
+presumably more not yet observed), and `assistant` turns with only a
+`thinking` content block (extended thinking, `thinking` empty/redacted
+by the API in every capture so far, just a large opaque `signature`
+blob). Both are structurally guaranteed to reach `should_print_other`
+*only* via their respective noise case -- Claude Code's real `system`/
+`init` and real `assistant` text/tool-use events are already consumed
+into `AgentEvent::Init`/`AssistantText`/`ToolUse` before the generic
+`Other` fallback ever runs, so a blanket `Some("system") => false` /
+`Some("assistant") => false` in `should_print_other` is safe, not an
+overly broad suppression -- confirmed no other adapter uses either bare
+string as a type discriminator at all. Re-verified against a real spawn
+after the fix: zero `[other]` lines in an otherwise simple task's
+default output.
+
 ### Workspace commit lifecycle (issue #35)
 
 Neither `spawn` nor `spawn-many` commits anything -- an agent's changes
