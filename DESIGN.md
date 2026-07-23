@@ -463,6 +463,49 @@ task, the exact files it's being asked to edit (and nothing else), and an
 explicit instruction not to run `git` itself -- pact stages and verifies
 the result afterward, not the agent.
 
+### Arbiter diagnosability (issue #106)
+
+Every early-return path in `run_arbiter_inner` used to delete
+`.pact-arbiter.jsonl` unconditionally, win or lose -- a real Arbiter
+failure left nothing to inspect afterward, not even a raw log. Fixed by
+writing the log to the same stable `state_dir/logs/` location a normal
+workspace's own log uses (`arbiter-<identifier>.jsonl`), not inside
+`worktree_path` -- the throwaway integration/resolve worktree, which
+`merge_all`/`resolve_conflict` tear down unconditionally once they
+finish, so a log that merely survived Arbiter's own return paths would
+still have been destroyed moments later by the *caller's* cleanup.
+Deleted only on a genuinely accepted resolution; every failure path
+leaves it in place, with the warning log line naming exactly where.
+
+### Arbiter's real-world resolution rate is 0/6 so far (issue #106, ongoing)
+
+With diagnosability restored, six real Arbiter attempts were run against
+the same class of conflict (two workspaces each inserting one line/
+function at the same point in a small file) -- Sonnet and Haiku, default
+safety, `acceptEdits`, and `bypassPermissions`. **All six ended the same
+way**: Arbiter's own sub-agent describes the correct resolution in
+plain text, then says it needs permission to actually apply it, even
+under `bypassPermissions` (the strongest override, meant to skip every
+confirmation). This rules out pact's own `--safety`/`--allowedTools`
+plumbing as the cause -- there's no stronger override left to try.
+
+**Working theory:** Claude Code has a built-in guardrail around editing
+a file that contains live git conflict markers (`<<<<<<<`/`=======`/
+`>>>>>>>`), independent of any permission flag pact can set -- not
+something exposed as a configurable CLI option, as far as this
+investigation found. If true, Arbiter's current design -- point a fresh
+session at a worktree with real conflict markers and ask it to resolve
+them via `Edit` -- may be structurally incompatible with current Claude
+Code, not a prompt-wording or permission-configuration problem.
+
+**A different approach, not implemented, pending a design decision:**
+give Arbiter the three-way content (base/ours/theirs) as plain input and
+have it produce a fresh resolved version via `Write` (a new file, not an
+edit to conflict-marker text pact then applies itself) instead of asking
+it to `Edit` the conflicted file in place -- this would avoid whatever
+specifically triggers on raw conflict markers being present in an
+`Edit`'s target, if that's really the mechanism.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
