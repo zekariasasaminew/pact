@@ -958,6 +958,15 @@ Known limitations for exactly what that tradeoff means.
   terminal-session capture. A real recording on a Mac/Linux machine (or
   with a different tool) would be a strict improvement, not a
   correctness fix.
+- **A task phrased as "wait for X, then do Y" can end its turn before Y
+  happens.** Confirmed by hand: given exactly that phrasing, Claude Code
+  ran the wait as an async background task and ended its own turn
+  without actually waiting for it -- `pact` correctly reports `done`
+  using the agent's own honest (but incomplete) final message, since
+  that's genuinely what happened, but `Y` never occurred. Prefer
+  phrasing that asks for a synchronous action and explicit confirmation
+  ("run X and confirm it finished, then do Y") over "wait for X" in a
+  headless task prompt.
 
 ## Usage
 

@@ -720,6 +720,23 @@ practice Claude Code emits one block per line in stream-json mode.
 Anything genuinely mixed falls back to `Other` with the full message
 preserved.
 
+**A "wait for X, then Y" task can end its turn before Y happens (issue
+#107).** Found incidentally during the 2026-07-23 stress-testing
+campaign, while testing process-kill behavior: given a task phrased
+exactly that way, Claude Code ran the wait as an async background bash
+task and ended its own turn without ever actually waiting for it or
+doing `Y` -- its final message honestly described the *plan* ("I'll be
+notified when it finishes, and then I'll create done.txt"), not a
+completed action. `pact` correctly reported this as `done`, matching the
+same established principle as A5/A8 in the campaign's own findings (pact
+reports the agent's own completion, not whether the user's goal was
+satisfied) -- but there's no continuation mechanism in headless mode, so
+`Y` never happens once the process exits. Not a pact bug -- a real,
+non-obvious trap in how a headless agent can interact with "wait for X"
+phrasing when its own CLI has an async-task capability. Documented as a
+task-writing caveat (README's Known limitations), not fixed in code,
+since there's no code-level lever to pull here.
+
 ### Codex adapter
 
 `CodexAdapter` is live-verified against a real installed `codex`
