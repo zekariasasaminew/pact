@@ -73,7 +73,7 @@ fn resolve_conflict_succeeds_once_the_workspace_branch_no_longer_conflicts() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
     assert_eq!(report.merged.len(), 1, "expected exactly one of A/B to merge cleanly");
     assert_eq!(report.conflicted.len(), 1, "expected exactly one real conflict");
 
@@ -127,7 +127,7 @@ fn resolve_conflict_reports_still_conflicted_when_nothing_changed() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
     let conflict = &report.conflicted[0];
 
     let outcome = manager.resolve_conflict(&conflict.target_branch, &conflict.id, &[], None).unwrap();
