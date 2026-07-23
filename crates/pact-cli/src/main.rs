@@ -356,7 +356,14 @@ fn main() -> Result<()> {
     };
 
     if let Command::McpServe { agent_id, workspace } = cli.command {
-        let runtime = tokio::runtime::Runtime::new()?;
+        // A current-thread runtime, not the default multi-threaded one --
+        // see DESIGN.md ("pact-coord > mcp-serve startup latency", issue
+        // #105) for why this matters specifically under concurrent
+        // spawn-many: one stdio MCP server serving one client has no use
+        // for a worker thread pool, and spinning one up anyway multiplies
+        // real OS thread/CPU contention exactly when N of these subprocesses
+        // start at once.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         return runtime.block_on(pact_coord::serve(&repo_root, agent_id, workspace));
     }
 
