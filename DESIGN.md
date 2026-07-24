@@ -1368,6 +1368,27 @@ internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
 lines interleave at line granularity, never mid-line.
 
+### Error messages suggest the next command (issue #123)
+
+From an outside adoption/UX review: `git` suggests the closest command on
+a typo, `cargo` links to docs on error, `gh` prompts login when
+unauthenticated -- pact's own failure paths didn't chain back to itself.
+Added a `-- try: pact doctor` (or `pact init`/`pact demo`, whichever fits)
+suffix to the handful of error messages where the next useful command is
+unambiguous from the failure itself: every "unknown agent" error
+(`spawn`/`spawn-many`/Arbiter's `--arbiter-agent`), `spawn-many`'s
+"no --agent and no prefix" error, and `find_repo_root`'s "no git
+repository found" error.
+
+Deliberately narrow -- only added a hint where there's a single, obvious
+next step, not to every error path in the CLI. `pact init`'s own
+"pact.toml already exists" error already had this pattern (`pass --force`)
+before this issue; the ones added here follow that same shape.
+
+While manually verifying this, incidentally found and filed issue #136
+(`find_repo_root` can silently walk into an unrelated ancestor git repo) --
+real, but a distinct concern from this issue's scope, not fixed here.
+
 ### `pact.toml` / `pact init` (issue #118)
 
 pact was 100% CLI-flag driven until this -- no persisted config file at
