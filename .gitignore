@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# TypeScript (bindings/ts)
+# TypeScript (bindings/ts, editors/vscode)
 node_modules/
 dist/
+*.vsix

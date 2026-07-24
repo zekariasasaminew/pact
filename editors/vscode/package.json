@@ -1,0 +1,58 @@
+{
+  "name": "pact-history",
+  "displayName": "pact: Operation History",
+  "description": "Visualize pact's operation log (claims, releases, messages, merges, teardowns) as a timeline in a webview.",
+  "version": "0.1.0",
+  "publisher": "zekariasasaminew",
+  "license": "MIT",
+  "homepage": "https://github.com/zekariasasaminew/pact",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zekariasasaminew/pact.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:pact.showHistory"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pact.showHistory",
+        "title": "pact: Show Operation History",
+        "category": "pact"
+      }
+    ],
+    "configuration": {
+      "title": "pact",
+      "properties": {
+        "pact.binaryPath": {
+          "type": "string",
+          "default": "pact",
+          "description": "Path to the pact binary. Defaults to \"pact\" (resolved from PATH)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/vscode": "^1.125.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/zekariasasaminew/pact/issues"
+  }
+}
