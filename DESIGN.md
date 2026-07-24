@@ -1389,6 +1389,45 @@ While manually verifying this, incidentally found and filed issue #136
 (`find_repo_root` can silently walk into an unrelated ancestor git repo) --
 real, but a distinct concern from this issue's scope, not fixed here.
 
+### winget manifest (issue #126)
+
+Unlike Homebrew, winget has no "personal tap" equivalent -- the only
+distribution path is a manifest submitted as a PR to the single, official,
+Microsoft-owned `microsoft/winget-pkgs` repo. Submitted directly (user's
+explicit authorization), not held for review first: PR
+[microsoft/winget-pkgs#407420](https://github.com/microsoft/winget-pkgs/pull/407420).
+
+Package identifier `zekariasasaminew.pact`, manifest schema 1.12.0 (the
+version several real, recently-merged manifests in that repo are
+currently on -- checked directly rather than assuming an older schema
+version was still current). `InstallerType: zip` +
+`NestedInstallerType: portable` matches how pact's own release workflow
+actually packages the Windows binary (a bare `pact.exe` inside a `.zip`,
+no real installer) -- modeled closely on `ajeetdsouza/zoxide`'s manifest,
+a real merged package with the same zip+portable-exe distribution shape,
+rather than guessing the schema from documentation alone.
+
+**Not live-verified with a real `winget validate`/`winget install`** -- no
+Windows Package Manager client available to run either command in this
+environment. Verified instead by: validating the YAML parses cleanly
+with Python's `yaml.safe_load`, and comparing field-by-field against
+`ajeetdsouza.zoxide`'s real manifest (fetched directly from
+`microsoft/winget-pkgs` via the GitHub API, not from memory/assumption).
+Disclosed honestly in the PR's own checklist rather than checking boxes
+that weren't actually done.
+
+**The CLA check is the one step genuinely outside this session's
+control** -- `microsoft/winget-pkgs` requires a signed Contributor
+License Agreement before a PR can be reviewed/merged, and that's a legal
+agreement only the account owner can sign (via the CLA bot's own comment
+on the PR), not something completable on the user's behalf.
+
+Same manual-per-release-bump caveat as the Homebrew tap: this manifest is
+pinned to v0.3.0 and needs a new PR (or an update to this one) for every
+future release -- an automated bump (winget has its own "WinGet Releaser"
+GitHub Action several other projects use, visible in `ajeetdsouza/zoxide`'s
+own manifest commit messages) is a reasonable follow-up, not built here.
+
 ### Homebrew tap (issue #125)
 
 From an outside adoption/UX review: package-manager distribution turns a

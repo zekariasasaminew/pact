@@ -965,6 +965,13 @@ pipeline and what it still doesn't capture.
   install available in this environment, and the formula's syntax was
   checked by hand rather than with a real Ruby parse (no Ruby available
   here either). See "Homebrew tap" under Design decisions.
+- **The winget manifest ([microsoft/winget-pkgs#407420](https://github.com/microsoft/winget-pkgs/pull/407420),
+  under review) is built, not live-verified with a real `winget validate`/
+  `winget install`** -- no Windows Package Manager client available in
+  this environment. Verified instead against a real, recently-merged
+  manifest with the same distribution shape. The PR's own CLA check needs
+  the repo owner's signature, which is outside what this session can
+  complete. See "winget manifest" under Design decisions.
 - **Demo GIF re-recording (issue #124).** `asciinema`'s own recorder can't
   run on native Windows Python at all -- it unconditionally imports the
   Unix-only `fcntl` module and fails before doing anything else, a hard
