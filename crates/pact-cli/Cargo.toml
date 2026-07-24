@@ -13,6 +13,7 @@ pact-core.workspace = true
 pact-agents.workspace = true
 pact-coord.workspace = true
 pact-deps.workspace = true
+pact-vcs.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
@@ -22,7 +23,6 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-pact-vcs.workspace = true
-uuid.workspace = true

@@ -1,5 +1,11 @@
 # Getting started
 
+Want to see it work before doing anything else? `pact demo` runs a real,
+disposable end-to-end walkthrough (isolated worktrees, a real merge,
+cleaned up automatically) in about 5 seconds, no install decisions, no
+agent CLI or API cost. Everything below is the real thing, in your own
+repo.
+
 From install to watching two agents work in parallel on the same repo, in
 under 5 minutes. Every command below is real -- copy-pasteable against a
 scratch repo, not illustrative pseudocode.
