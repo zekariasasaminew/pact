@@ -1389,6 +1389,45 @@ While manually verifying this, incidentally found and filed issue #136
 (`find_repo_root` can silently walk into an unrelated ancestor git repo) --
 real, but a distinct concern from this issue's scope, not fixed here.
 
+### Homebrew tap (issue #125)
+
+From an outside adoption/UX review: package-manager distribution turns a
+5-step manual download into a 1-command install. Published as a
+**personal tap** (`zekariasasaminew/homebrew-pact`, a separate repo, not
+this one) rather than submitting to homebrew-core -- core has real
+notability requirements and a review process; a personal tap needs
+neither and is fully within this project's own control to publish and
+update.
+
+The formula (`Formula/pact.rb` in that repo) pins a specific tagged
+release (`v0.3.0` at time of writing) with per-platform `url`/`sha256`
+pairs -- the `sha256` values came directly from `gh release view
+v0.3.0 --json assets --jq '.assets[].digest'`, GitHub's own
+server-computed digest of each uploaded asset, not a locally-recomputed
+hash, since that's the authoritative value and avoids a transcription
+error in a hash that would otherwise just fail installs silently for
+real users. No Linux `aarch64` asset exists yet (matches
+`release.yml`'s current build matrix), so the formula only covers
+`x86_64` Linux plus both macOS architectures and doesn't claim more
+platform support than pact's own releases actually build for.
+
+**Not live-verified against a real `brew install`** -- this development
+environment has no macOS/Linux Homebrew install available. Ruby itself
+also isn't installed here (no admin rights to add it via Chocolatey in
+this sandbox), so the formula's syntax was verified only by hand (brace/
+`do`/`end` balance) against the extremely standard, mechanical shape
+every Homebrew formula follows -- not by an actual `ruby -c` parse or
+`brew audit`/`brew install --build-from-source`. Worth a real
+verification pass on real Mac/Linux hardware before treating this as
+fully confirmed working, same "implemented, not live-verified" posture
+this project already applies elsewhere (Gemini adapter, Arbiter's live
+path) when a real dependency isn't available in this environment.
+
+Per-release maintenance is a manual step for now (bump `version`/`url`/
+`sha256` in the tap repo after cutting a new pact release) -- an
+automated bump (e.g. a workflow in the tap repo triggered by pact's own
+`release.yml`) is a reasonable follow-up, not built as part of this pass.
+
 ### Demo GIF re-recording (issue #124)
 
 From an outside adoption/UX review: a real terminal recording near the
