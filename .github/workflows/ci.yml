@@ -52,3 +52,36 @@ jobs:
 
       - name: Run real end-to-end tests
         run: python -m pytest bindings/python/tests -v
+
+  ts-binding-tests:
+    name: pact-coord TS binding (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build pact-cli
+        run: cargo build --release -p pact-cli --verbose
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: bindings/ts
+        run: npm ci
+
+      - name: Build
+        working-directory: bindings/ts
+        run: npm run build
+
+      - name: Run real end-to-end tests
+        working-directory: bindings/ts
+        run: npm test
