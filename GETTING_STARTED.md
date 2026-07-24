@@ -167,5 +167,8 @@ setup needed. None of that required any configuration -- it's what
 - The main [README](README.md) has the full command reference, every
   design decision (and why), and what's been verified against real
   installed agent CLIs vs. what hasn't.
+- [`examples/tasks/`](examples/tasks/) has copy-editable task-text patterns
+  for the shapes that come up most: adding N similar routes, refactoring N
+  similar files, migrating N call sites off a deprecated API.
 - [CONTRIBUTING.md](CONTRIBUTING.md) if you want to add an adapter for
   another agent CLI or a package-manager detector.
