@@ -1308,6 +1308,45 @@ end-to-end for real, the same "real repo, no mocking" standard this
 project already holds git-interaction tests to, not stubbed out the way
 a real agent-CLI call would need to be.
 
+### VS Code extension v1 (issue #128)
+
+From an outside adoption/UX review: `pact history`'s operation log
+(issue #84) is genuinely novel among parallel-agent tools, but most CLI
+users won't appreciate it as text output the way they'd immediately grok
+it as a timeline in their editor. `editors/vscode/` is a minimal webview
+that shells out to `pact history --json` (reusing the exact flag already
+built for scripting, not a new pact-cli surface) and renders it -- one
+command (`pact.showHistory`), one webview panel, a `pact.binaryPath`
+setting for when `pact` isn't on `PATH`. Not published to the
+Marketplace -- v1 scope per the issue itself.
+
+**Split for testability, not just tidiness:** `render.ts` (HTML
+generation -- `escapeHtml`/`formatTimestamp`/`renderHtml`) has zero
+dependency on the `vscode` module; `extension.ts` is the thin glue
+(command registration, `execFile`, webview lifecycle) that does. This
+means the actual rendering logic has real unit tests
+(`tests/render.test.ts`) that run with plain `vitest`, no VS Code
+Extension Host required -- including a real captured `pact history
+--json` payload (two agents claiming/releasing/messaging via the
+pact-coord Python binding against a real throwaway repo) as fixture
+data, not fabricated JSON, plus an explicit HTML-injection test (a
+message body containing `</pre><script>...` must not survive
+`escapeHtml` unescaped).
+
+**What's verified vs. not, honestly:** TypeScript compiles clean against
+real `@types/vscode`; the real `pact history --json` shape this code
+depends on was captured from an actual run and matches what `render.ts`'s
+tests assert against; the extension activates in a real Extension
+Development Host (`code --extensionDevelopmentPath=...`) without an
+immediate crash. **Not verified:** actually seeing the rendered webview
+render correctly in a live VS Code window -- this environment can drive
+a VS Code process but has no way to inspect a GUI window's visual output,
+so the "does it look right" question is unconfirmed here, same
+"implemented, not fully live-verified" honesty this project already
+applies to the Gemini adapter, the Homebrew tap, and the winget
+manifest. Worth a real look on a machine with an actual display before
+calling this fully done.
+
 ## pact-deps — dependency materialization
 
 Detects a workspace's package manager(s) and makes sure dependencies are
