@@ -54,6 +54,42 @@ from a comparable point in history, so any file both of them touched is
 worth surfacing, without needing semantic/AST-level analysis -- file-path
 overlap is the same restriction the MCP lease layer already accepts.
 
+### Workspace id: task-derived slug + random suffix (issue #122)
+
+`workspace_id` (was a bare `short_id()`, an 8-char random hex string with
+no relationship to the task) now derives a readable slug from the task
+text and always appends a `short_id()` suffix: `add-pagination-to-users-a1b2c3d4`.
+Made `pact list`/branch names (`pact/<id>`) meaningfully more scannable
+with real tasks, per an outside adoption/UX review that called the fully
+opaque id out as unnecessary friction.
+
+The random suffix is not decoration -- it's the actual collision-avoidance
+guarantee, unchanged from before this issue. `slugify` alone is not unique
+(two workspaces from identical or similarly-worded task text would slugify
+to the same string), so `workspace_id` always appends it regardless of
+whether the slug is empty, short, or long.
+
+`slugify` is deliberately conservative:
+- ASCII-alphanumeric only, lowercased, everything else collapsed to a
+  single `-` (no runs of hyphens, no leading/trailing one).
+- Capped at `MAX_SLUG_LEN` (32) -- this id becomes part of every path under
+  the workspace (`state_dir/workspaces/<id>/...`), and Windows' MAX_PATH
+  has already bitten this codebase once (the npm content store fallback);
+  an unbounded slug from a long task description would make that worse,
+  not better.
+- Non-ASCII task text (most non-Latin scripts) slugifies to an empty
+  string -- `workspace_id` falls back to the bare random suffix in that
+  case, identical to every workspace's id before this issue existed. Not
+  attempting transliteration (e.g. via `unidecode`) was a deliberate scope
+  cut, not an oversight -- worth reconsidering only if real non-ASCII usage
+  shows up.
+
+`preview_workspace_location` (used by both `create_workspace` and
+`spawn_preview`/`--dry-run`) takes `task: &str` now instead of nothing, so
+`--dry-run`'s preview uses the exact same id a real spawn would generate --
+confirmed by construction, not just by convention, since both call the
+same function.
+
 ### Workspace teardown
 
 `remove_workspace` deletes a workspace's worktree and, unless
