@@ -1389,6 +1389,60 @@ While manually verifying this, incidentally found and filed issue #136
 (`find_repo_root` can silently walk into an unrelated ancestor git repo) --
 real, but a distinct concern from this issue's scope, not fixed here.
 
+### Demo GIF re-recording (issue #124)
+
+From an outside adoption/UX review: a real terminal recording near the
+top of the README is the single artifact most likely to convert a reader
+into a stargazer, and the existing `docs/demo.gif` (Phase 11) was known
+stale -- predates the noise-suppression fixes, and was itself a Pillow
+hand-render (real captured content, drawn frame-by-frame with a custom
+script) rather than a genuine terminal-session recording, because the one
+recording tool tried at the time (`terminalizer`) failed outright on this
+Windows/Git-Bash setup.
+
+Re-investigated the tooling gap directly rather than assuming it's still
+unfixable:
+- **`pip install asciinema` installs cleanly, but the CLI cannot even
+  start on native Windows Python** -- `asciinema/recorder.py` does a
+  top-level `import fcntl` (a Unix-only module) with no platform guard,
+  so every invocation fails at import time before reaching any actual
+  recording logic. Confirmed directly, not assumed from documentation --
+  this is a hard blocker specific to native Windows, not something a flag
+  or workaround fixes.
+- **`agg`** (https://github.com/asciinema/agg, `cargo install --git`;
+  not the unrelated crates.io package of the same name) **works fine
+  standalone.** It only consumes an existing `.cast` (asciicast v2) file
+  and renders it to GIF -- no pty involved at all, so the Windows-only
+  blocker above doesn't apply to it.
+
+This means the actual gap was narrower than "no recording tooling at
+all": specifically, asciinema's own *recorder* is what's Windows-broken,
+not the whole pipeline. `docs/record_cast.py` closes that gap by
+constructing the `.cast` file directly from a real `pact demo` subprocess
+run (real stdout content, real per-line wall-clock timestamps) instead of
+going through asciinema's recorder -- `agg` doesn't care how the `.cast`
+was produced, only that it's valid.
+
+Content choice: `pact demo`'s own output (issue #119), not a hand-scripted
+multi-agent session. This is a strict improvement over the original
+GIF's approach for a docs asset specifically: `pact demo` is free,
+deterministic, and exercises real `pact` code (`WorkspaceManager`,
+`merge_all`) end-to-end, so the GIF can never go stale relative to a real
+spawn/merge in the way a baked-in real-agent-output transcript could --
+regenerating it after a future change is just re-running the script,
+not manually re-transcribing a new session. The `render_demo.py` Pillow
+script (Phase 11) is deleted, fully superseded.
+
+One deliberate liberty: `pact demo` finishes in about 1.5 real seconds,
+so genuine gaps between lines are mostly single-digit milliseconds -- too
+fast to be watchable. `record_cast.py` applies a minimum per-line hold
+(`MIN_HOLD_SECONDS`) that only *raises* an unreadably-short real gap,
+never shortens a real one -- the two real `git worktree add` calls (the
+two workspace-creation lines) still show as genuinely longer pauses than
+the rest, since their real gap already exceeds the floor. Disclosed
+explicitly in the README's Known limitations, same as the previous
+version's own tradeoff was.
+
 ### `pact.toml` / `pact init` (issue #118)
 
 pact was 100% CLI-flag driven until this -- no persisted config file at

@@ -16,7 +16,9 @@ claimed. Worktree isolation and merge-all's conflict handling are the
 parts that are real guarantees; coordination is a convention agents
 opt into.
 
-![Two Claude Code agents running in parallel via pact spawn-many, hitting a real teardown safety check](docs/demo.gif)
+![pact demo: two isolated workspaces created, listed, and merged onto one clean branch, zero decisions](docs/demo.gif)
+
+*(That's `pact demo`'s actual, real output -- zero-cost, zero-agent-CLI-call, run it yourself in 5 seconds. See Getting started below for the real thing, with real agents.)*
 
 **[Getting started guide](GETTING_STARTED.md)** -- install to watching two
 agents work in parallel, in under 5 minutes, every command verified
@@ -897,13 +899,13 @@ nonexistent, for the test) alternative server as failed rather than
 silently accepting it.
 
 Phase 11 shipped `GETTING_STARTED.md` (every command in it re-run and
-confirmed against a real scratch repo before being written down) and
-`docs/demo.gif`. The GIF is rendered from real captured `spawn-many`
-output via a small Pillow script (`docs/render_demo.py`) rather than a
-live terminal-session recording -- the only recording tool available in
-this environment failed outright, and its separate render step produced
-a reproducible content-duplication bug on hand-assembled input. See
-Known limitations for exactly what that tradeoff means.
+confirmed against a real scratch repo before being written down) and the
+original `docs/demo.gif` -- rendered at the time from real captured
+`spawn-many` output via a small Pillow script, since `asciinema` couldn't
+run at all in this environment. Re-recorded later (issue #124) once `agg`
+(asciinema's own GIF renderer) turned out to work fine standalone --
+see "demo GIF re-recording" under Known limitations for the current
+pipeline and what it still doesn't capture.
 
 ## Known limitations
 - **The Unix whole-group kill path has automated CI coverage on real
@@ -951,17 +953,21 @@ Known limitations for exactly what that tradeoff means.
   API key or Google Cloud auth is configured in this environment. See
   "Gemini CLI adapter" under Design decisions for exactly what was and
   wasn't confirmed. Issue #9 stays open until this changes.
-- **The demo GIF (`docs/demo.gif`) is rendered from real captured
-  `pact spawn-many` output, not a live terminal recording.** The only
-  terminal-recording tool available in this environment (`terminalizer`)
-  failed outright on this Windows/Git-Bash setup, and its separate
-  `render` step produced a reproducible content-duplication bug on hand
-  -assembled input. Rendered instead with a small Pillow script
-  (`docs/render_demo.py`) drawing the same real, previously-captured
-  output frame by frame -- accurate to an actual run, just not a literal
-  terminal-session capture. A real recording on a Mac/Linux machine (or
-  with a different tool) would be a strict improvement, not a
-  correctness fix.
+- **Demo GIF re-recording (issue #124).** `asciinema`'s own recorder can't
+  run on native Windows Python at all -- it unconditionally imports the
+  Unix-only `fcntl` module and fails before doing anything else, a hard
+  blocker, not a soft one. `agg` (asciinema's separate GIF renderer)
+  works fine standalone, though: it only turns an existing `.cast` file
+  into a GIF, no pty required. `docs/record_cast.py` captures `pact
+  demo`'s real, live stdout -- real content, real relative ordering, real
+  git-worktree-driven pauses -- directly into a `.cast` file, bypassing
+  asciinema's recorder entirely, then `agg` renders it. The one liberty
+  taken: real gaps between lines are mostly a few milliseconds (`pact
+  demo` finishes in about 1.5 seconds), so a minimum per-line hold is
+  applied to make it watchable -- raising unreadably-short real gaps,
+  never shortening a real one. A real recording on a Mac/Linux machine
+  would still be a strict improvement (no synthetic hold floor needed at
+  all), not a correctness fix.
 - **A task phrased as "wait for X, then do Y" can end its turn before Y
   happens.** Confirmed by hand: given exactly that phrasing, Claude Code
   ran the wait as an async background task and ended its own turn
