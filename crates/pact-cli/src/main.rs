@@ -7,6 +7,7 @@ use pact_agents::{AgentEvent, AgentKind};
 use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, PredictedOverlap, SpawnManyTask};
 
 mod config;
+mod demo;
 use config::PactConfig;
 
 #[derive(Parser)]
@@ -39,6 +40,13 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// A zero-decision, zero-cost walkthrough of the core loop: creates a
+    /// disposable temp repo, runs two simulated agents on independent
+    /// files, merges them, then deletes the temp repo. No real agent CLI
+    /// or API call is made -- that's the one step this fakes, since it's
+    /// the one that costs money and needs a real installed/authenticated
+    /// agent. Works from anywhere, doesn't need to be run inside a git repo.
+    Demo,
     /// Create a new isolated agent workspace and run an agent CLI in it.
     /// The agent's changes land in the workspace's working tree, not a
     /// commit -- `list` will show it as `[dirty]` when the agent is done,
@@ -371,6 +379,10 @@ fn main() -> Result<()> {
 
     if let Command::Doctor = cli.command {
         return run_doctor();
+    }
+
+    if let Command::Demo = cli.command {
+        return demo::run();
     }
 
     let repo_root = match cli.repo {
@@ -761,6 +773,7 @@ fn main() -> Result<()> {
         Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Doctor => unreachable!("handled above, before the orchestrator opens"),
         Command::Init { .. } => unreachable!("handled above, before the orchestrator opens"),
+        Command::Demo => unreachable!("handled above, before the orchestrator opens"),
     }
 
     Ok(())
