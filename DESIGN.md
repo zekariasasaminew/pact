@@ -1370,6 +1370,38 @@ guessing between multiple installed CLIs would be worse than asking.
 with an example) -- there's no reasonable per-machine guess for a safety
 override the way there is for "which agent CLI is installed."
 
+### `pact demo` (issue #119)
+
+Deliberately fakes exactly one step: the agent CLI call itself. Everything
+else -- the temp repo, the two `WorkspaceManager::create_workspace` calls
+(via `pact-vcs` directly, not through `Orchestrator::spawn`, since spawning
+means launching a real adapter/agent subprocess), the real `merge_all` --
+is real pact code on a real, disposable repo.
+
+The reasoning for faking only that one step: `pact demo` needs to work for
+a brand-new user who hasn't installed or authenticated any agent CLI yet,
+on any machine, with zero cost and zero chance of hanging on an auth
+prompt. A real agent call fails all three of those. Each demo "workspace"
+instead gets a canned, deterministic file write standing in for what an
+agent would have done -- clearly labeled as simulated in the command's own
+output, never presented as a real agent run.
+
+Runs from anywhere, not just inside a git repo -- handled the same way as
+`doctor`/`completions`/`init`, before `repo_root` resolution, since `pact
+demo` creates and owns its own throwaway repo entirely under
+`std::env::temp_dir()` and has no use for `--repo` at all.
+
+Cleanup (`remove_dir_all` on the whole temp repo) happens after the run
+regardless of success or failure (via a captured `Result` in `demo::run`,
+not a `?` that would skip cleanup on an error). Integration test
+`demo_leaves_no_leftover_temp_directory` checks only the exact path this
+invocation's own output names -- an earlier version swept
+`std::env::temp_dir()` for any `pact-demo-*` entry before/after, which is a
+real, reproducible false failure whenever this test happens to run
+concurrently with `demo_succeeds_from_outside_any_git_repo` in the same
+test binary (cargo parallelizes tests within one binary by default), since
+the sibling test's own still-running `pact demo` shows up in the sweep.
+
 ### `--agent`/prefix precedence in `spawn-many` (issue #37)
 
 `spawn` took a top-level `--agent`; `spawn-many` required every `--task`
