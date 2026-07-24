@@ -47,6 +47,10 @@ git add README.md && git commit -m "init"
 Any real git repo works too -- a scratch repo just means nothing you care
 about is at risk while you're trying this out.
 
+Optional: `pact init` detects which agent CLI you have installed and writes
+a `pact.toml` so you don't need `--agent`/`--safety` on every command below.
+Skip it and every command still works -- it's purely a convenience.
+
 ## 3. Run one agent (1-2 minutes)
 
 ```sh
