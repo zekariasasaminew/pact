@@ -12,6 +12,7 @@ pact is a Rust CLI that orchestrates multiple AI coding agent CLIs (Claude Code,
 - **Keep the branch current with `main` before pushing.** `main` is protected (PR required, all 3 CI matrix checks required, no force-push/direct-push/deletion) — rebase/merge `main` into your branch first.
 - **No Co-authored-by trailers.** Never add `Co-authored-by: Copilot`/`Co-Authored-By: Claude` or any AI attribution to commits.
 - **Conventional, specific commit messages.** Imperative mood, states *why* when not obvious from the diff.
+- **Backlog work goes issue → branch → PR → CI → merge, one issue per PR.** File a GitHub issue per distinct finding/feature before coding it, even when several are decided in the same conversation — don't bundle unrelated concerns into one PR. Standing default for this project, not a one-off instruction.
 
 ## Architecture
 

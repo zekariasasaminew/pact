@@ -22,6 +22,7 @@ Workspace layout (`crates/`):
 - **Keep your branch current with `main` before pushing.** `main` is protected (no direct pushes, no force-push, no deletion, PR + all 3 CI matrix checks required) — rebase or merge `main` into your branch first so the PR doesn't go stale.
 - **No AI attribution trailers** — never `Co-Authored-By: Claude`/`Co-authored-by: Copilot` unless explicitly asked.
 - **Meaningful commit messages** — imperative, specific, states *why* when not obvious from the diff alone.
+- **Backlog work goes issue → branch → PR → CI → merge, one issue per PR.** File a GitHub issue for each distinct finding/feature before writing code for it (even when several are decided in the same conversation) — don't bundle unrelated concerns into one PR just because they were discussed together. This is the standing pattern for every shakedown/review/adoption-notes pass this project has gone through; keep following it by default, not just when told each time.
 
 ## Testing conventions in this repo
 
