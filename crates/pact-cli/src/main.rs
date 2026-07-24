@@ -424,7 +424,10 @@ fn main() -> Result<()> {
             let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
-                anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, codex, or gemini)")
+                anyhow::anyhow!(
+                    "unknown --agent '{agent}' (expected claude, copilot, codex, or gemini) -- \
+                     try: pact doctor"
+                )
             })?;
             let adapter = pact_agents::adapter(kind);
             let coord_override = coord_command.map(|command| CoordServerOverride {
@@ -481,7 +484,12 @@ fn main() -> Result<()> {
                 .map(|name| {
                     AgentKind::parse(name)
                         .map(|kind| (kind, name))
-                        .ok_or_else(|| anyhow::anyhow!("unknown --agent '{name}' (expected claude, copilot, codex, or gemini)"))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "unknown --agent '{name}' (expected claude, copilot, codex, or gemini) -- \
+                                 try: pact doctor"
+                            )
+                        })
                 })
                 .transpose()?;
             let specs = tasks
@@ -847,7 +855,10 @@ fn build_arbiter_config(
 ) -> Result<Option<pact_core::ArbiterConfig>> {
     let Some(test_cmd) = test_cmd else { return Ok(None) };
     let agent = AgentKind::parse(arbiter_agent).ok_or_else(|| {
-        anyhow::anyhow!("unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, or gemini)")
+        anyhow::anyhow!(
+            "unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, or gemini) -- \
+             try: pact doctor"
+        )
     })?;
     Ok(Some(pact_core::ArbiterConfig { agent, safety_override: arbiter_safety, test_cmd }))
 }
@@ -1005,7 +1016,8 @@ fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(Age
         }
         if default.is_none() {
             bail!(
-                "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, codex, or gemini)"
+                "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, codex, or gemini) -- \
+                 try: pact doctor"
             );
         }
     }
@@ -1013,7 +1025,8 @@ fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(Age
     let Some((kind, name)) = default else {
         bail!(
             "--task '{raw}' must be in the form <agent>:<task text>, e.g. claude:\"fix the bug\" \
-             (or pass --agent to set a default agent for tasks without a prefix)"
+             (or pass --agent to set a default agent for tasks without a prefix) -- \
+             try: pact doctor to see what's installed, or pact init to set a default in pact.toml"
         );
     };
     if raw.trim().is_empty() {
@@ -1378,7 +1391,8 @@ fn find_repo_root(start: &Path) -> Result<PathBuf> {
         }
         if !dir.pop() {
             bail!(
-                "no git repository found in '{}' or any parent directory; pass --repo explicitly",
+                "no git repository found in '{}' or any parent directory; pass --repo explicitly \
+                 -- or try: pact demo, which doesn't need a real repo",
                 start.display()
             );
         }
