@@ -22,6 +22,10 @@ opt into.
 agents work in parallel, in under 5 minutes, every command verified
 end-to-end.
 
+**Agent-facing:** this repo ships a [`SKILL.md`](SKILL.md) so Claude Code
+and other MCP-aware agents can learn pact's CLI grammar and coordination
+conventions on demand, without a human explaining it first.
+
 **Windows is a first-class target, not an afterthought.** Most tools in
 this space (parallel git-worktree agent orchestration) are built on tmux,
 which is POSIX-only and excludes Windows entirely. Pact ships a native
