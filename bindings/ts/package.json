@@ -1,0 +1,37 @@
+{
+  "name": "pact-coord",
+  "version": "0.1.0",
+  "description": "TypeScript client for pact-coord, pact's MCP-based file-lease/messaging coordination server",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "pact",
+    "mcp",
+    "coordination"
+  ],
+  "author": "",
+  "license": "MIT",
+  "homepage": "https://github.com/zekariasasaminew/pact",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
