@@ -243,15 +243,15 @@ impl WorkspaceManager {
     /// without touching git or disk -- lets a caller preview what a real
     /// spawn would create (see issue #16's `--dry-run`) using the exact
     /// same id-generation path `create_workspace` itself uses.
-    pub fn preview_workspace_location(&self) -> (String, String, PathBuf) {
-        let id = short_id();
+    pub fn preview_workspace_location(&self, task: &str) -> (String, String, PathBuf) {
+        let id = workspace_id(task);
         let branch = format!("pact/{id}");
         let path = self.state_dir.join("workspaces").join(&id);
         (id, branch, path)
     }
 
     pub fn create_workspace(&self, task: &str) -> Result<Workspace> {
-        let (id, branch, path) = self.preview_workspace_location();
+        let (id, branch, path) = self.preview_workspace_location(task);
 
         let base_commit = {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
@@ -1418,6 +1418,55 @@ fn short_id() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
+/// A readable slug derived from task text (e.g. "Add pagination to the
+/// users endpoint" -> "add-pagination-to-the-users-a1b2c3d4"), always
+/// suffixed with a `short_id()` -- issue #122: a pure random id made
+/// `pact list`/branch names (`pact/<id>`) opaque. The random suffix isn't
+/// just decoration: it's what keeps two workspaces whose task text
+/// slugifies to the same thing (including two genuinely identical task
+/// strings, or all-non-ASCII text that slugifies to nothing) from
+/// colliding under concurrent `spawn-many` -- same collision-avoidance
+/// guarantee the old pure-random id had, unchanged.
+const MAX_SLUG_LEN: usize = 32;
+
+fn workspace_id(task: &str) -> String {
+    let suffix = short_id();
+    match slugify(task) {
+        slug if slug.is_empty() => suffix,
+        slug => format!("{slug}-{suffix}"),
+    }
+}
+
+/// Lowercase, hyphenated, ASCII-alphanumeric-only, capped at
+/// `MAX_SLUG_LEN` -- deliberately conservative on length: this id becomes
+/// part of every file path under the workspace (`state_dir/workspaces/<id>/...`),
+/// and Windows' MAX_PATH has already bitten this codebase once (see
+/// DESIGN.md, the npm content store fallback). Non-ASCII task text (most
+/// non-Latin scripts) slugifies to an empty string -- `workspace_id`
+/// falls back to the random suffix alone in that case, exactly like the
+/// pre-#122 behavior for every workspace.
+fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_hyphen = true; // suppresses a leading hyphen
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_hyphen = false;
+        } else if !last_was_hyphen {
+            slug.push('-');
+            last_was_hyphen = true;
+        }
+        if slug.len() >= MAX_SLUG_LEN {
+            break;
+        }
+    }
+    slug.truncate(MAX_SLUG_LEN);
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
 /// First 12 chars of a commit sha for a human-readable report line --
 /// doesn't assume the input is exactly 40 chars (already-short input, e.g.
 /// from a test, is returned as-is).
@@ -1450,6 +1499,51 @@ mod tests {
             commit_message("ab12cd34", "  add chunk.ts utility  \n"),
             "agent ab12cd34: add chunk.ts utility"
         );
+    }
+
+    #[test]
+    fn slugify_lowercases_hyphenates_and_strips_punctuation() {
+        assert_eq!(slugify("Add pagination to users"), "add-pagination-to-users");
+        assert_eq!(slugify("Fix bug #42: null check!"), "fix-bug-42-null-check");
+    }
+
+    #[test]
+    fn slugify_collapses_runs_of_separators_and_trims_edges() {
+        assert_eq!(slugify("  --add   thing--  "), "add-thing");
+    }
+
+    #[test]
+    fn slugify_truncates_at_max_len_without_a_trailing_hyphen() {
+        let long_task = "word ".repeat(20);
+        let slug = slugify(&long_task);
+        assert!(slug.len() <= MAX_SLUG_LEN, "expected slug capped at {MAX_SLUG_LEN}, got {} chars: {slug}", slug.len());
+        assert!(!slug.ends_with('-'), "expected no trailing hyphen after truncation, got: {slug}");
+    }
+
+    #[test]
+    fn slugify_returns_empty_for_non_ascii_only_text() {
+        assert_eq!(slugify("日本語のタスク"), "");
+    }
+
+    #[test]
+    fn workspace_id_combines_slug_and_a_random_suffix() {
+        let id = workspace_id("Add pagination to the users endpoint");
+        assert!(id.starts_with("add-pagination-to-the-users-"), "got: {id}");
+        let suffix = id.rsplit('-').next().unwrap();
+        assert_eq!(suffix.len(), 8, "expected an 8-char random suffix, got: {suffix}");
+    }
+
+    #[test]
+    fn workspace_id_falls_back_to_suffix_only_for_non_ascii_task_text() {
+        let id = workspace_id("日本語のタスク");
+        assert_eq!(id.len(), 8, "expected the bare 8-char random suffix with no slug prefix, got: {id}");
+    }
+
+    #[test]
+    fn workspace_id_is_unique_for_identical_task_text() {
+        let a = workspace_id("do the same thing");
+        let b = workspace_id("do the same thing");
+        assert_ne!(a, b, "two workspaces with identical task text must still get distinct ids");
     }
 
     #[test]

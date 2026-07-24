@@ -309,7 +309,7 @@ impl Orchestrator {
         safety_override: Option<&str>,
         coord_override: Option<&CoordServerOverride>,
     ) -> Result<SpawnPreview> {
-        let (workspace_id, branch, path) = self.workspaces.preview_workspace_location();
+        let (workspace_id, branch, path) = self.workspaces.preview_workspace_location(task);
         let package_managers = pact_deps::detect(&self.repo_root);
         let adapter = pact_agents::adapter(agent);
 
