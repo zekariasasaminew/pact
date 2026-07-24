@@ -35,6 +35,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 globset = "0.4"
 dirs = "5"
 schemars = "1"
+toml = "0.8"
 
 pact-vcs = { path = "crates/pact-vcs" }
 pact-deps = { path = "crates/pact-deps" }

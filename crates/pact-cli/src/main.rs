@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
 use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, PredictedOverlap, SpawnManyTask};
+
+mod config;
+use config::PactConfig;
 
 #[derive(Parser)]
 #[command(name = "pact", version = env!("PACT_VERSION"), about = "Orchestrate parallel AI coding agent workspaces")]
@@ -26,6 +29,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Write a pact.toml at the repo root with defaults for --agent/--safety,
+    /// detected from what's actually installed (same detection `pact doctor`
+    /// uses). Entirely optional -- pact works fully without one, this just
+    /// removes the "which flags do I need" step for repeat use. A CLI flag
+    /// always overrides whatever pact.toml sets.
+    Init {
+        /// Overwrite an existing pact.toml instead of refusing.
+        #[arg(long)]
+        force: bool,
+    },
     /// Create a new isolated agent workspace and run an agent CLI in it.
     /// The agent's changes land in the workspace's working tree, not a
     /// commit -- `list` will show it as `[dirty]` when the agent is done,
@@ -37,8 +50,10 @@ enum Command {
         task: String,
 
         /// Which agent CLI to launch (claude, copilot, codex, gemini).
-        #[arg(long, default_value = "claude")]
-        agent: String,
+        /// Falls back to `pact.toml`'s `defaults.agent` if omitted, then to
+        /// `claude` if neither is set.
+        #[arg(long)]
+        agent: Option<String>,
 
         /// Raw safety/approval override passed straight through to the
         /// chosen agent's own vocabulary: Claude Code's --permission-mode
@@ -51,7 +66,8 @@ enum Command {
         /// "plan" mode is read-only for the target repo, but its own
         /// plan-document feature may still write a real file to the host
         /// user's ~/.claude/plans/, outside this workspace's isolation and
-        /// pact's own cleanup -- confirmed by hand, see DESIGN.md.
+        /// pact's own cleanup -- confirmed by hand, see DESIGN.md. Falls
+        /// back to `pact.toml`'s `defaults.safety` if omitted.
         #[arg(long)]
         safety: Option<String>,
 
@@ -96,8 +112,9 @@ enum Command {
         /// Default agent CLI for any --task without an explicit
         /// `<agent>:` prefix (claude, copilot, codex, gemini). A task with
         /// a prefix always uses that agent instead, even when --agent is
-        /// also given. At least one of --agent or a per-task prefix is
-        /// required for every task.
+        /// also given. Falls back to `pact.toml`'s `defaults.agent` if
+        /// omitted; at least one of --agent, `pact.toml`, or a per-task
+        /// prefix is required for every task.
         #[arg(long)]
         agent: Option<String>,
 
@@ -105,6 +122,7 @@ enum Command {
         /// to every task in this batch -- see `spawn`'s help for the
         /// per-adapter vocabulary. Per-task safety overrides aren't
         /// supported in this first cut (see `pact-core::SpawnManyTask`).
+        /// Falls back to `pact.toml`'s `defaults.safety` if omitted.
         #[arg(long)]
         safety: Option<String>,
 
@@ -233,9 +251,10 @@ enum Command {
         test_cmd: Option<String>,
 
         /// Which agent CLI Arbiter should use. Ignored unless --test-cmd
-        /// is set.
-        #[arg(long = "arbiter-agent", default_value = "claude")]
-        arbiter_agent: String,
+        /// is set. Falls back to `pact.toml`'s `defaults.agent` if
+        /// omitted, then to `claude` if neither is set.
+        #[arg(long = "arbiter-agent")]
+        arbiter_agent: Option<String>,
 
         /// Same raw safety/approval override as `spawn --safety`, applied
         /// to the Arbiter agent specifically. Ignored unless --test-cmd is
@@ -282,8 +301,8 @@ enum Command {
 
         /// Same as `merge-all --arbiter-agent`. Ignored unless --test-cmd
         /// is set.
-        #[arg(long = "arbiter-agent", default_value = "claude")]
-        arbiter_agent: String,
+        #[arg(long = "arbiter-agent")]
+        arbiter_agent: Option<String>,
 
         /// Same as `merge-all --arbiter-safety`. Ignored unless
         /// --test-cmd is set.
@@ -359,6 +378,12 @@ fn main() -> Result<()> {
         None => find_repo_root(&std::env::current_dir()?)?,
     };
 
+    if let Command::Init { force } = cli.command {
+        return run_init(&repo_root, force);
+    }
+
+    let config = PactConfig::load(&repo_root)?;
+
     if let Command::McpServe { agent_id, workspace } = cli.command {
         // A current-thread runtime, not the default multi-threaded one --
         // see DESIGN.md ("pact-coord > mcp-serve startup latency", issue
@@ -382,6 +407,10 @@ fn main() -> Result<()> {
             coord_args,
             dry_run,
         } => {
+            let agent = agent
+                .or_else(|| config.default_agent().map(str::to_string))
+                .unwrap_or_else(|| "claude".to_string());
+            let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
                 anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, codex, or gemini)")
             })?;
@@ -433,6 +462,8 @@ fn main() -> Result<()> {
             coord_args,
             dry_run,
         } => {
+            let agent = agent.or_else(|| config.default_agent().map(str::to_string));
+            let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let default_agent = agent
                 .as_deref()
                 .map(|name| {
@@ -633,6 +664,10 @@ fn main() -> Result<()> {
         }
         Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
+            let arbiter_agent = arbiter_agent
+                .or_else(|| config.default_agent().map(str::to_string))
+                .unwrap_or_else(|| "claude".to_string());
+            let arbiter_safety = arbiter_safety.or_else(|| config.default_safety().map(str::to_string));
             let arbiter = build_arbiter_config(test_cmd, &arbiter_agent, arbiter_safety)?;
             let report = orchestrator.merge_all(
                 ids.as_deref(),
@@ -673,6 +708,10 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let arbiter_agent = arbiter_agent
+                .or_else(|| config.default_agent().map(str::to_string))
+                .unwrap_or_else(|| "claude".to_string());
+            let arbiter_safety = arbiter_safety.or_else(|| config.default_safety().map(str::to_string));
             let arbiter = build_arbiter_config(test_cmd, &arbiter_agent, arbiter_safety)?;
             let resolution = orchestrator.resolve_conflict(&workspace_id, &union, arbiter.as_ref())?;
             match resolution.outcome {
@@ -721,6 +760,7 @@ fn main() -> Result<()> {
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Doctor => unreachable!("handled above, before the orchestrator opens"),
+        Command::Init { .. } => unreachable!("handled above, before the orchestrator opens"),
     }
 
     Ok(())
@@ -1085,6 +1125,62 @@ fn run_doctor() -> Result<()> {
     if !git_ok {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Reuses `pact doctor`'s own agent-CLI detection (`AGENT_CHECKS` +
+/// `doctor_check_version`) so `pact init`'s guess is never out of sync with
+/// what `pact doctor` reports.
+fn detect_installed_agents() -> Vec<&'static str> {
+    AGENT_CHECKS
+        .iter()
+        .filter(|check| doctor_check_version(check).is_some())
+        .map(|check| check.label)
+        .collect()
+}
+
+fn run_init(repo_root: &Path, force: bool) -> Result<()> {
+    let config_path = repo_root.join(PactConfig::FILE_NAME);
+    if config_path.exists() && !force {
+        bail!(
+            "{} already exists -- pass --force to overwrite it",
+            config_path.display()
+        );
+    }
+
+    let installed = detect_installed_agents();
+    let agent_line = match installed.as_slice() {
+        [only] => format!("agent = \"{only}\"       # detected: only agent CLI found installed"),
+        [] => "# agent = \"claude\"    # no agent CLI detected installed -- run `pact doctor`".to_string(),
+        many => format!(
+            "# agent = \"claude\"    # multiple agent CLIs detected ({}) -- uncomment and pick one",
+            many.join(", ")
+        ),
+    };
+
+    let contents = format!(
+        "# pact.toml -- generated by `pact init`.\n\
+         #\n\
+         # Sets defaults for --agent/--safety. A pact.toml value is only used\n\
+         # when the equivalent CLI flag is omitted -- passing the flag always\n\
+         # wins. Applies to `spawn`/`spawn-many`'s --agent/--safety and\n\
+         # merge-all/resolve's --arbiter-agent/--arbiter-safety.\n\
+         \n\
+         [defaults]\n\
+         {agent_line}\n\
+         # safety = \"acceptEdits\"  # uncomment to stop the unattended-run warning on every spawn\n"
+    );
+
+    std::fs::write(&config_path, contents)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    println!("wrote {}", config_path.display());
+    match installed.as_slice() {
+        [only] => println!("detected agent CLI: {only} (set as default)"),
+        [] => println!("no agent CLI detected installed -- run `pact doctor` for details"),
+        many => println!("detected multiple agent CLIs ({}) -- edit pact.toml to pick a default", many.join(", ")),
+    }
+    println!("next: pact spawn \"<task>\"");
     Ok(())
 }
 

@@ -1332,6 +1332,44 @@ internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
 lines interleave at line granularity, never mid-line.
 
+### `pact.toml` / `pact init` (issue #118)
+
+pact was 100% CLI-flag driven until this -- no persisted config file at
+all, confirmed by grepping for any `Config`/`.toml` reference in the
+codebase before starting. From an outside adoption/UX review: reaching a
+successful `spawn-many` from a fresh install required knowing 7 concepts
+before anything worked, `--agent`/`--safety` being two of them repeated on
+every invocation.
+
+Precedence, deliberately in this order: **CLI flag > `pact.toml`'s
+`defaults.*` > built-in hardcoded default.** A flag always wins even when
+`pact.toml` sets something, so nothing about existing scripted/CI usage
+changes unless a `pact.toml` is added *and* the flag is dropped. Applies to
+`spawn`/`spawn-many`'s `--agent`/`--safety` and `merge-all`/`resolve`'s
+`--arbiter-agent`/`--arbiter-safety` -- all four flags changed from a
+clap `default_value`/no-default `String`/`Option<String>` to a plain
+`Option<String>`, resolved against `PactConfig` before use. The pre-existing
+hardcoded `"claude"` fallback (`spawn`'s old `default_value`,
+`--arbiter-agent`'s old `default_value`) is preserved as the last resort,
+so a repo with no `pact.toml` behaves byte-for-byte as before.
+
+`PactConfig::load` treats a **missing** `pact.toml` as `Self::default()`
+(no error -- this is opt-in, pact must work fully without one) but a
+**present, malformed** one as a hard error, not a silent fall-back to "no
+config" -- a typo in `defaults.agent` should be loud, not quietly ignored.
+
+`pact init` writes the file, refusing to overwrite an existing one without
+`--force`. Agent detection reuses `pact doctor`'s own `AGENT_CHECKS`/
+`doctor_check_version` (`detect_installed_agents` in `main.rs`) so the two
+commands' view of "what's installed" can never drift apart. Only sets
+`defaults.agent` uncommented when *exactly one* agent CLI is detected --
+zero or multiple both leave it commented with an explanatory note, since
+guessing between multiple installed CLIs would be worse than asking.
+
+`defaults.safety` is never auto-populated by `pact init` (left commented
+with an example) -- there's no reasonable per-machine guess for a safety
+override the way there is for "which agent CLI is installed."
+
 ### `--agent`/prefix precedence in `spawn-many` (issue #37)
 
 `spawn` took a top-level `--agent`; `spawn-many` required every `--task`
