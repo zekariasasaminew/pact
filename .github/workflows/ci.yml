@@ -25,3 +25,30 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace --verbose
+
+  python-binding-tests:
+    name: pact-coord Python binding (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build pact-cli
+        run: cargo build --release -p pact-cli --verbose
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pact-coord binding
+        run: pip install -e "bindings/python[test]"
+
+      - name: Run real end-to-end tests
+        run: python -m pytest bindings/python/tests -v

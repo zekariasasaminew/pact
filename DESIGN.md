@@ -1217,6 +1217,97 @@ using the identical mechanism. Exit code 2 on a still-conflicted retry,
 mirroring `merge-all`'s own "skipped, not a hard failure" exit-code
 convention (issue #27) rather than a plain error.
 
+### pact-coord SDK bindings v1 (issue #127)
+
+User's explicit framing: this is a foundation, not a quick add -- "plan
+really deeply... must consider every angle" before writing any client
+code. Design questions resolved, in order:
+
+**Transport: spawn `pact mcp-serve` and speak real MCP over stdio --
+not a new server.** The critical fact that decides this whole design:
+`pact mcp-serve` is *not* a persistent daemon a client could connect to
+-- it's a fresh subprocess launched per agent session, over stdio, backed
+by the shared SQLite DB (see "Database placement" above). There is no
+standing network-facing coordination server today, and inventing one for
+this SDK would be new server-side surface, a new attack surface (a real
+listener needs real access control; a stdio pipe implicitly scoped to
+whoever spawned it doesn't), and a new maintenance burden -- none of
+which the issue actually asked for. The right model: a Python/TS client
+using pact-coord *is* an MCP client, exactly like Claude Code or Copilot
+CLI already are, just driven by a script instead of an LLM. This also
+directly reuses the existing `--coord-command`/`--coord-arg` override
+(issue #10) -- pointing an agent at a custom coordination command is
+already a supported extension point; the SDK is simply the first
+non-agent-CLI consumer of it.
+
+**Build on the official MCP client SDKs, don't hand-roll the wire
+protocol.** `pip install mcp` (Anthropic's own Python MCP SDK) and
+`@modelcontextprotocol/sdk` (npm) both install cleanly and are the
+correct, protocol-compliant way to speak MCP's stdio transport and
+initialize handshake -- confirmed by installing both for real and
+inspecting their actual client APIs (`ClientSession`/`StdioServerParameters`
+in Python; the equivalent `Client`/`StdioClientTransport` in the TS SDK),
+not assumed from documentation. Re-implementing JSON-RPC framing and the
+MCP handshake by hand in two more languages would be real, avoidable
+protocol-compliance risk for zero benefit -- pact-coord's bindings are a
+*thin, opinionated wrapper* around each language's official SDK, mirroring
+how `pact-agents`' own adapters wrap each agent CLI's conventions rather
+than reimplementing them.
+
+**API shape.** One class per language (`PactCoordClient` /
+`PactCoordClient`), four methods matching the four MCP tools exactly:
+`claim_files`, `release_files`, `send_message`, `check_messages` --
+parameters and return shapes match `pact-coord/src/server.rs`'s actual
+`ClaimFilesParams`/`ReleaseFilesParams`/`SendMessageParams` and the
+`ClaimResult`/`Message` types field-for-field (`accepted`/`has_conflicts`/
+`conflicts`, not `granted`, matching the issue #52 rename), not a
+redesigned API. Two ways to construct a client: spawn `pact mcp-serve`
+itself (the common case, mirrors what pact-core's own orchestrator does
+for a real agent), or accept an already-open MCP session (for a caller
+that manages the subprocess itself) -- the latter is needed internally
+regardless, so exposing it is free.
+
+**Error semantics: match `isError`, don't invent a new taxonomy.** Every
+pact-coord tool result already carries `isError`/text content on failure.
+The binding raises a typed exception (Python: `PactCoordError`; TS: same
+name) carrying that exact text, rather than a generic MCP protocol error
+-- callers get the same failure message a human reading raw MCP traffic
+would see.
+
+**Auth/trust model: unchanged, explicitly a v1 non-goal to extend it.**
+Since transport is a locally-spawned subprocess over stdio -- identical to
+today's real agent-CLI usage -- there is no new threat model to design
+for. The binding does **not** support connecting to a remote/networked
+pact-coord instance, because no such thing exists; adding one would be a
+materially larger feature (a real daemon, real access control) that
+nothing in the original issue asked for. Worth its own design
+conversation if real demand shows up, not built ahead of it.
+
+**Packaging: repo-local for v1, not published to PyPI/npm.** Registry
+publishing adds real, permanent surface (namespace squatting risk,
+security-disclosure process, a release process to keep in sync with
+pact's own versioning) for a v1 with no external users yet. `bindings/
+python`/`bindings/ts` are installable directly (`pip install
+./bindings/python`, or a git URL; `npm install <git-url>` or a local
+path) -- publishing to real registries is a reasonable follow-up once
+there's actual demand, not a default to reach for immediately.
+
+**Versioning:** the binding targets whatever `pact mcp-serve` binary is
+on `PATH` (or an explicit path) at call time -- same "trust the installed
+CLI" model every other pact-adjacent tool already has, no separate
+protocol-version negotiation invented. A minimum-compatible-pact-version
+note lives in each binding's own README rather than an enforced runtime
+check, matching how CLI flags document their own minimum requirements
+elsewhere in this project.
+
+**Testing:** unlike agent-CLI-invoking code, spawning `pact mcp-serve`
+costs nothing and involves no LLM -- it's a deterministic Rust binary.
+Both bindings' test suites spawn a real `pact mcp-serve` subprocess
+against a real throwaway repo and exercise claim/release/send/check
+end-to-end for real, the same "real repo, no mocking" standard this
+project already holds git-interaction tests to, not stubbed out the way
+a real agent-CLI call would need to be.
+
 ## pact-deps — dependency materialization
 
 Detects a workspace's package manager(s) and makes sure dependencies are
