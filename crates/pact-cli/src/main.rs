@@ -59,7 +59,8 @@ enum Command {
 
         /// Which agent CLI to launch (claude, copilot, codex, gemini).
         /// Falls back to `pact.toml`'s `defaults.agent` if omitted, then to
-        /// `claude` if neither is set.
+        /// the sole detected installed agent CLI if exactly one is found,
+        /// then to `claude` as a last resort.
         #[arg(long)]
         agent: Option<String>,
 
@@ -120,9 +121,10 @@ enum Command {
         /// Default agent CLI for any --task without an explicit
         /// `<agent>:` prefix (claude, copilot, codex, gemini). A task with
         /// a prefix always uses that agent instead, even when --agent is
-        /// also given. Falls back to `pact.toml`'s `defaults.agent` if
-        /// omitted; at least one of --agent, `pact.toml`, or a per-task
-        /// prefix is required for every task.
+        /// also given. Falls back to `pact.toml`'s `defaults.agent`, then
+        /// to the sole detected installed agent CLI if exactly one is
+        /// found; at least one of --agent, `pact.toml`, detection, or a
+        /// per-task prefix is required for every task.
         #[arg(long)]
         agent: Option<String>,
 
@@ -419,9 +421,7 @@ fn main() -> Result<()> {
             coord_args,
             dry_run,
         } => {
-            let agent = agent
-                .or_else(|| config.default_agent().map(str::to_string))
-                .unwrap_or_else(|| "claude".to_string());
+            let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
                 anyhow::anyhow!("unknown --agent '{agent}' (expected claude, copilot, codex, or gemini)")
@@ -474,7 +474,7 @@ fn main() -> Result<()> {
             coord_args,
             dry_run,
         } => {
-            let agent = agent.or_else(|| config.default_agent().map(str::to_string));
+            let agent = resolve_default_agent(agent, &config);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let default_agent = agent
                 .as_deref()
@@ -1142,14 +1142,43 @@ fn run_doctor() -> Result<()> {
 }
 
 /// Reuses `pact doctor`'s own agent-CLI detection (`AGENT_CHECKS` +
-/// `doctor_check_version`) so `pact init`'s guess is never out of sync with
-/// what `pact doctor` reports.
+/// `doctor_check_version`) so `pact init`'s and `resolve_default_agent`'s
+/// guesses are never out of sync with what `pact doctor` reports.
 fn detect_installed_agents() -> Vec<&'static str> {
     AGENT_CHECKS
         .iter()
         .filter(|check| doctor_check_version(check).is_some())
         .map(|check| check.label)
         .collect()
+}
+
+/// Resolution order for `--agent` when it's omitted: `pact.toml`'s
+/// `defaults.agent`, then auto-detection if exactly one supported agent
+/// CLI is installed, printed so it's never a silent guess. Returns `None`
+/// only when neither resolved anything -- callers decide their own final
+/// fallback (`spawn` falls back to the pre-existing hardcoded `"claude"`;
+/// `spawn-many` leaves it as a real per-task error, unchanged from before
+/// this existed). Zero or multiple installed CLIs both fall through to
+/// `None` rather than guessing between them -- see DESIGN.md ("pact-cli >
+/// `--agent` auto-default", issue #121) for why guessing there would be
+/// worse than asking.
+fn resolve_default_agent(explicit: Option<String>, config: &PactConfig) -> Option<String> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    if let Some(agent) = config.default_agent() {
+        return Some(agent.to_string());
+    }
+    match detect_installed_agents().as_slice() {
+        [only] => {
+            eprintln!(
+                "no --agent given and no pact.toml default set -- using detected agent CLI: {only} \
+                 (only one installed; pass --agent or set pact.toml's defaults.agent to change)"
+            );
+            Some(only.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn run_init(repo_root: &Path, force: bool) -> Result<()> {

@@ -1402,6 +1402,37 @@ concurrently with `demo_succeeds_from_outside_any_git_repo` in the same
 test binary (cargo parallelizes tests within one binary by default), since
 the sibling test's own still-running `pact demo` shows up in the sweep.
 
+### `--agent` auto-default (issue #121)
+
+Extends the `pact.toml` precedence chain (issue #118, above) with one more
+fallback: **CLI flag > `pact.toml`'s `defaults.agent` > sole detected
+installed agent CLI > hardcoded `"claude"`.** `resolve_default_agent` in
+`main.rs` implements this and is shared by both `spawn` and `spawn-many`,
+reusing the same `detect_installed_agents` (and by extension `pact
+doctor`'s own `AGENT_CHECKS`) as `pact init`.
+
+Deliberately only auto-selects when *exactly one* supported agent CLI is
+detected -- zero or multiple both fall through to the next fallback rather
+than guessing which of several installed CLIs the user meant. When
+auto-detection does fire, it prints an explicit note naming which agent
+was chosen and how to override it (`--agent` or `pact.toml`) -- never a
+silent guess, since a wrong guess here means launching the wrong (real,
+billed) agent CLI.
+
+Note this only ever *adds* a new fallback in front of the pre-existing
+hardcoded `"claude"` default (`spawn`) / real per-task error (`spawn-many`)
+-- neither of those was removed, so a machine with zero or multiple agent
+CLIs installed behaves exactly as before this issue.
+
+Verified via a real cross-platform integration test
+(`tests/agent_auto_default.rs`) rather than a fake/mocked detection layer:
+the test writes an actual runnable `claude` shim (`.cmd` on Windows, a
+`chmod +x` shell script on Unix) into a fresh temp directory and overrides
+the child `pact` process's `PATH` to exactly that directory, so `pact
+doctor`'s real detection logic genuinely finds exactly one agent CLI --
+the same code path a real machine with only Claude Code installed would
+exercise, not a substitute for it.
+
 ### `--agent`/prefix precedence in `spawn-many` (issue #37)
 
 `spawn` took a top-level `--agent`; `spawn-many` required every `--task`
