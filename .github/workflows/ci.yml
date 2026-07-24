@@ -48,7 +48,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install pact-coord binding
-        run: pip install -e bindings/python
+        run: pip install -e "bindings/python[test]"
 
       - name: Run real end-to-end tests
         run: python -m pytest bindings/python/tests -v
