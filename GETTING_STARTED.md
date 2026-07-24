@@ -32,8 +32,16 @@ Invoke-WebRequest https://github.com/zekariasasaminew/pact/releases/latest/downl
 Expand-Archive pact.zip
 ```
 
+Or, on macOS/Linux, via Homebrew:
+
+```sh
+brew tap zekariasasaminew/pact
+brew install pact
+```
+
 You should now have a `pact` (or `pact.exe`) binary. Move it onto your
-`PATH`, or just reference it by its full path in the commands below.
+`PATH`, or just reference it by its full path in the commands below --
+already on `PATH` if you installed via Homebrew.
 
 You'll also need at least one agent CLI installed and authenticated:
 [Claude Code](https://docs.claude.com/en/docs/claude-code), [GitHub

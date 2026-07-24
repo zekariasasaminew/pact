@@ -60,6 +60,13 @@ Invoke-WebRequest https://github.com/zekariasasaminew/pact/releases/latest/downl
 Expand-Archive pact.zip
 ```
 
+macOS/Linux via Homebrew, one command instead of five:
+
+```sh
+brew tap zekariasasaminew/pact
+brew install pact
+```
+
 `latest` above always points at the most recent tagged, versioned
 release. To try unreleased work on `main` before the next tag (e.g. a
 just-merged fix) without building from source, download the same way
@@ -953,6 +960,11 @@ pipeline and what it still doesn't capture.
   API key or Google Cloud auth is configured in this environment. See
   "Gemini CLI adapter" under Design decisions for exactly what was and
   wasn't confirmed. Issue #9 stays open until this changes.
+- **The Homebrew tap (`zekariasasaminew/homebrew-pact`) is built, not
+  live-verified against a real `brew install`** -- no macOS/Linux Homebrew
+  install available in this environment, and the formula's syntax was
+  checked by hand rather than with a real Ruby parse (no Ruby available
+  here either). See "Homebrew tap" under Design decisions.
 - **Demo GIF re-recording (issue #124).** `asciinema`'s own recorder can't
   run on native Windows Python at all -- it unconditionally imports the
   Unix-only `fcntl` module and fails before doing anything else, a hard
