@@ -1414,6 +1414,27 @@ fn parse_porcelain_path(line: &str) -> Option<String> {
     }
 }
 
+/// Every path `git status --porcelain` reports as changed (modified,
+/// added, deleted, renamed, or untracked) in `dir` -- public so callers
+/// outside this crate (Arbiter's out-of-scope-file check, issue #146)
+/// can reuse the exact same parsing `dirty_status`/`workspace_changes`
+/// already rely on internally, rather than re-implementing porcelain
+/// parsing. Errors (not just returns empty) if `git status` itself
+/// fails, since a caller using this to decide whether to trust
+/// something should not silently treat "couldn't check" the same as
+/// "checked, found nothing."
+pub fn changed_paths(dir: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .context("failed to spawn `git status`")?;
+    if !output.status.success() {
+        bail!("`git status --porcelain` failed in {}: {}", dir.display(), String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).lines().filter_map(parse_porcelain_path).collect())
+}
+
 fn short_id() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
 }
@@ -1564,6 +1585,51 @@ mod tests {
         let message = commit_message("ab12cd34", task);
         assert_eq!(message.lines().next().unwrap(), "agent ab12cd34: add chunk.ts utility");
         assert!(message.contains("Handles the empty-array edge case explicitly."));
+    }
+
+    #[test]
+    fn changed_paths_reports_modified_and_untracked_files() {
+        let dir = std::env::temp_dir().join(format!("pact-vcs-changed-paths-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "test"]);
+        std::fs::write(dir.join("tracked.txt"), "original\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        std::fs::write(dir.join("tracked.txt"), "modified\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+
+        let mut changed = changed_paths(&dir).unwrap();
+        changed.sort();
+        assert_eq!(changed, vec!["new.txt".to_string(), "tracked.txt".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changed_paths_is_empty_for_a_clean_worktree() {
+        let dir = std::env::temp_dir().join(format!("pact-vcs-changed-paths-clean-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "test"]);
+        std::fs::write(dir.join("tracked.txt"), "content\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        assert!(changed_paths(&dir).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -596,6 +596,20 @@ impl Orchestrator {
         task_text: &str,
         files: &[String],
     ) -> Vec<String> {
+        // Captured before the agent runs so the post-run "did it wipe a
+        // conflicted file" check (below) has something to compare
+        // against -- every listed file has conflict markers in it at
+        // this point, so a non-empty pre-run length is a given; it's
+        // recorded anyway rather than assumed, in case that ever stops
+        // being true.
+        let pre_run_lengths: std::collections::HashMap<&String, usize> = files
+            .iter()
+            .map(|file| {
+                let len = std::fs::read_to_string(worktree_path.join(file)).map(|c| c.trim().len()).unwrap_or(0);
+                (file, len)
+            })
+            .collect();
+
         let prompt = build_arbiter_prompt(task_text, files);
         let adapter = pact_agents::adapter(config.agent);
         let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
@@ -644,20 +658,12 @@ impl Orchestrator {
         }
 
         // The agent's own reported success isn't trusted on its own --
-        // conflict markers left behind mean it didn't actually finish, no
-        // matter what it said.
-        for file in files {
-            let Ok(content) = std::fs::read_to_string(worktree_path.join(file)) else {
-                tracing::warn!("arbiter: could not re-read {file} after the agent ran (log kept at {})", log_path.display());
-                return Vec::new();
-            };
-            if content.contains("<<<<<<<") || content.contains("=======") || content.contains(">>>>>>>") {
-                tracing::warn!(
-                    "arbiter left conflict markers in {file}, not accepting its resolution (log kept at {})",
-                    log_path.display()
-                );
-                return Vec::new();
-            }
+        // see `validate_arbiter_scope` for what's actually checked and
+        // why (conflict markers, an emptied file, and anything changed
+        // outside `files`).
+        if let Err(reason) = validate_arbiter_scope(worktree_path, files, &pre_run_lengths) {
+            tracing::warn!("arbiter: {reason}, not accepting its resolution (log kept at {})", log_path.display());
+            return Vec::new();
         }
 
         for file in files {
@@ -779,6 +785,53 @@ impl Orchestrator {
     pub fn history(&self, filter: &pact_coord::HistoryFilter) -> Result<Vec<pact_coord::Operation>> {
         pact_coord::history(&self.repo_root, filter)
     }
+}
+
+/// Checks an Arbiter agent's resolution against the conflicted-file
+/// scope it was given -- see DESIGN.md ("pact-core > Arbiter scope
+/// enforcement", issue #146/#147). Returns `Err(reason)` for the first
+/// violation found, `Ok(())` if the resolution passes every check.
+///
+/// Deliberately doesn't try to catch a merely *suspiciously large*
+/// shrink in a conflicted file beyond "went to nothing": removing
+/// marker lines and one side's content is an expected, normal part of
+/// every correct resolution, so a size-based heuristic risks rejecting
+/// good resolutions, not just bad ones. A missing file (the read fails)
+/// is treated as a violation too, covering "arbiter deleted a
+/// conflicted file" without a separate check for it.
+///
+/// Extracted from `run_arbiter_inner` specifically so it's testable
+/// against a real git repo without spawning a real agent -- the prompt
+/// instruction telling the agent not to touch anything outside `files`
+/// is just that, a prompt instruction, not enforcement, so this is what
+/// actually verifies it didn't.
+fn validate_arbiter_scope(
+    worktree_path: &Path,
+    files: &[String],
+    pre_run_lengths: &std::collections::HashMap<&String, usize>,
+) -> Result<(), String> {
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(worktree_path.join(file)) else {
+            return Err(format!("could not re-read {file} after the agent ran"));
+        };
+        if content.contains("<<<<<<<") || content.contains("=======") || content.contains(">>>>>>>") {
+            return Err(format!("left conflict markers in {file}"));
+        }
+        if pre_run_lengths.get(file).copied().unwrap_or(0) > 0 && content.trim().is_empty() {
+            return Err(format!("emptied {file} entirely"));
+        }
+    }
+
+    match pact_vcs::changed_paths(worktree_path) {
+        Ok(changed) => {
+            let out_of_scope: Vec<&String> = changed.iter().filter(|path| !files.contains(path)).collect();
+            if !out_of_scope.is_empty() {
+                return Err(format!("changed files outside the conflicted-file list {out_of_scope:?}"));
+            }
+        }
+        Err(err) => return Err(format!("could not verify change scope via git status: {err:#}")),
+    }
+    Ok(())
 }
 
 fn build_arbiter_prompt(task_text: &str, files: &[String]) -> String {
@@ -953,5 +1006,117 @@ mod tests {
     fn coord_warning_fires_when_no_status_ever_reported() {
         let warning = coord_warning(true, None, "pact-coord").unwrap();
         assert!(warning.contains("never reported a status at all"));
+    }
+
+    fn arbiter_test_repo(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("pact-core-arbiter-scope-{name}-{nanos}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&root).output().unwrap();
+            assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "test"]);
+        // conflicted.txt starts with real conflict-marker content, the
+        // same shape the file would actually be in when Arbiter is
+        // invoked -- pre_run_lengths reads this real state, not a stub.
+        std::fs::write(root.join("conflicted.txt"), "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n").unwrap();
+        std::fs::write(root.join("untouched.txt"), "unrelated content\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+        root
+    }
+
+    fn pre_run_lengths_for<'a>(root: &std::path::Path, files: &'a [String]) -> std::collections::HashMap<&'a String, usize> {
+        files
+            .iter()
+            .map(|f| (f, std::fs::read_to_string(root.join(f)).map(|c| c.trim().len()).unwrap_or(0)))
+            .collect()
+    }
+
+    #[test]
+    fn validate_arbiter_scope_accepts_a_clean_in_scope_resolution() {
+        let root = arbiter_test_repo("accepts-clean");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+
+        std::fs::write(root.join("conflicted.txt"), "resolved content\n").unwrap();
+
+        assert!(validate_arbiter_scope(&root, &files, &pre).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_rejects_leftover_conflict_markers() {
+        let root = arbiter_test_repo("rejects-markers");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+        // conflicted.txt is untouched -- markers still present.
+
+        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        assert!(err.contains("conflict markers"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_rejects_an_emptied_file() {
+        let root = arbiter_test_repo("rejects-emptied");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+
+        std::fs::write(root.join("conflicted.txt"), "   \n\n").unwrap();
+
+        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        assert!(err.contains("emptied"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_rejects_a_deleted_conflicted_file() {
+        let root = arbiter_test_repo("rejects-deleted");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+
+        std::fs::remove_file(root.join("conflicted.txt")).unwrap();
+
+        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        assert!(err.contains("could not re-read"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_rejects_changes_outside_the_conflicted_file_list() {
+        let root = arbiter_test_repo("rejects-out-of-scope");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+
+        std::fs::write(root.join("conflicted.txt"), "resolved content\n").unwrap();
+        // Arbiter was only told about conflicted.txt -- touching this
+        // unrelated file is exactly what the prompt says not to do.
+        std::fs::write(root.join("untouched.txt"), "surprise edit\n").unwrap();
+
+        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        assert!(err.contains("outside the conflicted-file list"), "got: {err}");
+        assert!(err.contains("untouched.txt"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_accepts_a_new_file_created_within_scope() {
+        // files can legitimately include a path that didn't exist pre-run
+        // (e.g. a rename-vs-modify conflict resolved by keeping a new
+        // path) -- pre_run_lengths defaults such a file to 0, which must
+        // not itself trigger the "emptied" check once real content exists.
+        let root = arbiter_test_repo("accepts-new-file");
+        let files = vec!["brand_new.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+        assert_eq!(pre.get(&files[0]).copied(), Some(0));
+
+        std::fs::write(root.join("brand_new.txt"), "new content\n").unwrap();
+
+        assert!(validate_arbiter_scope(&root, &files, &pre).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
