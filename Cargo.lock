@@ -881,6 +881,7 @@ dependencies = [
  "anyhow",
  "pact-vcs",
  "reflink-copy",
+ "serde",
  "sha2",
  "tracing",
  "walkdir",

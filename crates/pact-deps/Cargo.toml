@@ -11,3 +11,4 @@ tracing.workspace = true
 sha2.workspace = true
 reflink-copy.workspace = true
 walkdir.workspace = true
+serde.workspace = true
