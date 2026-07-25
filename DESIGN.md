@@ -580,6 +580,62 @@ it to `Edit` the conflicted file in place -- this would avoid whatever
 specifically triggers on raw conflict markers being present in an
 `Edit`'s target, if that's really the mechanism.
 
+### Arbiter scope enforcement (issue #146/#147)
+
+From an outside code review (2026-07-24, full triage:
+https://claude.ai/code/artifact/2cd644b9-b0e2-4533-9706-2034f798ff20):
+prior to this, `run_arbiter_inner`'s only validation was that conflict
+markers were gone from the *listed* files and the given test command
+exited 0 -- confirmed by reading the actual pre-fix code before acting
+on the report. Nothing checked whether the agent touched anything
+*outside* that list, and nothing beyond "still has markers" caught an
+agent that resolved a file by wiping it. The prompt tells the agent not
+to touch anything outside the conflicted-file list, but a prompt
+instruction is not enforcement -- the same "don't trust the agent's own
+claim" reasoning that already applied to conflict-marker checking now
+also applies to scope.
+
+`validate_arbiter_scope` (pact-core) is the fix, extracted as a
+standalone function specifically so it's testable against a real git
+repo without spawning a real agent (unlike `run_arbiter_inner`, which
+does). It checks, in order:
+
+1. **Conflict markers gone** from every listed file (pre-existing check,
+   unchanged).
+2. **Not emptied** -- a listed file that had real content (at minimum
+   its own conflict markers) before the agent ran can't come back empty
+   or whitespace-only. Deliberately does *not* try to catch a merely
+   *suspiciously large* shrink beyond "went to nothing": removing marker
+   lines and one side's content is a normal, expected part of every
+   correct resolution, so a size-based heuristic risks rejecting good
+   resolutions along with bad ones. A missing file (the re-read itself
+   fails) already rejects via the same code path, covering "arbiter
+   deleted a conflicted file" without a separate check.
+3. **Nothing changed outside the listed files** -- new public
+   `pact_vcs::changed_paths(dir)` runs `git status --porcelain` and
+   reuses the crate's own existing `parse_porcelain_path` (already
+   relied on by `dirty_status`/`workspace_changes`) rather than
+   reimplementing porcelain parsing in pact-core. Fails closed: if
+   `git status` itself fails, that's treated as a violation, not "assume
+   fine."
+
+Verified for real, not just by inspection: 6 new pact-core tests build
+an actual throwaway git repo with a real conflict-marker file, simulate
+"the agent already ran" by writing/deleting files directly, and assert
+accept/reject for each case -- clean resolution, leftover markers, an
+emptied file, a deleted file, an out-of-scope change, and a
+legitimately-new file created within scope (confirms `pre_run_lengths`
+defaulting an unseen path to 0 doesn't itself trigger the emptied-file
+check). Plus 2 new pact-vcs tests directly on `changed_paths` itself
+(modified+untracked files reported, clean worktree reports empty).
+
+Reviewer's proposed "durable audit artifact per attempt"
+(`.pact-<repo>/arbiter/<id>/<timestamp>/...`) is a related, separate
+finding (issue #148) -- not implemented here. That one extends the
+*existing* `state_dir/logs/arbiter-<id>.jsonl` convention from issue
+#106 rather than introducing a second competing directory structure, and
+ships as its own PR.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
