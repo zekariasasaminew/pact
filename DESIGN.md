@@ -1691,6 +1691,39 @@ internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
 lines interleave at line granularity, never mid-line.
 
+### `pact inspect` (issue #16)
+
+From an outside code review (2026-07-24): users need one command that
+answers "what is going on with this workspace" -- today that meant
+combining `list`/`diff`/`coord-status`/`history` mentally, none of which
+alone shows the full picture.
+
+`pact inspect <id>` is pure aggregation, not new computation -- every
+data point comes from an existing accessor: `get_workspace` (new, thin
+wrapper over `WorkspaceManager::get_workspace`, previously only
+reachable indirectly through `list`), `is_dirty`, `agent_process_alive`,
+the new `dependency_prep_report`/`run_metadata` readers (issues #12/#15,
+reading back the `state_dir/meta/<id>-{deps,run}.json` files those
+issues started writing), `coord_status` (filtered to leases/pending
+messages belonging to this workspace's own id), `open_conflict_for`
+(new, thin wrapper over the existing `pact_coord::open_conflict_for_workspace`
+-- the same lookup `pact resolve <id>` itself already uses, not a new
+query), and `history` (filtered to this workspace, capped at 20).
+
+`dependency_prep_report`/`run_metadata` treat a missing or unreadable
+file as `None`, not an error -- a workspace that was created directly
+(e.g. by a test, or one that predates these two issues) legitimately has
+no such record, and that's informational, not broken.
+
+Verified for real: 3 new integration tests build a real throwaway repo,
+create a real workspace via `WorkspaceManager::create_workspace`
+directly (no agent CLI involved), and drive the real `pact` binary --
+one against a freshly-created workspace with nothing recorded yet (every
+section correctly says so), one with the dependency-prep/run-metadata
+files written directly to simulate what a real spawn would have
+produced (confirms the aggregation renders real persisted data
+correctly), and one confirming an unknown workspace id fails cleanly.
+
 ### Error messages suggest the next command (issue #123)
 
 From an outside adoption/UX review: `git` suggests the closest command on
