@@ -256,11 +256,17 @@ enum Command {
         /// refuses (falls back to a real conflict) if the result would
         /// contain two `module.exports =`/`export default` statements or a
         /// redeclared binding, but nothing else -- CSS cascade, config keys
-        /// set twice, non-JS/TS languages -- is checked. Best suited to
-        /// genuinely append-only, order-independent content: logs,
-        /// CHANGELOG entries, ignore files.
-        #[arg(long = "union")]
-        union: Vec<String>,
+        /// set twice, non-JS/TS languages -- is checked. Use only for files
+        /// where line order is not semantically important and combining
+        /// unique lines is safe -- genuinely append-only, order-independent
+        /// content: logs, CHANGELOG entries, ignore files. Do not use for
+        /// source files unless you understand the limitations above.
+        /// `--union` is accepted as an alias for backward compatibility,
+        /// but `--append-only` is the more accurate name for what this
+        /// actually does -- "union" implies something more general/safer
+        /// than a naive line concat.
+        #[arg(long = "append-only", visible_alias = "union")]
+        append_only: Vec<String>,
 
         /// Enables the Arbiter fallback: for any file mechanical/semantic
         /// resolution still can't handle, a one-shot agent proposes a fix,
@@ -312,9 +318,10 @@ enum Command {
         #[arg(long)]
         abandon: bool,
 
-        /// Same as `merge-all --union`, applied to this retry.
-        #[arg(long = "union")]
-        union: Vec<String>,
+        /// Same as `merge-all --append-only` (`--union` also accepted),
+        /// applied to this retry.
+        #[arg(long = "append-only", visible_alias = "union")]
+        append_only: Vec<String>,
 
         /// Same as `merge-all --test-cmd` -- enables the Arbiter fallback
         /// for this retry specifically.
@@ -702,7 +709,7 @@ fn main() -> Result<()> {
             let operations = orchestrator.history(&filter)?;
             print_history(&operations, json);
         }
-        Command::MergeAll { ids, into, dry_run, union, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests } => {
+        Command::MergeAll { ids, into, dry_run, append_only, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
             let arbiter_agent = arbiter_agent
                 .or_else(|| config.default_agent().map(str::to_string))
@@ -712,7 +719,7 @@ fn main() -> Result<()> {
             let report = orchestrator.merge_all(
                 ids.as_deref(),
                 into.as_deref(),
-                &union,
+                &append_only,
                 arbiter.as_ref(),
                 require_passing_tests.as_deref(),
                 dry_run,
@@ -729,7 +736,7 @@ fn main() -> Result<()> {
                 std::process::exit(2);
             }
         }
-        Command::Resolve { workspace, abandon, union, test_cmd, arbiter_agent, arbiter_safety } => {
+        Command::Resolve { workspace, abandon, append_only, test_cmd, arbiter_agent, arbiter_safety } => {
             let Some(workspace_id) = workspace else {
                 if abandon {
                     bail!("--abandon requires a workspace id");
@@ -753,7 +760,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| "claude".to_string());
             let arbiter_safety = arbiter_safety.or_else(|| config.default_safety().map(str::to_string));
             let arbiter = build_arbiter_config(test_cmd, &arbiter_agent, arbiter_safety)?;
-            let resolution = orchestrator.resolve_conflict(&workspace_id, &union, arbiter.as_ref())?;
+            let resolution = orchestrator.resolve_conflict(&workspace_id, &append_only, arbiter.as_ref())?;
             match resolution.outcome {
                 pact_core::ResolveOutcome::Resolved { auto_resolved, arbiter_resolved } => {
                     println!("resolved: workspace {workspace_id} merged cleanly");
