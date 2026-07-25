@@ -5,7 +5,7 @@ or a clearly separate block in an existing router, no shared state between
 them, no route depending on another route existing first. If two routes need
 to touch the same file (e.g. all registered in one `routes.rs`/`urls.py`),
 give the shared-registration edit to a single agent instead, or expect a
-`--union` merge on that one file (see `merge-all --union` in the README).
+`--append-only` merge on that one file (see `merge-all --append-only` in the README).
 
 ```
 pact spawn-many \
