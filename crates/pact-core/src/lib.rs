@@ -354,14 +354,25 @@ impl Orchestrator {
         let workspace = self.workspaces.create_workspace(task)?;
         let adapter = pact_agents::adapter(agent);
 
-        if let Err(err) = pact_deps::prepare(&workspace.path) {
-            // A dependency-prepare failure shouldn't destroy an otherwise
-            // valid workspace -- the agent can still install for itself,
-            // just without the head start.
-            tracing::warn!(
-                "dependency prepare failed for workspace {}: {err:#}",
-                workspace.id
-            );
+        // A dependency-prepare failure shouldn't destroy an otherwise
+        // valid workspace -- the agent can still install for itself, just
+        // without the head start. Persisted alongside the workspace's own
+        // metadata (issue #12) so "what actually happened during prep" is
+        // queryable later, not just a log line at spawn time.
+        let dep_reports = pact_deps::prepare(&workspace.path);
+        for report in &dep_reports {
+            if !report.success {
+                tracing::warn!(
+                    "dependency prepare step for {} failed in workspace {}: {:?}",
+                    report.manager,
+                    workspace.id,
+                    report.warnings
+                );
+            }
+        }
+        let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
+        if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
+            tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
         }
 
         let coord_name = adapter.coord_server_name();

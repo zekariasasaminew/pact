@@ -21,6 +21,16 @@ pub enum LinkMode {
     Copy,
 }
 
+impl LinkMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkMode::Reflink => "reflink",
+            LinkMode::ReadOnlyHardlink => "read-only-hardlink",
+            LinkMode::Copy => "copy",
+        }
+    }
+}
+
 /// A lockfile-hash-keyed content store shared across all of one repo's
 /// agent workspaces, for ecosystems (today: npm) that don't already have a
 /// good global cache of their own.
@@ -37,6 +47,13 @@ impl ContentStore {
 
     fn entry_dir(&self, key: &str) -> PathBuf {
         self.root.join(key)
+    }
+
+    /// Whether `key` is already populated -- checked *before*
+    /// `populate_if_absent`, which would otherwise populate it, to tell a
+    /// structured prep report (issue #12) a cache hit from a cache miss.
+    pub fn entry_exists(&self, key: &str) -> bool {
+        self.entry_dir(key).exists()
     }
 
     fn lock_path(&self, key: &str) -> PathBuf {
