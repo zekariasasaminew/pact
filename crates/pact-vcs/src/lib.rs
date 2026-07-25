@@ -1,4 +1,5 @@
 mod lock;
+mod semantic_resolvers;
 
 pub use lock::{agent_process_alive, PidLock};
 
@@ -168,13 +169,6 @@ pub enum ResolveOutcome {
 /// (`git add`) itself -- see DESIGN.md ("pact-vcs > Arbiter resolver
 /// hook").
 pub type ArbiterResolver<'a> = dyn Fn(&Path, &str, &[String]) -> Vec<String> + 'a;
-
-const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
-    "dependencies",
-    "devDependencies",
-    "peerDependencies",
-    "optionalDependencies",
-];
 
 /// Never auto-resolved, even under `--union` -- see DESIGN.md ("pact-vcs >
 /// Semantic auto-resolution").
@@ -950,25 +944,30 @@ impl WorkspaceManager {
 
     /// Tries to auto-resolve one conflicted file, returning `true` and
     /// staging it (`git add`) if it resolved -- see DESIGN.md ("pact-vcs >
-    /// Semantic auto-resolution").
+    /// Semantic auto-resolution"). Dispatches to the first
+    /// `semantic_resolvers::SemanticResolver` whose `can_handle` matches
+    /// (issue #151) rather than a hardcoded `if`/`else if` per resolver.
     fn try_auto_resolve(&self, worktree_path: &Path, file: &str, union_globs: &[String]) -> Result<bool> {
         if is_never_auto_resolve(file) {
             return Ok(false);
         }
 
-        let resolved = if is_package_json(file) {
-            self.try_resolve_package_json(worktree_path, file)?
-        } else if union_globs.iter().any(|pattern| glob_matches(pattern, file)) {
-            self.try_resolve_union(worktree_path, file)?
-        } else {
-            None
-        };
-
-        let Some(content) = resolved else {
+        let Some(resolver) = semantic_resolvers::resolvers(union_globs)
+            .into_iter()
+            .find(|resolver| resolver.can_handle(file))
+        else {
             return Ok(false);
         };
 
-        std::fs::write(worktree_path.join(file), content)
+        let Some(stages) = self.read_conflict_stages(worktree_path, file)? else {
+            return Ok(false);
+        };
+
+        let Some(resolved) = resolver.resolve(&stages)? else {
+            return Ok(false);
+        };
+
+        std::fs::write(worktree_path.join(file), resolved.content)
             .with_context(|| format!("writing auto-resolved content for {file}"))?;
         let add = Command::new("git")
             .args(["add", "--", file])
@@ -984,7 +983,7 @@ impl WorkspaceManager {
     /// present -- issue #57: PowerShell's `Out-File -Encoding utf8` (and
     /// other common Windows tooling) writes one by default, and
     /// `serde_json::from_str` rejects a BOM outright, so an otherwise valid
-    /// `package.json` stage would silently fail `try_resolve_package_json`'s
+    /// `package.json` stage would silently fail `PackageJsonResolver`'s
     /// parse and fall through to a real conflict instead of auto-resolving.
     ///
     /// The returned `bool` reports whether a BOM was present on this stage
@@ -1007,254 +1006,22 @@ impl WorkspaceManager {
         Ok(Some((strip_bom(&content).to_string(), had_bom)))
     }
 
-    /// JSON-aware merge of `package.json`'s dependency blocks -- see
-    /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
-    fn try_resolve_package_json(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
-        let (Some((base, _)), Some((ours, ours_had_bom)), Some((theirs, _))) = (
-            self.read_conflict_stage(worktree_path, file, 1)?,
-            self.read_conflict_stage(worktree_path, file, 2)?,
-            self.read_conflict_stage(worktree_path, file, 3)?,
-        ) else {
+    /// Reads all three conflict stages for `file` into one
+    /// `semantic_resolvers::ConflictStages`, for whichever resolver
+    /// `try_auto_resolve` picked to hand off to. `Ok(None)` if either
+    /// "ours" or "theirs" is missing -- there's nothing any resolver can do
+    /// without both; `base` alone may legitimately be absent (e.g. the file
+    /// was added independently on both sides) and is left to each
+    /// resolver's own `resolve` to require or not.
+    fn read_conflict_stages(&self, worktree_path: &Path, file: &str) -> Result<Option<semantic_resolvers::ConflictStages>> {
+        let base = self.read_conflict_stage(worktree_path, file, 1)?;
+        let Some(ours) = self.read_conflict_stage(worktree_path, file, 2)? else {
             return Ok(None);
         };
-
-        let (Ok(base), Ok(ours_value), Ok(theirs_value)) = (
-            serde_json::from_str::<serde_json::Value>(&base),
-            serde_json::from_str::<serde_json::Value>(&ours),
-            serde_json::from_str::<serde_json::Value>(&theirs),
-        ) else {
+        let Some(theirs) = self.read_conflict_stage(worktree_path, file, 3)? else {
             return Ok(None);
         };
-
-        let mut ours_stripped = ours_value.clone();
-        let mut theirs_stripped = theirs_value.clone();
-        if let (Some(o), Some(t)) = (ours_stripped.as_object_mut(), theirs_stripped.as_object_mut()) {
-            for key in PACKAGE_JSON_DEP_KEYS {
-                o.remove(*key);
-                t.remove(*key);
-            }
-        }
-        if ours_stripped != theirs_stripped {
-            return Ok(None);
-        }
-
-        let Some(mut merged_obj) = ours_value.as_object().cloned() else {
-            return Ok(None);
-        };
-
-        for key in PACKAGE_JSON_DEP_KEYS {
-            let base_block = base.get(*key).and_then(|v| v.as_object());
-            let ours_block = ours_value.get(*key).and_then(|v| v.as_object());
-            let theirs_block = theirs_value.get(*key).and_then(|v| v.as_object());
-            if base_block.is_none() && ours_block.is_none() && theirs_block.is_none() {
-                continue;
-            }
-
-            let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            if let Some(m) = ours_block {
-                names.extend(m.keys().cloned());
-            }
-            if let Some(m) = theirs_block {
-                names.extend(m.keys().cloned());
-            }
-
-            let mut merged_block = serde_json::Map::new();
-            for name in names {
-                let base_v = base_block.and_then(|m| m.get(&name));
-                let ours_v = ours_block.and_then(|m| m.get(&name));
-                let theirs_v = theirs_block.and_then(|m| m.get(&name));
-                let resolved = match (ours_v, theirs_v) {
-                    (Some(o), Some(t)) if o == t => o.clone(),
-                    (Some(o), Some(t)) => {
-                        if base_v == Some(o) {
-                            t.clone() // only theirs changed this dependency
-                        } else if base_v == Some(t) {
-                            o.clone() // only ours changed this dependency
-                        } else {
-                            return Ok(None); // both changed it, differently
-                        }
-                    }
-                    (Some(o), None) => o.clone(),
-                    (None, Some(t)) => t.clone(),
-                    (None, None) => unreachable!("name came from ours_block or theirs_block"),
-                };
-                merged_block.insert(name, resolved);
-            }
-            merged_obj.insert(key.to_string(), serde_json::Value::Object(merged_block));
-        }
-
-        let merged_value = serde_json::Value::Object(merged_obj);
-
-        // `to_string_pretty` alone would do two things this resolver isn't
-        // supposed to do: reorder every top-level key alphabetically
-        // (serde_json's `Value::Object` is a plain `serde_json::Map`, which
-        // without the `preserve_order` feature is BTreeMap-backed) and
-        // hardcode 2-space indent regardless of the file's own convention.
-        // `merged_obj` above is built by cloning `ours_value`'s object and
-        // updating entries in place, so with `preserve_order` on, its key
-        // order already matches "ours" -- this only needs to match the
-        // indent width, not touch ordering.
-        let indent = detect_json_indent(&ours);
-        let mut buf = Vec::new();
-        let formatter = serde_json::ser::PrettyFormatter::with_indent(&indent);
-        let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
-        serde::Serialize::serialize(&merged_value, &mut serializer)
-            .context("serializing auto-resolved package.json")?;
-        let mut result =
-            String::from_utf8(buf).context("auto-resolved package.json was not valid UTF-8")?;
-        result.push('\n');
-
-        // "ours" is the integration branch's existing convention (same
-        // reasoning `detect_json_indent(&ours)` above already uses for
-        // indent width) -- if its committed package.json had a BOM,
-        // restore it here. Otherwise the merged output silently drops it,
-        // even though nothing about resolving the dependency-block
-        // conflict was ever meant to change the file's encoding (issue
-        // #79).
-        if ours_had_bom {
-            result.insert(0, '\u{FEFF}');
-        }
-
-        Ok(Some(result))
-    }
-
-    /// Plain line-union merge for a `--union`-matched file -- see
-    /// DESIGN.md ("pact-vcs > Semantic auto-resolution").
-    fn try_resolve_union(&self, worktree_path: &Path, file: &str) -> Result<Option<String>> {
-        let (Some((ours, _)), Some((theirs, _))) = (
-            self.read_conflict_stage(worktree_path, file, 2)?,
-            self.read_conflict_stage(worktree_path, file, 3)?,
-        ) else {
-            return Ok(None);
-        };
-
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut merged_lines: Vec<&str> = Vec::new();
-        for line in ours.lines() {
-            if seen.insert(line) {
-                merged_lines.push(line);
-            }
-        }
-        for line in theirs.lines() {
-            if seen.insert(line) {
-                merged_lines.push(line);
-            }
-        }
-
-        let mut result = merged_lines.join("\n");
-        result.push('\n');
-
-        // A plain line-concat is wrong for any file with "final
-        // assignment/declaration wins" semantics: two independent barrel
-        // appends can each be a no-conflict-looking line, yet together
-        // produce two `module.exports =` statements (second silently wins,
-        // first is dropped) or two declarations binding the same
-        // identifier (a real redeclaration SyntaxError in JS/TS). Confirmed
-        // by hand: this exact shape reliably breaks a merged CommonJS
-        // barrel. Treat that as "don't understand this well enough to
-        // auto-resolve" rather than reporting a broken merge as a success.
-        if !union_merge_is_safe(file, &result) {
-            return Ok(None);
-        }
-
-        Ok(Some(result))
-    }
-}
-
-/// File extensions `try_resolve_union`'s safety check applies to.
-const UNION_SAFETY_CHECKED_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "tsx"];
-
-/// Heuristic (not a real parser) check for the two `--union` failure modes
-/// found in practice on JS/TS files: two `module.exports =` / `export
-/// default` statements surviving into the same merged file, and two
-/// declarations binding the same identifier in the same scope. False
-/// negatives are possible by design (this is intentionally cheap, not a
-/// full parser); a false positive just means a file that would otherwise
-/// silently break instead falls through to "needs a human", which is the
-/// safe direction. Non-JS/TS files are never checked.
-fn union_merge_is_safe(file: &str, content: &str) -> bool {
-    let ext = Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !UNION_SAFETY_CHECKED_EXTENSIONS.contains(&ext) {
-        return true;
-    }
-
-    let mut module_exports_count = 0u32;
-    let mut default_export_count = 0u32;
-    let mut bound_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-
-        if let Some(rest) = line.strip_prefix("module.exports") {
-            let rest = rest.trim_start();
-            if rest.starts_with('=') && !rest.starts_with("==") {
-                module_exports_count += 1;
-            }
-        }
-        if line.starts_with("export default ") || line == "export default" || line == "export default;" {
-            default_export_count += 1;
-        }
-
-        for keyword in ["const ", "let ", "var "] {
-            if let Some(rest) = line.strip_prefix(keyword) {
-                for name in binding_names(rest) {
-                    if !bound_names.insert(name) {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-
-    module_exports_count <= 1 && default_export_count <= 1
-}
-
-/// Extracts the identifier(s) a single `const`/`let`/`var` declaration
-/// binds, from the source text right after the keyword -- handles a plain
-/// identifier (`x = ...`), object destructuring (`{ a, b: c, ...rest } =
-/// ...`), and array destructuring (`[a, , b] = ...`). Best-effort: only
-/// needs to catch the common barrel-export shape, not be a full parser.
-fn binding_names(rest: &str) -> Vec<String> {
-    let rest = rest.trim_start();
-    let extract = |inner: &str| -> Vec<String> {
-        inner
-            .split(',')
-            .filter_map(|entry| {
-                let entry = entry.trim().trim_start_matches("...").trim();
-                let key = entry.split(':').next().unwrap_or(entry).trim();
-                let key = key.split('=').next().unwrap_or(key).trim();
-                if key.is_empty() {
-                    None
-                } else {
-                    Some(key.to_string())
-                }
-            })
-            .collect()
-    };
-
-    if let Some(inner) = rest.strip_prefix('{') {
-        match inner.find('}') {
-            Some(end) => extract(&inner[..end]),
-            None => Vec::new(),
-        }
-    } else if let Some(inner) = rest.strip_prefix('[') {
-        match inner.find(']') {
-            Some(end) => extract(&inner[..end]),
-            None => Vec::new(),
-        }
-    } else {
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-            .collect();
-        if name.is_empty() {
-            Vec::new()
-        } else {
-            vec![name]
-        }
+        Ok(Some(semantic_resolvers::ConflictStages { path: file.to_string(), base, ours, theirs }))
     }
 }
 
@@ -1277,8 +1044,8 @@ fn detect_json_indent(text: &str) -> Vec<u8> {
 /// Strips a leading UTF-8 BOM (`\u{FEFF}`), if present. Common Windows
 /// tooling (PowerShell's `Out-File -Encoding utf8`, some editors) writes one
 /// by default; `serde_json::from_str` rejects it outright, which otherwise
-/// silently breaks `try_resolve_package_json`'s parse on an otherwise valid
-/// file (issue #57).
+/// silently breaks `PackageJsonResolver`'s parse on an otherwise valid file
+/// (issue #57).
 fn strip_bom(s: &str) -> &str {
     s.strip_prefix('\u{FEFF}').unwrap_or(s)
 }
@@ -1289,19 +1056,6 @@ fn is_never_auto_resolve(path: &str) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or(path);
     NEVER_AUTO_RESOLVE.contains(&basename)
-}
-
-fn is_package_json(path: &str) -> bool {
-    Path::new(path).file_name().and_then(|n| n.to_str()) == Some("package.json")
-}
-
-fn glob_matches(pattern: &str, path: &str) -> bool {
-    globset::GlobBuilder::new(pattern)
-        .literal_separator(false)
-        .build()
-        .ok()
-        .map(|g| g.compile_matcher().is_match(path))
-        .unwrap_or(false)
 }
 
 fn commit_message(id: &str, task: &str) -> String {
@@ -1654,50 +1408,6 @@ mod tests {
             parse_porcelain_path(" M src\\nested\\file.ts"),
             Some("src/nested/file.ts".to_string())
         );
-    }
-
-    #[test]
-    fn union_merge_is_safe_ignores_non_js_ts_files() {
-        // Two "final value wins" assignments, but this isn't a checked
-        // extension, so the safety check doesn't apply.
-        let content = "module.exports = { a };\nmodule.exports = { b };\n";
-        assert!(union_merge_is_safe("CHANGELOG.md", content));
-    }
-
-    #[test]
-    fn union_merge_is_safe_accepts_plain_barrel_append() {
-        let content = "export {};\nexport * from './chunk';\nexport * from './omit';\n";
-        assert!(union_merge_is_safe("src/barrel.ts", content));
-    }
-
-    #[test]
-    fn union_merge_rejects_duplicate_module_exports() {
-        let content = "const { mul } = require('./mul');\n\
-                        const { div } = require('./div');\n\
-                        module.exports = { mul };\n\
-                        module.exports = { div };\n";
-        assert!(!union_merge_is_safe("src/index.js", content));
-    }
-
-    #[test]
-    fn union_merge_rejects_redeclared_destructured_binding() {
-        let content = "const { add, sub, mul } = require('../src/index');\n\
-                        const { add, sub, div } = require('../src/index');\n";
-        assert!(!union_merge_is_safe("test/index.test.js", content));
-    }
-
-    #[test]
-    fn union_merge_rejects_duplicate_export_default() {
-        let content = "export default class A {}\nexport default class B {}\n";
-        assert!(!union_merge_is_safe("src/widget.tsx", content));
-    }
-
-    #[test]
-    fn union_merge_allows_module_exports_property_assignment() {
-        // `module.exports.foo = ...` is not a full reassignment, so two of
-        // these (for different properties) is a legitimate union merge.
-        let content = "module.exports.mul = require('./mul');\nmodule.exports.div = require('./div');\n";
-        assert!(union_merge_is_safe("src/index.js", content));
     }
 
     #[test]

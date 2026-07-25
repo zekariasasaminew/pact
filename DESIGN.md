@@ -312,7 +312,24 @@ merge is aborted (so the worktree is clean for the *next* workspace's
 attempt -- one conflicted workspace must not poison the rest of the batch)
 and reported as a real conflict, same as if none of this existed.
 
-`try_resolve_package_json`: a dependency name added or changed on exactly
+As of issue #151, the two resolvers below live in `semantic_resolvers.rs`
+behind a `SemanticResolver` trait (`can_handle(path) -> bool`,
+`resolve(&ConflictStages) -> Result<Option<ResolvedFile>>`) instead of a
+hardcoded `if is_package_json(file) { .. } else if union_globs.matches(..)
+{ .. }` in `try_auto_resolve` -- a pure mechanical extraction (behavior,
+including every existing test, is unchanged) meant to give a third
+resolver (Cargo.toml, pyproject.toml, go.mod, a changelog's append-only
+section, ...) somewhere to plug in later without `try_auto_resolve`
+growing another arm. `try_auto_resolve` now: (1) picks the first resolver
+whose `can_handle` matches the file, (2) reads all three conflict stages
+once via the new `read_conflict_stages` (`Ok(None)` if "ours" or "theirs"
+is missing; `base` alone may legitimately be absent and is left to each
+resolver to require or not), (3) hands them to that resolver's `resolve`.
+Deliberately left out of the trait: a `name()` method, since nothing
+today consumes it -- easy to add once an actual observability/logging
+consumer needs it, not before.
+
+`PackageJsonResolver::resolve` (was `try_resolve_package_json`): a dependency name added or changed on exactly
 one side is taken as-is; changed to the *same* value on both sides is
 fine; changed to *different* values on both sides is a real conflict this
 does not try to guess at -- returns `Ok(None)` for the whole file in that
@@ -326,7 +343,7 @@ object and updating in place, so key order already matches "ours" once
 the map itself preserves insertion order) and by sniffing the input's own
 indent width (`detect_json_indent`) instead of hardcoding 2 spaces.
 
-`try_resolve_union`: the result is "ours" lines, in order, followed by any
+`UnionResolver::resolve` (was `try_resolve_union`): the result is "ours" lines, in order, followed by any
 of "theirs" lines not already present verbatim -- the same semantics as
 git's own `merge=union` attribute driver, just applied here in Rust rather
 than by mutating the repo's shared (cross-worktree)
