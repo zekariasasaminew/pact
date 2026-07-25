@@ -500,10 +500,35 @@ impl Orchestrator {
         self.workspaces.list_workspaces()
     }
 
+    /// A single workspace by id -- see `pact_vcs::WorkspaceManager::get_workspace`.
+    pub fn get_workspace(&self, id: &str) -> Result<Workspace> {
+        self.workspaces.get_workspace(id)
+    }
+
     /// Whether a workspace has uncommitted changes -- used by `list` to
     /// show a per-workspace dirty/clean indicator at a glance.
     pub fn is_dirty(&self, id: &str) -> Result<bool> {
         self.workspaces.is_dirty(id)
+    }
+
+    /// The dependency-prep report recorded for this workspace at spawn
+    /// time (issue #12), if any survives -- `None` if the workspace never
+    /// went through a real spawn (e.g. this environment's tests) or the
+    /// file is missing/unreadable, not an error either way; this is
+    /// purely informational, feeding `pact inspect` (issue #16).
+    pub fn dependency_prep_report(&self, id: &str) -> Option<Vec<pact_deps::ManagerPrepReport>> {
+        let path = self.workspaces.state_dir().join("meta").join(format!("{id}-deps.json"));
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
+    }
+
+    /// The structured run-metadata record for this workspace's spawn
+    /// (issue #15), if any survives -- same "informational, not an
+    /// error" contract as `dependency_prep_report`.
+    pub fn run_metadata(&self, id: &str) -> Option<RunMetadata> {
+        let path = self.workspaces.state_dir().join("meta").join(format!("{id}-run.json"));
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
     }
 
     /// A workspace's committed (on-branch) and uncommitted (working-tree)
@@ -564,6 +589,13 @@ impl Orchestrator {
     /// conflicts / `pact resolve` (issue #85)").
     pub fn open_conflicts(&self) -> Result<Vec<pact_coord::PersistedConflict>> {
         pact_coord::open_conflicts(&self.repo_root)
+    }
+
+    /// The most recent open conflict for one workspace, if any -- same
+    /// data `pact resolve <id>` itself would act on, surfaced read-only
+    /// for `pact inspect` (issue #16).
+    pub fn open_conflict_for(&self, workspace_id: &str) -> Result<Option<pact_coord::PersistedConflict>> {
+        pact_coord::open_conflict_for_workspace(&self.repo_root, workspace_id)
     }
 
     /// Retries the most recent open conflict recorded against
