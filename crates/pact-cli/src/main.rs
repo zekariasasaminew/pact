@@ -160,6 +160,18 @@ enum Command {
         /// Workspace id (as shown by `list`)
         id: String,
     },
+    /// Everything pact currently knows about one workspace, in one place:
+    /// metadata, dirty status, agent pid liveness, committed/uncommitted
+    /// diff, the dependency-prep report and run metadata recorded at
+    /// spawn time (if this workspace went through a real spawn), this
+    /// workspace's own active coordination leases and pending messages,
+    /// its operation history, and any open persisted conflict. Read-only
+    /// -- combines existing data sources (`list`/`diff`/`coord-status`/
+    /// `history`/`resolve`'s own lookup), doesn't compute anything new.
+    Inspect {
+        /// Workspace id (as shown by `list`)
+        id: String,
+    },
     /// Commit everything in a workspace's working tree with a message
     /// derived from its task ("agent <id>: <task>"). Without --id, commits
     /// every active workspace that's dirty; a clean workspace is a no-op,
@@ -644,6 +656,9 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Inspect { id } => {
+            print_inspect(&orchestrator, &id)?;
+        }
         Command::CommitAll { id } => {
             let ids: Vec<String> = match id {
                 Some(id) => vec![id],
@@ -976,6 +991,108 @@ fn history_summary(op: &pact_coord::Operation) -> String {
 /// Prints a `pact coord-status` snapshot -- see DESIGN.md ("pact-coord >
 /// Coord status") for why this exists (issue #64: the coordination layer
 /// was otherwise a black box from the outside).
+/// Everything pact knows about one workspace, aggregated from existing
+/// data sources -- see DESIGN.md ("pact-cli > `pact inspect`", issue
+/// #16). Read-only, computes nothing new.
+fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
+    let workspace = orchestrator.get_workspace(id)?;
+    println!("workspace {} ({})", workspace.id, workspace.branch);
+    println!("  path: {}", workspace.path.display());
+    println!("  task: {}", workspace.task);
+    println!("  base commit: {}", short(&workspace.base_commit));
+    match orchestrator.is_dirty(id) {
+        Ok(true) => println!("  status: dirty"),
+        Ok(false) => println!("  status: clean"),
+        Err(_) => println!("  status: unknown (workspace directory may be gone)"),
+    }
+    match workspace.agent_pid {
+        Some(pid) => {
+            let status = if pact_core::agent_process_alive(pid) { "running" } else { "not running" };
+            println!("  agent pid: {pid} ({status})");
+        }
+        None => println!("  agent pid: none recorded"),
+    }
+
+    println!();
+    println!("dependency prep:");
+    match orchestrator.dependency_prep_report(id) {
+        Some(reports) if reports.is_empty() => println!("  no package managers detected"),
+        Some(reports) => {
+            for report in reports {
+                let outcome = if report.success { "ok" } else { "failed" };
+                print!("  {} via {} [{outcome}]", report.manager, report.strategy);
+                if let Some(hit) = report.store_hit {
+                    print!(", store {}", if hit { "hit" } else { "populated" });
+                }
+                if let Some(mode) = &report.materialization {
+                    print!(", materialized via {mode}");
+                }
+                println!();
+                for warning in &report.warnings {
+                    println!("    warning: {warning}");
+                }
+            }
+        }
+        None => println!("  no record (workspace wasn't spawned in this session, or the record is missing)"),
+    }
+
+    println!();
+    println!("last run:");
+    match orchestrator.run_metadata(id) {
+        Some(run) => {
+            let duration = run.ended_at.saturating_sub(run.started_at);
+            println!("  agent: {}", run.agent);
+            println!("  command: {} {}", run.program, run.args.join(" "));
+            println!("  {} in {duration}s: {}", if run.exit_success { "succeeded" } else { "failed" }, run.summary);
+            println!("  coordination: {}", run.coord_status.as_deref().unwrap_or("no coordination config attached"));
+            println!("  log: {}", run.log_path.display());
+        }
+        None => println!("  no record (workspace wasn't spawned in this session, or the record is missing)"),
+    }
+
+    println!();
+    println!("coordination:");
+    let coord = orchestrator.coord_status()?;
+    let own_leases: Vec<_> = coord.active_leases.iter().filter(|l| l.holder == id).collect();
+    if own_leases.is_empty() {
+        println!("  no active leases held by this workspace");
+    } else {
+        for lease in own_leases {
+            println!("  claims '{}' (expires {})", lease.pattern, lease.expires_at);
+        }
+    }
+    let own_pending = coord.pending_messages.iter().find(|p| p.agent_id == id).map(|p| p.pending).unwrap_or(0);
+    println!("  {own_pending} unread message(s)");
+
+    println!();
+    match orchestrator.open_conflict_for(id) {
+        Ok(Some(conflict)) => {
+            println!("open conflict: against '{}', files: {}", conflict.target_branch, conflict.files.join(", "));
+        }
+        Ok(None) => println!("no open conflict"),
+        Err(err) => println!("conflict lookup failed: {err:#}"),
+    }
+
+    println!();
+    let filter = pact_coord::HistoryFilter {
+        workspace_id: Some(id.to_string()),
+        since: None,
+        op_type: None,
+        limit: Some(20),
+    };
+    let operations = orchestrator.history(&filter)?;
+    println!("recent history (last {}):", operations.len());
+    if operations.is_empty() {
+        println!("  none recorded");
+    } else {
+        for op in &operations {
+            println!("  [{}] {}", op.op_type, op.detail);
+        }
+    }
+
+    Ok(())
+}
+
 fn print_coord_status(status: &pact_coord::CoordStatus) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
