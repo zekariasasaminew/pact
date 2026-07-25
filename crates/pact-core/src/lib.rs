@@ -596,103 +596,42 @@ impl Orchestrator {
         task_text: &str,
         files: &[String],
     ) -> Vec<String> {
-        // Captured before the agent runs so the post-run "did it wipe a
-        // conflicted file" check (below) has something to compare
-        // against -- every listed file has conflict markers in it at
-        // this point, so a non-empty pre-run length is a given; it's
-        // recorded anyway rather than assumed, in case that ever stops
-        // being true.
-        let pre_run_lengths: std::collections::HashMap<&String, usize> = files
-            .iter()
-            .map(|file| {
-                let len = std::fs::read_to_string(worktree_path.join(file)).map(|c| c.trim().len()).unwrap_or(0);
-                (file, len)
-            })
-            .collect();
-
-        let prompt = build_arbiter_prompt(task_text, files);
-        let adapter = pact_agents::adapter(config.agent);
-        let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
-
-        // Written to the same stable `state_dir/logs/` location a normal
-        // workspace's own log uses -- deliberately NOT inside
+        // Both written to the same stable `state_dir/logs/` location a
+        // normal workspace's own log uses -- deliberately NOT inside
         // `worktree_path` (the throwaway integration/resolve worktree),
         // which gets torn down unconditionally once merge_all/resolve_conflict
-        // finishes. A log that survived Arbiter's own early returns but
-        // still lived inside that worktree would have been destroyed by
-        // the *caller's* cleanup moments later regardless -- see DESIGN.md
-        // ("pact-core > Arbiter diagnosability", issue #106). Deleted only
-        // on a genuinely accepted resolution (the single `remove_file`
-        // call at the bottom of this function); every failure path below
-        // leaves it in place for inspection.
+        // finishes. See DESIGN.md ("pact-core > Arbiter diagnosability",
+        // issue #106) for why the raw log survives every rejection path;
+        // `decision.json` extends that same convention (issue #148)
+        // rather than introducing a second, competing directory
+        // structure, per the outside-review triage this came from.
         let log_path = self.workspaces.state_dir().join("logs").join(format!("arbiter-{identifier}.jsonl"));
-        let supervisor = Supervisor::new();
-        let outcome = pact_agents::run_and_stream(
-            &supervisor,
-            &program,
-            &args,
-            worktree_path,
-            &log_path,
-            |line| adapter.parse_line(line),
-            |_event| {},
-            |_pid| {},
-        );
+        let decision_path = self.workspaces.state_dir().join("logs").join(format!("arbiter-{identifier}.decision.json"));
+
+        let started_at = unix_now();
+        let outcome = attempt_arbiter_resolution(config, worktree_path, task_text, files, &log_path);
+        let ended_at = unix_now();
+
+        // Written on every attempt, accepted or rejected -- a passing
+        // test command doesn't prove semantic correctness, so successful
+        // attempts need the same durable record as failed ones (issue
+        // #148). Best-effort: a write failure here must never mask the
+        // actual accept/reject decision it would have recorded.
+        let decision = build_arbiter_decision(identifier, config.agent, files, &config.test_cmd, &outcome, started_at, ended_at);
+        if let Err(err) = std::fs::write(&decision_path, serde_json::to_vec_pretty(&decision).unwrap_or_default()) {
+            tracing::warn!("arbiter: failed to write decision record to {}: {err:#}", decision_path.display());
+        }
 
         match outcome {
-            Ok(run) if run.success => {}
-            Ok(run) => {
-                tracing::warn!(
-                    "arbiter agent reported failure resolving {files:?}: {} (log kept at {})",
-                    run.summary,
-                    log_path.display()
-                );
-                return Vec::new();
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "arbiter agent failed to run for {files:?}: {err:#} (log kept at {})",
-                    log_path.display()
-                );
-                return Vec::new();
-            }
-        }
-
-        // The agent's own reported success isn't trusted on its own --
-        // see `validate_arbiter_scope` for what's actually checked and
-        // why (conflict markers, an emptied file, and anything changed
-        // outside `files`).
-        if let Err(reason) = validate_arbiter_scope(worktree_path, files, &pre_run_lengths) {
-            tracing::warn!("arbiter: {reason}, not accepting its resolution (log kept at {})", log_path.display());
-            return Vec::new();
-        }
-
-        for file in files {
-            let add = Command::new("git").args(["add", "--", file]).current_dir(worktree_path).output();
-            if !matches!(add, Ok(ref o) if o.status.success()) {
-                tracing::warn!("arbiter: failed to stage {file} after resolution (log kept at {})", log_path.display());
-                return Vec::new();
-            }
-        }
-
-        match run_shell(worktree_path, &config.test_cmd) {
-            Ok(true) => {
+            ArbiterOutcome::Accepted { resolved_files } => {
                 let _ = std::fs::remove_file(&log_path);
-                files.to_vec()
+                resolved_files
             }
-            Ok(false) => {
+            ArbiterOutcome::Rejected { reason, .. } => {
                 tracing::warn!(
-                    "arbiter's resolution for {files:?} failed the test command ('{}') -- not \
-                     accepting it, log kept at {} for inspection",
-                    config.test_cmd,
-                    log_path.display()
-                );
-                Vec::new()
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "failed to run the arbiter test command '{}': {err:#} (log kept at {})",
-                    config.test_cmd,
-                    log_path.display()
+                    "arbiter: {reason} (log kept at {}, decision kept at {})",
+                    log_path.display(),
+                    decision_path.display()
                 );
                 Vec::new()
             }
@@ -805,6 +744,152 @@ impl Orchestrator {
 /// instruction telling the agent not to touch anything outside `files`
 /// is just that, a prompt instruction, not enforcement, so this is what
 /// actually verifies it didn't.
+/// One Arbiter attempt's result, detailed enough to build a full
+/// `decision.json` record from -- `test_passed` is `None` whenever the
+/// attempt was rejected before ever reaching the test-command step
+/// (agent failure, leftover markers, out-of-scope changes, staging
+/// failure), distinct from `Some(false)` (the test command itself ran
+/// and failed).
+enum ArbiterOutcome {
+    Accepted { resolved_files: Vec<String> },
+    Rejected { reason: String, test_passed: Option<bool> },
+}
+
+fn agent_kind_name(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude",
+        AgentKind::Copilot => "copilot",
+        AgentKind::Codex => "codex",
+        AgentKind::Gemini => "gemini",
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Builds one Arbiter attempt's `decision.json` value (issue #148) --
+/// pure and separate from `run_arbiter_inner` specifically so the field
+/// mapping is testable without spawning a real agent.
+fn build_arbiter_decision(
+    identifier: &str,
+    agent: AgentKind,
+    files: &[String],
+    test_cmd: &str,
+    outcome: &ArbiterOutcome,
+    started_at: u64,
+    ended_at: u64,
+) -> serde_json::Value {
+    let (accepted, rejection_reason, test_passed) = match outcome {
+        ArbiterOutcome::Accepted { .. } => (true, None, Some(true)),
+        ArbiterOutcome::Rejected { reason, test_passed } => (false, Some(reason.as_str()), *test_passed),
+    };
+    serde_json::json!({
+        "workspace_id": identifier,
+        "agent": agent_kind_name(agent),
+        "accepted": accepted,
+        "rejection_reason": rejection_reason,
+        "conflicted_files": files,
+        "test_command": test_cmd,
+        "test_passed": test_passed,
+        "started_at": started_at,
+        "ended_at": ended_at,
+    })
+}
+
+/// The actual Arbiter attempt -- spawns the agent, then validates its
+/// result -- split from `run_arbiter_inner` so every exit path funnels
+/// through one `ArbiterOutcome` instead of scattering `tracing::warn!` +
+/// early-return pairs, which is what made building a complete
+/// `decision.json` on every path (issue #148) straightforward instead
+/// of repetitive.
+fn attempt_arbiter_resolution(
+    config: &ArbiterConfig,
+    worktree_path: &Path,
+    task_text: &str,
+    files: &[String],
+    log_path: &Path,
+) -> ArbiterOutcome {
+    // Captured before the agent runs so the post-run "did it wipe a
+    // conflicted file" check (in `validate_arbiter_scope`) has something
+    // to compare against -- every listed file has conflict markers in it
+    // at this point, so a non-empty pre-run length is a given; it's
+    // recorded anyway rather than assumed, in case that ever stops being
+    // true.
+    let pre_run_lengths: std::collections::HashMap<&String, usize> = files
+        .iter()
+        .map(|file| {
+            let len = std::fs::read_to_string(worktree_path.join(file)).map(|c| c.trim().len()).unwrap_or(0);
+            (file, len)
+        })
+        .collect();
+
+    let prompt = build_arbiter_prompt(task_text, files);
+    let adapter = pact_agents::adapter(config.agent);
+    let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
+
+    let supervisor = Supervisor::new();
+    let outcome = pact_agents::run_and_stream(
+        &supervisor,
+        &program,
+        &args,
+        worktree_path,
+        log_path,
+        |line| adapter.parse_line(line),
+        |_event| {},
+        |_pid| {},
+    );
+
+    match outcome {
+        Ok(run) if run.success => {}
+        Ok(run) => {
+            return ArbiterOutcome::Rejected {
+                reason: format!("arbiter agent reported failure resolving {files:?}: {}", run.summary),
+                test_passed: None,
+            }
+        }
+        Err(err) => {
+            return ArbiterOutcome::Rejected {
+                reason: format!("arbiter agent failed to run for {files:?}: {err:#}"),
+                test_passed: None,
+            }
+        }
+    }
+
+    // The agent's own reported success isn't trusted on its own -- see
+    // `validate_arbiter_scope` for what's actually checked and why
+    // (conflict markers, an emptied file, and anything changed outside
+    // `files`).
+    if let Err(reason) = validate_arbiter_scope(worktree_path, files, &pre_run_lengths) {
+        return ArbiterOutcome::Rejected { reason, test_passed: None };
+    }
+
+    for file in files {
+        let add = Command::new("git").args(["add", "--", file]).current_dir(worktree_path).output();
+        if !matches!(add, Ok(ref o) if o.status.success()) {
+            return ArbiterOutcome::Rejected {
+                reason: format!("failed to stage {file} after resolution"),
+                test_passed: None,
+            };
+        }
+    }
+
+    match run_shell(worktree_path, &config.test_cmd) {
+        Ok(true) => ArbiterOutcome::Accepted { resolved_files: files.to_vec() },
+        Ok(false) => ArbiterOutcome::Rejected {
+            reason: format!(
+                "arbiter's resolution for {files:?} failed the test command ('{}') -- not accepting it",
+                config.test_cmd
+            ),
+            test_passed: Some(false),
+        },
+        Err(err) => ArbiterOutcome::Rejected {
+            reason: format!("failed to run the arbiter test command '{}': {err:#}", config.test_cmd),
+            test_passed: None,
+        },
+    }
+}
+
 fn validate_arbiter_scope(
     worktree_path: &Path,
     files: &[String],
@@ -1118,5 +1203,54 @@ mod tests {
 
         assert!(validate_arbiter_scope(&root, &files, &pre).is_ok());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_arbiter_decision_records_an_accepted_attempt() {
+        let files = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let outcome = ArbiterOutcome::Accepted { resolved_files: files.clone() };
+        let decision = build_arbiter_decision("ws-1", AgentKind::Claude, &files, "cargo test", &outcome, 100, 105);
+
+        assert_eq!(decision["workspace_id"], "ws-1");
+        assert_eq!(decision["agent"], "claude");
+        assert_eq!(decision["accepted"], true);
+        assert!(decision["rejection_reason"].is_null());
+        assert_eq!(decision["conflicted_files"], serde_json::json!(["a.rs", "b.rs"]));
+        assert_eq!(decision["test_command"], "cargo test");
+        assert_eq!(decision["test_passed"], true);
+        assert_eq!(decision["started_at"], 100);
+        assert_eq!(decision["ended_at"], 105);
+    }
+
+    #[test]
+    fn build_arbiter_decision_records_a_rejected_attempt_with_its_reason() {
+        let files = vec!["a.rs".to_string()];
+        let outcome = ArbiterOutcome::Rejected {
+            reason: "left conflict markers in a.rs".to_string(),
+            test_passed: None,
+        };
+        let decision = build_arbiter_decision("ws-2", AgentKind::Copilot, &files, "npm test", &outcome, 200, 201);
+
+        assert_eq!(decision["accepted"], false);
+        assert_eq!(decision["rejection_reason"], "left conflict markers in a.rs");
+        assert!(decision["test_passed"].is_null());
+    }
+
+    #[test]
+    fn build_arbiter_decision_distinguishes_test_failure_from_never_reaching_the_test_step() {
+        let files = vec!["a.rs".to_string()];
+        let reached_test = ArbiterOutcome::Rejected {
+            reason: "failed the test command".to_string(),
+            test_passed: Some(false),
+        };
+        let decision = build_arbiter_decision("ws-3", AgentKind::Codex, &files, "go test", &reached_test, 0, 0);
+        assert_eq!(decision["test_passed"], false);
+
+        let never_reached = ArbiterOutcome::Rejected {
+            reason: "agent failed to run".to_string(),
+            test_passed: None,
+        };
+        let decision = build_arbiter_decision("ws-3", AgentKind::Codex, &files, "go test", &never_reached, 0, 0);
+        assert!(decision["test_passed"].is_null());
     }
 }
