@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::{self, DEFAULT_LEASE_TTL_SECONDS};
 
@@ -46,7 +46,7 @@ pub struct ClaimResult {
     pub conflicts: Vec<Conflict>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ActiveLease {
     pub pattern: String,
     pub holder: String,

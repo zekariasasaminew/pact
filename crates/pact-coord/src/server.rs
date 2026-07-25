@@ -176,6 +176,19 @@ impl CoordServer {
             Err(e) => error_result(format!("error: {e:#}")),
         }
     }
+
+    #[tool(
+        description = "List every currently-unexpired file lease in this coordination session -- pattern, holder, and expiry -- across all agents, not just your own. Use this to check what's claimed before deciding whether to claim something yourself, without guessing from claim_files' conflict responses alone. Read-only: unlike check_messages, calling this never marks anything as read or changes any state."
+    )]
+    fn list_claims(&self) -> Result<CallToolResult, McpError> {
+        let conn = self.conn.lock().unwrap();
+        match leases::list_active_leases(&conn) {
+            Ok(active) => text_result(
+                serde_json::to_string_pretty(&active).unwrap_or_else(|e| format!("error serializing result: {e}")),
+            ),
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
+    }
 }
 
 #[tool_handler]
@@ -261,5 +274,39 @@ mod tests {
             .release_files(Parameters(ReleaseFilesParams { globs: vec!["[".to_string()] }))
             .unwrap();
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn list_claims_is_empty_with_no_active_leases() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = server.list_claims().unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(serde_json::from_str::<Vec<leases::ActiveLease>>(result_text(&result)).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn list_claims_shows_an_active_lease_regardless_of_who_holds_it() {
+        // Unlike check_messages, list_claims has no self/other distinction
+        // -- it's a full snapshot of coordination state, so one agent's
+        // own claim showing up in its own list_claims call is correct,
+        // not a self-message leaking through.
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        server
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: None }))
+            .unwrap();
+
+        let result = server.list_claims().unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let active: Vec<leases::ActiveLease> = serde_json::from_str(result_text(&result)).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].holder, "agent-a");
+        assert_eq!(active[0].pattern, "some.txt");
+    }
+
+    fn result_text(result: &CallToolResult) -> &str {
+        match result.content.first() {
+            Some(content) => content.as_text().map(|t| t.text.as_str()).unwrap_or_default(),
+            None => "",
+        }
     }
 }
