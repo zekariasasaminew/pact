@@ -7,9 +7,13 @@ use crate::detect::PackageManager;
 
 /// Warms the package manager's own global cache for ecosystems that already
 /// have one, instead of building pact-specific sharing -- see DESIGN.md
-/// ("pact-deps > Passthrough caching strategy"). Failures are logged, not
-/// returned as an error.
-pub fn run(manager: PackageManager, workspace_path: &Path) -> Result<()> {
+/// ("pact-deps > Passthrough caching strategy"). `Ok(true)`/`Ok(false)`
+/// reflects whether the command itself succeeded; `Err` means it couldn't
+/// even be spawned. Callers building a structured prep report (issue #12)
+/// need that distinction -- a swallowed `Ok(())` regardless of exit code,
+/// which this used to return, made every passthrough failure invisible
+/// except via a log line.
+pub fn run(manager: PackageManager, workspace_path: &Path) -> Result<bool> {
     let (program, args): (&str, &[&str]) = match manager {
         // Bun's global cache is used automatically (no --prefer-offline
         // equivalent to opt into); --frozen-lockfile mirrors npm ci's
@@ -23,7 +27,7 @@ pub fn run(manager: PackageManager, workspace_path: &Path) -> Result<()> {
         PackageManager::Pipenv => ("pipenv", &["install"]),
         PackageManager::Cargo => ("cargo", &["fetch"]),
         PackageManager::GoModules => ("go", &["mod", "download"]),
-        PackageManager::Maven | PackageManager::Gradle => return Ok(()),
+        PackageManager::Maven | PackageManager::Gradle => return Ok(true),
         PackageManager::PipPlain => return run_pip_plain(workspace_path),
         PackageManager::Npm => {
             anyhow::bail!("npm goes through the content store, not passthrough::run")
@@ -35,7 +39,7 @@ pub fn run(manager: PackageManager, workspace_path: &Path) -> Result<()> {
 
 /// No custom store for plain pip/venv -- see DESIGN.md ("pact-deps >
 /// Passthrough caching strategy").
-fn run_pip_plain(workspace_path: &Path) -> Result<()> {
+fn run_pip_plain(workspace_path: &Path) -> Result<bool> {
     if workspace_path.join("requirements.txt").exists() {
         run_command("pip", &["install", "-r", "requirements.txt"], workspace_path)
     } else {
@@ -43,7 +47,7 @@ fn run_pip_plain(workspace_path: &Path) -> Result<()> {
     }
 }
 
-fn run_command(program: &str, args: &[&str], workspace_path: &Path) -> Result<()> {
+fn run_command(program: &str, args: &[&str], workspace_path: &Path) -> Result<bool> {
     let output = cmdutil::run(program, args, workspace_path)?;
 
     if !output.status.success() {
@@ -53,7 +57,8 @@ fn run_command(program: &str, args: &[&str], workspace_path: &Path) -> Result<()
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
+        return Ok(false);
     }
 
-    Ok(())
+    Ok(true)
 }

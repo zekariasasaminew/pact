@@ -19,6 +19,25 @@ pub enum PackageManager {
     Gradle,
 }
 
+impl PackageManager {
+    pub fn name(self) -> &'static str {
+        match self {
+            PackageManager::Bun => "bun",
+            PackageManager::Pnpm => "pnpm",
+            PackageManager::Yarn => "yarn",
+            PackageManager::Npm => "npm",
+            PackageManager::Uv => "uv",
+            PackageManager::Poetry => "poetry",
+            PackageManager::Pipenv => "pipenv",
+            PackageManager::PipPlain => "pip",
+            PackageManager::Cargo => "cargo",
+            PackageManager::GoModules => "go",
+            PackageManager::Maven => "maven",
+            PackageManager::Gradle => "gradle",
+        }
+    }
+}
+
 /// Detects package managers in use at `project_root` by marker file. Within
 /// one ecosystem family (JS, Python) only one manager is reported, in order
 /// of how specifically it can be identified -- e.g. a `pnpm-lock.yaml`

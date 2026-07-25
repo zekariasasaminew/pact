@@ -1469,6 +1469,58 @@ second-plus workspace doesn't pay for a full reinstall. Plain pip/venv is
 intentionally left as passthrough-only (see "Passthrough caching strategy"
 below).
 
+### Structured prep reporting (issue #12)
+
+From an outside code review (2026-07-24), verified against source:
+`prepare` returned bare `Result<()>`, and every real per-manager failure
+was a `tracing::warn!` and nothing else -- no way to know which managers
+were detected, which strategy ran, whether the npm content store was hit
+or freshly populated, or which materialization method (reflink/
+read-only-hardlink/copy) was used, without reading logs.
+
+`prepare` now returns `Vec<ManagerPrepReport>` (one per detected
+manager: `manager`, `strategy`, `store_key`, `store_hit`,
+`materialization`, `success`, `warnings`) instead of a bare `Result<()>`
+-- callers get real data, not just a side effect. `pact-core`'s
+`spawn_with_supervisor` persists it to `state_dir/meta/<id>-deps.json`,
+sibling to the workspace's own `meta/<id>.json`, feeding `pact inspect`
+(issue #16).
+
+Two real, previously-invisible gaps this surfaced while making the
+report honest, not by design intent: `passthrough::run` and
+`run_plain_npm_install` both used to swallow a real command failure into
+`Ok(())` -- only `cmdutil::run`'s own spawn failure would ever surface
+as `Err`, meaning a passthrough install that ran and genuinely failed
+(bad exit code) was indistinguishable from one that succeeded, in the
+return type. Both now return `Result<bool>` (spawn failure is still
+`Err`; the command's own exit code becomes the `bool`), which the report
+now actually reflects in `success`.
+
+`store_hit` is captured by a new `ContentStore::entry_exists` check
+*before* `populate_if_absent` -- calling `populate_if_absent` first and
+then checking existence would always report `true` (it just got
+populated), telling a hit from a miss requires looking before, not after.
+
+Verified for real, not mocked: 3 new pact-deps tests exercise the actual
+`prepare_npm`/`prepare_passthrough` functions against real scratch
+workspaces -- a real `npm ci` with a zero-dependency `package.json`/
+`package-lock.json` pair (fast, effectively no network needed) confirms
+`store_hit: false` on the first call and `store_hit: true` on a second
+call with the identical lockfile; a real `cargo fetch` against this
+crate's own `Cargo.toml` (cargo is guaranteed present in this workspace's
+own build environment) confirms the passthrough success path; a
+lockfile-less `package.json` confirms the `plain-install-no-lockfile`
+strategy and its warning.
+
+**Deliberately not surfaced in `spawn --dry-run`** -- `--dry-run` only
+ever calls the side-effect-free `pact_deps::detect` today, never
+`prepare` itself (which does real installs); making dry-run show
+`store_hit`/`materialization` would mean either running a real install
+during a dry run (defeats the point) or building a separate
+preview-only path that predicts what `prepare` would do without doing
+it (a real, separate feature, not implied by this finding). Scoped down
+from the original issue's broader ask for exactly this reason.
+
 ### The Windows MAX_PATH failure (issue #7)
 
 A real failure mode found while verifying issue #7's fallback path, not a
