@@ -372,7 +372,12 @@ enum Command {
     /// or fix anything. A missing agent CLI or package manager is
     /// informational, not a failure, since not everyone needs all of them;
     /// only a missing (or too-old) `git` makes this exit non-zero.
-    Doctor,
+    Doctor {
+        /// Print machine-readable JSON instead of the human-readable
+        /// report -- for CI diagnostics and bug reports.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -391,8 +396,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Command::Doctor = cli.command {
-        return run_doctor();
+    if let Command::Doctor { json } = cli.command {
+        return run_doctor(json);
     }
 
     if let Command::Demo = cli.command {
@@ -794,7 +799,7 @@ fn main() -> Result<()> {
         }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),
-        Command::Doctor => unreachable!("handled above, before the orchestrator opens"),
+        Command::Doctor { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Init { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Demo => unreachable!("handled above, before the orchestrator opens"),
     }
@@ -1241,24 +1246,66 @@ fn git_version_supports_worktree(version_line: &str) -> Option<bool> {
     Some((major, minor) >= (2, 5))
 }
 
-fn run_doctor() -> Result<()> {
+fn doctor_group_json(checks: &[DoctorCheck]) -> serde_json::Value {
+    serde_json::Value::Array(
+        checks
+            .iter()
+            .map(|check| {
+                let version = doctor_check_version(check);
+                serde_json::json!({
+                    "name": check.label,
+                    "found": version.is_some(),
+                    "version": version,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn run_doctor(json: bool) -> Result<()> {
     let git_check = DoctorCheck { label: "git", program: "git", args: &["--version"] };
     let git_version = doctor_check_version(&git_check);
+    // An unparseable-but-present version string is treated as "can't
+    // confirm, assume fine" (defaults to true), same as a missing version
+    // is treated as "definitely not fine" (defaults to false) -- matches
+    // the human-readable branch below exactly, just computed once up
+    // front so both output formats agree.
+    let worktree_ok = match &git_version {
+        Some(version) => git_version_supports_worktree(version).unwrap_or(true),
+        None => false,
+    };
+    let git_ok = git_version.is_some() && worktree_ok;
 
-    let git_ok = match &git_version {
+    if json {
+        let report = serde_json::json!({
+            "git": {
+                "found": git_version.is_some(),
+                "version": git_version,
+                "worktree_supported": worktree_ok,
+            },
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "agent_clis": doctor_group_json(AGENT_CHECKS),
+            "package_managers": doctor_group_json(PACKAGE_MANAGER_CHECKS),
+        });
+        println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("error serializing result: {e}")));
+        if !git_ok {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    match &git_version {
         Some(version) => {
-            let worktree_ok = git_version_supports_worktree(version).unwrap_or(true);
             println!(
                 "git: found, {version}{}",
                 if worktree_ok { " (worktree supported)" } else { " (too old for `git worktree` -- need >= 2.5)" }
             );
-            worktree_ok
         }
         None => {
             println!("git: not found -- required, pact can't create any workspace without it");
-            false
         }
-    };
+    }
 
     println!();
     print_doctor_group("agent CLIs", AGENT_CHECKS);

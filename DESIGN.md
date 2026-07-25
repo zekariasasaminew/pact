@@ -1691,6 +1691,31 @@ internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
 lines interleave at line granularity, never mid-line.
 
+### `pact doctor --json` (issue #17)
+
+From an outside code review (2026-07-24): the human-readable `doctor`
+output is fine for a person running it directly, but CI diagnostics and
+bug reports need machine-readable output. Added `--json`, computing the
+same data the human-readable path already does (`git_version`/
+`worktree_ok` moved out of the `match` and shared by both output
+branches, so they can't disagree) plus `os`/`arch` from
+`std::env::consts`.
+
+**Deliberately doesn't include** "pact state directory"/"coordination DB
+path"/"config path," despite the original finding listing them --
+`pact doctor` resolves *before* `--repo` is ever looked at (same early
+dispatch as `Init`/`Demo`/`Completions`, ahead of `Orchestrator::open`),
+by design: it's meant to work from anywhere, checking the environment,
+not a specific repo. Adding repo-scoped fields would mean either forcing
+doctor to resolve a repo (changing its "works from anywhere" character)
+or making those fields silently absent/misleading when run outside one.
+Scoped down to what's genuinely repo-independent.
+
+Verified with 4 integration tests, including one that runs both output
+modes back to back and asserts they report identical
+`worktree_supported`, so a future change to one path can't silently
+diverge from the other.
+
 ### `pact inspect` (issue #16)
 
 From an outside code review (2026-07-24): users need one command that
