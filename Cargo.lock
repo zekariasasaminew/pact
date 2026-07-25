@@ -870,6 +870,7 @@ dependencies = [
  "pact-coord",
  "pact-deps",
  "pact-vcs",
+ "serde",
  "serde_json",
  "tracing",
 ]
