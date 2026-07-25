@@ -16,6 +16,18 @@ claimed. Worktree isolation and merge-all's conflict handling are the
 parts that are real guarantees; coordination is a convention agents
 opt into.
 
+**The full loop, end to end:** isolate each agent in its own git
+worktree &rarr; prepare dependencies before the agent's first command
+&rarr; launch the agent with coordination tools wired in automatically
+&rarr; track every claim, message, and merge in a queryable operation
+log (`pact history`) &rarr; merge completed work back onto one branch,
+sequenced smallest-changeset-first &rarr; verify an AI-proposed conflict resolution
+against a real test command before ever accepting it (Arbiter). Six
+real subsystems working together, not just a lock server, not just a
+worktree wrapper, and not just an MCP integration -- coordination is
+the one most visible from the wire protocol, but it's one piece of the
+loop, not the whole tool.
+
 ![pact demo: two isolated workspaces created, listed, and merged onto one clean branch, zero decisions](docs/demo.gif)
 
 *(That's `pact demo`'s actual, real output -- zero-cost, zero-agent-CLI-call, run it yourself in 5 seconds. See Getting started below for the real thing, with real agents.)*
