@@ -1087,6 +1087,30 @@ negative TTL silently produced an already-expired lease and an unbounded
 one produced an `expires_at` centuries out, both misleadingly returning
 `accepted: true` either way.
 
+### `list_claims` MCP tool (issue #149)
+
+From an outside code review (2026-07-24), verified against source: only
+4 `#[tool]` handlers existed (`claim_files`/`release_files`/
+`send_message`/`check_messages`) -- an agent had no way to ask "what's
+currently claimed, by whom, until when" without inferring it indirectly
+from a `claim_files` conflict response. Only the human-facing `pact
+coord-status` CLI command exposed the full picture.
+
+Added as a 5th tool, thin wrapper over the existing
+`leases::list_active_leases` query (already backs `coord-status`, no new
+query logic). No holder filter, same as `coord-status` -- a full
+snapshot of coordination state, not scoped to "not me" the way
+`check_messages` excludes an agent's own messages. `ActiveLease` gained
+`Deserialize`/`PartialEq`/`Eq` derives (previously `Serialize`-only,
+since nothing needed to parse it back) so both the server-side tests and
+the pact-coord SDK bindings could round-trip it directly instead of
+string-matching JSON output.
+
+Shipped alongside matching `list_claims`/`listClaims` methods in both
+pact-coord SDK bindings (issue #127) -- keeping the bindings in sync
+with the actual tool surface as it grows is the default, not something
+that needed a separate decision each time a tool gets added.
+
 ### Known scaling limit: `expand_glob` cost (issue #72)
 
 `expand_glob` walks the entire workspace file tree (`WalkDir::new(root)`)
