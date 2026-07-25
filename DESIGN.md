@@ -629,12 +629,41 @@ defaulting an unseen path to 0 doesn't itself trigger the emptied-file
 check). Plus 2 new pact-vcs tests directly on `changed_paths` itself
 (modified+untracked files reported, clean worktree reports empty).
 
-Reviewer's proposed "durable audit artifact per attempt"
-(`.pact-<repo>/arbiter/<id>/<timestamp>/...`) is a related, separate
-finding (issue #148) -- not implemented here. That one extends the
-*existing* `state_dir/logs/arbiter-<id>.jsonl` convention from issue
-#106 rather than introducing a second competing directory structure, and
-ships as its own PR.
+### Arbiter decision records (issue #148)
+
+Reviewer's proposed "durable audit artifact per attempt" -- a passing
+test command doesn't prove semantic correctness, so a *successful*
+Arbiter attempt needs the same durable record a rejected one already had
+(the raw JSONL log, since issue #106). Reviewer's own proposed shape was
+a new `.pact-<repo>/arbiter/<id>/<timestamp>/...` directory tree;
+implemented instead as an extension of the *existing*
+`state_dir/logs/arbiter-<id>.jsonl` convention -- a sibling
+`arbiter-<id>.decision.json`, not a second competing directory
+structure.
+
+Required restructuring `run_arbiter_inner`, which previously logged and
+`return`ed `Vec::new()` at five separate points scattered through the
+function -- there was no single place to hang "write the decision record"
+off of without repeating it five times. Split into `attempt_arbiter_resolution`
+(the actual agent-spawn-and-validate logic, now returning one
+`ArbiterOutcome` enum -- `Accepted { resolved_files }` or
+`Rejected { reason, test_passed }` -- instead of scattered early
+returns) and `build_arbiter_decision` (pure JSON-value construction from
+an `ArbiterOutcome`, no I/O). `run_arbiter_inner` itself is now just:
+run the attempt, build the decision from whatever it returned, write it
+unconditionally, then act on accept/reject. Every exit path produces a
+record now, not just the ones someone remembered to add a write call to.
+
+`test_passed` is `Option<bool>`, not `bool` -- deliberately distinguishes
+"the test command ran and failed" (`Some(false)`) from "rejected before
+ever reaching that step" (`None`, e.g. leftover conflict markers or an
+out-of-scope file change) -- collapsing those into one boolean would
+lose real diagnostic information about *how far* an attempt got.
+
+Verified with 3 new unit tests directly on `build_arbiter_decision` (no
+agent spawn needed, pure function): an accepted attempt's full field
+set, a rejected attempt's reason surfacing correctly, and the
+`test_passed: Some(false)` vs. `None` distinction specifically.
 
 ## pact-agents — adapters and process supervision
 
