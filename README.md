@@ -1095,7 +1095,7 @@ given together.
 **A real merge conflict `merge-all` skips is resumable, not lost.**
 `pact resolve` (no id) lists every open conflict it recorded; `pact
 resolve <id>` retries that workspace's branch against the target branch
-it conflicted against, with the same `--union`/`--test-cmd`/
+it conflicted against, with the same `--append-only`/`--test-cmd`/
 `--arbiter-agent`/`--arbiter-safety` flags `merge-all` itself takes --
 useful once you've fixed the underlying disagreement in the workspace's
 branch, or want to point Arbiter at just this one conflict standalone.
