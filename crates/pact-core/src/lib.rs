@@ -25,6 +25,31 @@ pub struct ArbiterConfig {
     pub test_cmd: String,
 }
 
+/// A durable, structured record of one real agent run -- see DESIGN.md
+/// ("pact-core > structured run metadata", issue #15). Persisted to
+/// `state_dir/meta/<id>-run.json`, sibling to the workspace's own
+/// `meta/<id>.json` and the dependency-prep report (issue #12). Before
+/// this, none of these fields survived past the terminal output and the
+/// raw JSONL agent log -- there was no queryable "what actually
+/// happened" record for a real spawn.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RunMetadata {
+    pub workspace_id: String,
+    pub agent: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub started_at: u64,
+    pub ended_at: u64,
+    pub exit_success: bool,
+    pub summary: String,
+    /// The coordination server's last reported status before the process
+    /// exited (e.g. "connected", "pending", "failed"), or `None` if no
+    /// coordination config was attached to this run at all.
+    pub coord_status: Option<String>,
+    pub log_path: PathBuf,
+}
+
 /// Ties together workspace lifecycle (pact-vcs), dependency
 /// materialization (pact-deps), and agent launch (pact-agents)
 /// behind one stable interface.
@@ -408,7 +433,8 @@ impl Orchestrator {
         // almost identically to normal. Only what the server had settled
         // on by the time the process actually exited matters here.
         let mut coord_last_status: Option<String> = None;
-        let outcome = pact_agents::run_and_stream(
+        let started_at = unix_now();
+        let run_result = pact_agents::run_and_stream(
             supervisor,
             &program,
             &args,
@@ -428,7 +454,8 @@ impl Orchestrator {
                     tracing::warn!("failed to record agent pid for workspace {id}: {err:#}");
                 }
             },
-        )?;
+        );
+        let ended_at = unix_now();
 
         if let Some(message) = coord_warning(coord.is_some(), coord_last_status.as_deref(), coord_name) {
             tracing::warn!("workspace {}: {message}", workspace.id);
@@ -441,6 +468,31 @@ impl Orchestrator {
             );
         }
 
+        // Recorded regardless of success/failure -- a run that failed to
+        // even start is exactly the kind of thing worth a durable record,
+        // not just an error propagated up and otherwise lost.
+        let run_metadata = RunMetadata {
+            workspace_id: workspace.id.clone(),
+            agent: agent_kind_name(agent).to_string(),
+            program: program.clone(),
+            args: args.clone(),
+            cwd: workspace.path.clone(),
+            started_at,
+            ended_at,
+            exit_success: run_result.as_ref().map(|r| r.success).unwrap_or(false),
+            summary: match &run_result {
+                Ok(run) => run.summary.clone(),
+                Err(err) => format!("failed to run: {err:#}"),
+            },
+            coord_status: coord_last_status,
+            log_path: log_path.clone(),
+        };
+        let run_meta_path = self.workspaces.state_dir().join("meta").join(format!("{}-run.json", workspace.id));
+        if let Err(err) = std::fs::write(&run_meta_path, serde_json::to_vec_pretty(&run_metadata).unwrap_or_default()) {
+            tracing::warn!("failed to persist run metadata to {}: {err:#}", run_meta_path.display());
+        }
+
+        let outcome = run_result?;
         Ok((workspace, outcome))
     }
 
@@ -1214,6 +1266,58 @@ mod tests {
 
         assert!(validate_arbiter_scope(&root, &files, &pre).is_ok());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_metadata_round_trips_through_json_with_a_coord_status() {
+        let metadata = RunMetadata {
+            workspace_id: "ws-1".to_string(),
+            agent: "claude".to_string(),
+            program: "claude".to_string(),
+            args: vec!["-p".to_string(), "do the thing".to_string()],
+            cwd: PathBuf::from("/tmp/ws-1"),
+            started_at: 100,
+            ended_at: 142,
+            exit_success: true,
+            summary: "Created foo.rs".to_string(),
+            coord_status: Some("connected".to_string()),
+            log_path: PathBuf::from("/tmp/state/logs/ws-1.jsonl"),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let round_tripped: RunMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(round_tripped.workspace_id, "ws-1");
+        assert_eq!(round_tripped.agent, "claude");
+        assert_eq!(round_tripped.args, vec!["-p", "do the thing"]);
+        assert_eq!(round_tripped.started_at, 100);
+        assert_eq!(round_tripped.ended_at, 142);
+        assert!(round_tripped.exit_success);
+        assert_eq!(round_tripped.coord_status.as_deref(), Some("connected"));
+    }
+
+    #[test]
+    fn run_metadata_round_trips_with_no_coord_status() {
+        // A run with no coordination config attached at all -- distinct
+        // from a coord status that was reported but never settled.
+        let metadata = RunMetadata {
+            workspace_id: "ws-2".to_string(),
+            agent: "copilot".to_string(),
+            program: "copilot".to_string(),
+            args: vec![],
+            cwd: PathBuf::from("/tmp/ws-2"),
+            started_at: 0,
+            ended_at: 5,
+            exit_success: false,
+            summary: "failed to run: spawn error".to_string(),
+            coord_status: None,
+            log_path: PathBuf::from("/tmp/state/logs/ws-2.jsonl"),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let round_tripped: RunMetadata = serde_json::from_str(&json).unwrap();
+        assert!(round_tripped.coord_status.is_none());
+        assert!(!round_tripped.exit_success);
     }
 
     #[test]

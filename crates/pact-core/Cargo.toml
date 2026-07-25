@@ -11,4 +11,5 @@ pact-agents.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 pact-coord.workspace = true
