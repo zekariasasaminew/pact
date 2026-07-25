@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from pact_coord import PactCoordClient, PactCoordError
+from pact_coord import ActiveLease, PactCoordClient, PactCoordError
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -76,6 +76,24 @@ async def test_two_agents_claiming_overlapping_globs_surfaces_a_conflict(scratch
         assert result.accepted is True, "leases are advisory -- a conflicting claim is still accepted"
         assert result.has_conflicts is True
         assert any(c.holder == "agent-a" for c in result.conflicts)
+
+
+@pytest.mark.asyncio
+async def test_list_claims_shows_active_leases_across_agents(scratch_repo: Path) -> None:
+    pact_bin = _find_pact_binary()
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client:
+        assert await client.list_claims() == []
+
+        await client.claim_files(["src/shared.py"])
+        active = await client.list_claims()
+        assert len(active) == 1
+        assert isinstance(active[0], ActiveLease)
+        assert active[0].holder == "agent-a"
+        assert active[0].pattern == "src/shared.py"
+
+        # list_claims is read-only -- calling it again doesn't consume
+        # or change anything, unlike check_messages.
+        assert await client.list_claims() == active
 
 
 @pytest.mark.asyncio

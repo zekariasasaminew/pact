@@ -57,6 +57,9 @@ asyncio.run(main())
   broadcast. Returns pact-coord's own confirmation text.
 - `check_messages() -> list[Message]` -- messages sent to this agent or
   broadcast, since this agent last checked.
+- `list_claims() -> list[ActiveLease]` -- every currently-unexpired lease
+  across all agents, not just this client's own. Read-only, unlike
+  `check_messages`, calling it never marks anything as read.
 
-All four raise `PactCoordError` (carrying pact-coord's own error text) on
+All five raise `PactCoordError` (carrying pact-coord's own error text) on
 an MCP `isError: true` response.

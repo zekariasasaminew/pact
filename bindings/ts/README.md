@@ -58,6 +58,9 @@ Or manage the client's lifetime yourself with `PactCoordClient.spawn`/`close`.
   Returns pact-coord's own confirmation text.
 - `checkMessages() -> Message[]` -- messages sent to this agent or
   broadcast, since this agent last checked.
+- `listClaims() -> ActiveLease[]` -- every currently-unexpired lease
+  across all agents, not just this client's own. Read-only, unlike
+  `checkMessages`, calling it never marks anything as read.
 
-All four reject with `PactCoordError` (carrying pact-coord's own error
+All five reject with `PactCoordError` (carrying pact-coord's own error
 text) on an MCP `isError: true` response.

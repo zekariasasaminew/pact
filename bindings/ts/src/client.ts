@@ -49,6 +49,12 @@ export interface Message {
   createdAt: number;
 }
 
+export interface ActiveLease {
+  pattern: string;
+  holder: string;
+  expiresAt: number;
+}
+
 interface RawClaimResult {
   accepted: boolean;
   expires_at: number;
@@ -63,6 +69,12 @@ interface RawMessage {
   subject: string;
   body: string;
   created_at: number;
+}
+
+interface RawActiveLease {
+  pattern: string;
+  holder: string;
+  expires_at: number;
 }
 
 function parseClaimResult(text: string): ClaimResult {
@@ -89,6 +101,11 @@ function parseMessages(text: string): Message[] {
     body: m.body,
     createdAt: m.created_at,
   }));
+}
+
+function parseActiveLeases(text: string): ActiveLease[] {
+  const data = JSON.parse(text) as RawActiveLease[];
+  return data.map((l) => ({ pattern: l.pattern, holder: l.holder, expiresAt: l.expires_at }));
 }
 
 export interface SpawnOptions {
@@ -158,6 +175,14 @@ export class PactCoordClient {
   async checkMessages(): Promise<Message[]> {
     const text = await this.call("check_messages", {});
     return parseMessages(text);
+  }
+
+  /** Every currently-unexpired file lease across all agents in this
+   * coordination session, not just this client's own. Read-only --
+   * unlike checkMessages, calling this never marks anything as read. */
+  async listClaims(): Promise<ActiveLease[]> {
+    const text = await this.call("list_claims", {});
+    return parseActiveLeases(text);
   }
 
   async close(): Promise<void> {

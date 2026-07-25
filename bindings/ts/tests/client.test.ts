@@ -79,6 +79,21 @@ describe("PactCoordClient", () => {
     }, { pactBin });
   });
 
+  it("lists active leases across agents via listClaims", async () => {
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      expect(await client.listClaims()).toEqual([]);
+
+      await client.claimFiles(["src/shared.py"]);
+      const active = await client.listClaims();
+      expect(active).toHaveLength(1);
+      expect(active[0].holder).toBe("agent-a");
+      expect(active[0].pattern).toBe("src/shared.py");
+
+      // Read-only -- calling it again doesn't consume or change anything.
+      expect(await client.listClaims()).toEqual(active);
+    }, { pactBin });
+  });
+
   it("returns pact-coord's own confirmation text from releaseFiles", async () => {
     await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
       await client.claimFiles(["src/a.py", "src/b.py"]);

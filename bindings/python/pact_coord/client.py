@@ -55,6 +55,13 @@ class ClaimResult:
 
 
 @dataclass
+class ActiveLease:
+    pattern: str
+    holder: str
+    expires_at: int
+
+
+@dataclass
 class Message:
     id: int
     from_: str
@@ -75,6 +82,11 @@ def _parse_claim_result(text: str) -> ClaimResult:
             for c in data.get("conflicts", [])
         ],
     )
+
+
+def _parse_active_leases(text: str) -> list[ActiveLease]:
+    data = json.loads(text)
+    return [ActiveLease(pattern=l["pattern"], holder=l["holder"], expires_at=l["expires_at"]) for l in data]
 
 
 def _parse_messages(text: str) -> list[Message]:
@@ -170,6 +182,13 @@ class PactCoordClient:
         agent last checked."""
         text = await self._call("check_messages", {})
         return _parse_messages(text)
+
+    async def list_claims(self) -> list[ActiveLease]:
+        """Every currently-unexpired file lease across all agents in this
+        coordination session, not just this client's own. Read-only --
+        unlike check_messages, calling this never marks anything as read."""
+        text = await self._call("list_claims", {})
+        return _parse_active_leases(text)
 
     async def _call(self, tool: str, args: dict[str, Any]) -> str:
         result = await self._session.call_tool(tool, args)
