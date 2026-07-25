@@ -665,6 +665,38 @@ agent spawn needed, pure function): an accepted attempt's full field
 set, a rejected attempt's reason surfacing correctly, and the
 `test_passed: Some(false)` vs. `None` distinction specifically.
 
+### Structured run metadata (issue #15)
+
+From an outside code review (2026-07-24), verified against source:
+`RunOutcome` (pact-agents) is exactly `{ success: bool, summary: String }`
+-- no start/end time, command/args/cwd, coordination status, or log
+path. That context only ever lived in ephemeral terminal output and the
+raw JSONL log file, never a queryable record.
+
+New `RunMetadata` (pact-core) persists all of that to
+`state_dir/meta/<id>-run.json`, sibling to the workspace's own
+`meta/<id>.json` and the dependency-prep report (issue #12) -- the same
+three-file-per-workspace convention now covers workspace identity,
+dependency prep, and the actual agent run. Recorded regardless of
+success or failure: `spawn_with_supervisor` used to propagate
+`run_and_stream`'s `Err` straight up via `?` with nothing captured first,
+meaning a run that failed to even start left no durable trace at all,
+the exact case most worth one. `coord_status` is `Option<String>` --
+`None` means no coordination config was attached to this run in the
+first place, distinct from a status that was reported but never settled
+on `connected` (a real, different failure mode already surfaced by the
+existing `coord_warning` check).
+
+Verified with 2 round-trip unit tests on the struct itself (serialize,
+deserialize, field-for-field check) -- the write-to-disk mechanics
+themselves follow the exact same `std::fs::write` + `serde_json::
+to_vec_pretty` pattern already exercised for Arbiter's `decision.json`
+(issue #148) and the dependency-prep report (issue #12), not
+independently re-verified here. The actual `spawn_with_supervisor`
+integration wasn't end-to-end tested against a real agent CLI -- doing
+so would mean a real, billed agent spawn, which this project's test
+conventions explicitly avoid (see CLAUDE.md).
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
