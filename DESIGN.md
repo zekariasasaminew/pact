@@ -499,6 +499,14 @@ short alphanumeric extension after the last `.`, with a non-empty stem
 made of path-ish characters. Not a real path grammar -- see the false
 positive/negative tradeoff above for why that's acceptable here.
 
+The `spawn-many` CLI warning built from `predict_task_overlap` (issue
+#150) says explicitly that it's a prompt-text heuristic and that no files
+have been claimed yet, rather than implying real conflict prediction --
+the original wording ("expect a merge conflict there") oversold a pure
+text-token match as something closer to `Orchestrator::detect_conflicts`'
+git-level analysis. The heuristic itself is unchanged; only the disclosure
+in the printed warning changed.
+
 ### Arbiter — agent invocation
 
 `ArbiterConfig` is the "verified" half of pact's conflict story: a

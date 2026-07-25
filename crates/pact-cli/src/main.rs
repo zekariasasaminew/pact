@@ -550,13 +550,15 @@ fn main() -> Result<()> {
             let overlaps = pact_core::predict_task_overlap(&batch);
             if !overlaps.is_empty() {
                 eprintln!(
-                    "warning: {} of your tasks look like they'll touch the same file(s) -- \
-                     expect a merge conflict there unless you separate that work:",
+                    "warning: {} of your tasks mention the same file(s) in their task text \
+                     -- this is only a prompt-text heuristic, not real conflict detection (no \
+                     files have been claimed yet, and it can both miss real overlaps and flag \
+                     read-only mentions). Consider separating that work:",
                     distinct_overlapping_task_count(&overlaps)
                 );
                 for overlap in &overlaps {
                     let indices: Vec<String> = overlap.task_indices.iter().map(|i| i.to_string()).collect();
-                    eprintln!("  '{}' -- mentioned by tasks #{}", overlap.token, indices.join(", #"));
+                    eprintln!("  possible overlap: '{}' mentioned by tasks #{}", overlap.token, indices.join(", #"));
                 }
             }
 
