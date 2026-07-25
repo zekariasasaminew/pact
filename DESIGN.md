@@ -1691,6 +1691,31 @@ internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
 lines interleave at line granularity, never mid-line.
 
+### `--union` renamed to `--append-only` (issue #11)
+
+From an outside code review (2026-07-24): "union" implies something more
+general/safer than the actual implementation -- a naive append-only line
+concat with limited JS/TS guardrails (rejects duplicate
+`module.exports`/`export default`/redeclared bindings, nothing else --
+CSS cascade, config keys set twice, non-JS/TS languages aren't checked).
+The barrel-file position-loss gotcha was already documented in
+`GETTING_STARTED.md`; the flag's own name didn't reflect the limitation.
+
+`--append-only` is now the primary CLI flag name on both `merge-all` and
+`resolve` (`#[arg(long = "append-only", visible_alias = "union")]`) --
+`--union` still works identically, a visible alias (shown in `--help`'s
+`[aliases: --union]`, not hidden), not a silent deprecation. The
+underlying Rust field was renamed from `union` to `append_only` too
+(not just the CLI-facing flag string) -- otherwise `--help` would have
+shown a mismatched `<UNION>` value placeholder under the new
+`--append-only` flag name.
+
+Verified for real, not just that both names parse: 2 new integration
+tests resolve the identical real barrel-export conflict (same shape
+pact-vcs's own `merge_all.rs` tests use) once via `--append-only` and
+once via `--union`, confirming both produce the same merged content, not
+just that clap accepts both spellings.
+
 ### `pact doctor --json` (issue #17)
 
 From an outside code review (2026-07-24): the human-readable `doctor`
