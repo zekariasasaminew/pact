@@ -1466,8 +1466,37 @@ watching for. Every *other* safety net (worktree isolation, `merge-all`'s
 real conflict detection, Weaver's pre-flight text-overlap warning) still
 applies regardless -- this removes one layer, not all of them.
 
-Left open, documented, not fixed -- revisit if a different angle
-presents itself, or if Claude Code's own MCP client behavior changes.
+**2026-07-29 update: a different angle did present itself, from an
+unrelated investigation, and it measurably helped.** Real-agent-
+verifying the Arbiter Write-fresh redesign (issue #106) the same night
+surfaced issue #184: `run_and_stream` never explicitly closed a spawned
+agent's stdin, leaving it inherited/ambiguous, and one real Claude Code
+invocation was directly observed stalling for several seconds ("no
+stdin data received in 3s, proceeding without it") before apparently
+misreading an empty task. An unexpected multi-second stall in an
+agent's own startup path is exactly the kind of thing that could throw
+off a race that's specifically timing-sensitive under concurrency --
+plausible, not confirmed, as a *contributing* factor to this issue,
+distinct from (and possibly compounding) the OS-scheduling-contention
+theory above.
+
+After #184 shipped, re-ran the exact same reproduction this issue's own
+text describes (2-agent concurrent `spawn-many`, 6 back-to-back
+batches, Haiku for cost control) against real `main`: **12/12 real
+agent connections reached `connected`, zero failures** -- versus the
+original 1/6 (and Haiku specifically making it *worse*, 6/10, before
+#184). Not proof the underlying OS-scheduling race is gone -- a
+12-for-12 run doesn't rule out a race that was already intermittent
+at a ~1-in-6 rate, and the sample here is small, matched to this
+session's "modest real-agent spend" brief rather than an exhaustive
+re-validation. Documented honestly as a real, measured improvement
+worth noting, not a confirmed fix -- left open rather than closed,
+since the original OS-contention theory was never ruled out, only
+found to have a real compounding factor that's now removed.
+
+Left open, documented -- revisit with a larger real-agent sample if a
+regression report comes in, or if Claude Code's own MCP client behavior
+changes.
 
 ### Coord status (issue #64)
 
