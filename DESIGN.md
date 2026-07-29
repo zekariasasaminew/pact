@@ -576,7 +576,7 @@ still have been destroyed moments later by the *caller's* cleanup.
 Deleted only on a genuinely accepted resolution; every failure path
 leaves it in place, with the warning log line naming exactly where.
 
-### Arbiter's real-world resolution rate is 0/6 so far (issue #106, ongoing)
+### Arbiter's real-world resolution rate was 0/6 before the Write-fresh redesign (issue #106)
 
 With diagnosability restored, six real Arbiter attempts were run against
 the same class of conflict (two workspaces each inserting one line/
@@ -585,25 +585,77 @@ safety, `acceptEdits`, and `bypassPermissions`. **All six ended the same
 way**: Arbiter's own sub-agent describes the correct resolution in
 plain text, then says it needs permission to actually apply it, even
 under `bypassPermissions` (the strongest override, meant to skip every
-confirmation). This rules out pact's own `--safety`/`--allowedTools`
-plumbing as the cause -- there's no stronger override left to try.
+confirmation). This ruled out pact's own `--safety`/`--allowedTools`
+plumbing as the cause -- there was no stronger override left to try.
 
-**Working theory:** Claude Code has a built-in guardrail around editing
-a file that contains live git conflict markers (`<<<<<<<`/`=======`/
-`>>>>>>>`), independent of any permission flag pact can set -- not
-something exposed as a configurable CLI option, as far as this
-investigation found. If true, Arbiter's current design -- point a fresh
-session at a worktree with real conflict markers and ask it to resolve
-them via `Edit` -- may be structurally incompatible with current Claude
-Code, not a prompt-wording or permission-configuration problem.
+### Arbiter Write-fresh redesign (issue #106)
 
-**A different approach, not implemented, pending a design decision:**
-give Arbiter the three-way content (base/ours/theirs) as plain input and
-have it produce a fresh resolved version via `Write` (a new file, not an
-edit to conflict-marker text pact then applies itself) instead of asking
-it to `Edit` the conflicted file in place -- this would avoid whatever
-specifically triggers on raw conflict markers being present in an
-`Edit`'s target, if that's really the mechanism.
+The fix implemented and real-agent-verified this pass: instead of
+leaving the conflicted file's raw `<<<<<<<`/`=======`/`>>>>>>>` text on
+disk and asking the agent to `Edit` it in place, Arbiter now hands the
+agent each conflicted file's clean three-way content (BASE/OURS/THEIRS,
+read via the same `git show :N:path` machinery `pact-vcs`'s own semantic
+resolvers use -- see `WorkspaceManager::conflict_stages`, now public)
+directly in the prompt, and instructs it to compose the full resolved
+file itself and `Write` it -- never `Edit` -- in one call.
+
+**Confirmed by hand this alone wasn't enough.** The first real
+verification attempt with a Write-based prompt still failed identically
+to the old Edit-based one ("I don't have permission to edit `math.js`
+yet") -- because the file was still sitting in git's actual unmerged
+("UU") index state at the time, and a real agent (confirmed directly)
+refuses to touch a file git reports as unmerged, regardless of which
+tool is used or what permission override is set. `Edit` vs `Write` was
+never the real mechanism; git's own conflict bookkeeping was.
+
+**`WorkspaceManager::neutralize_conflict`/`restore_conflict`** (pact-vcs)
+is the actual fix: before invoking Arbiter, each conflicted file's index
+entry is temporarily collapsed from stages 1/2/3 down to a single plain
+staged blob (`git add` of the "ours" stage's content, a valid,
+marker-free placeholder), clearing the "UU" status a real agent
+apparently checks for. `neutralize_conflict` returns a `ConflictSnapshot`
+(the original on-disk bytes plus `git ls-files -u`'s raw index-info
+lines) that `restore_conflict` uses to put the file back into its exact
+original unmerged state on any rejection path -- a declined resolution
+must leave the workspace exactly as conflicted as it was before the
+attempt, for `pact resolve`/manual intervention. **Confirmed by hand,
+non-obvious**: restoring isn't just "write the stage entries back" --
+`neutralize_conflict`'s `git add` leaves a stage-0 entry behind that
+`git update-index --index-info` alone doesn't clear, so a naive restore
+left the index with stage 0 *and* stages 1/2/3 simultaneously, which
+`git status` reports as `UM` (modified), not the real `UU` the file
+actually was. `restore_conflict` explicitly `git update-index
+--force-remove`s the path first to clear that stale stage-0 entry before
+feeding the original index-info back in -- caught by
+`crates/pact-vcs/tests/arbiter_conflict_prep.rs`, which asserts the
+post-restore status is genuinely `UU`, not just that *some* status comes
+back.
+
+**Real-agent-verified, modest spend, not yet 100% reliable.** Four real
+`claude`-as-Arbiter invocations against the same reproducible conflict
+shape this pass: one full success (`Write` used correctly, real merged
+content, test command passed -- Arbiter's first ever confirmed real
+success); one rejected because the agent used `Edit` anyway despite the
+prompt explicitly forbidding it (now worded more forcefully -- "never
+Edit... Edit will be denied"); one rejected due to a since-separately-
+fixed stdin issue (issue #184); one rejected where the agent correctly
+understood the task and explicitly intended to `Write` the right
+content, but the `Write` itself was still denied even though the file's
+own conflict had already been neutralized. That last case is filed as
+issue #185 -- leading hypothesis is that the *repository* is still
+genuinely mid-merge (`.git/MERGE_HEAD` present) regardless of any one
+file's own index state, and the agent may be checking for that
+repo-wide signal too, not just the per-file one. Not chased further
+this pass (a repo-wide `MERGE_HEAD` neutralize/restore would be a bigger
+change than the per-file one already shipped, and "modest" real-agent
+spend was the brief for this session).
+
+Every rejection path -- old or new -- falls back to the same existing
+safety net regardless: the workspace stays a normal skipped/persisted
+conflict, resumable via `pact resolve`. This redesign makes Arbiter
+*capable* of succeeding against a real agent for the first time, a real
+and verified improvement over a 0% success rate -- it does not yet make
+every attempt succeed.
 
 ### Arbiter scope enforcement (issue #146/#147)
 
@@ -653,6 +705,24 @@ legitimately-new file created within scope (confirms `pre_run_lengths`
 defaulting an unseen path to 0 doesn't itself trigger the emptied-file
 check). Plus 2 new pact-vcs tests directly on `changed_paths` itself
 (modified+untracked files reported, clean worktree reports empty).
+
+**Remaining #147 item, closed out alongside the Write-fresh redesign**:
+"no lockfile changed unless explicitly allowed." There's no existing
+allow-mechanism for this, so the simplest correct behavior is the
+strictest one -- `attempt_arbiter_resolution` now rejects up front,
+*before* spawning a real agent at all, if any conflicted file is a
+lockfile (reusing `pact_vcs::is_never_auto_resolve`'s existing list,
+made `pub` for this). A lockfile needs the real package manager to
+regenerate it correctly, not a "combine both sides' intent" hand-written
+merge -- semantic auto-resolution already refuses to touch one for the
+same reason; Arbiter now holds itself to the identical rule rather than
+being a backdoor around it. Verified with a real fake-agent e2e test
+(`merge_all_refuses_to_let_arbiter_touch_a_conflicted_lockfile`) that
+also asserts no `arbiter-*.jsonl` log was ever written -- proof the real
+agent process was never spawned at all for a lockfile, not just that
+the outcome was rejected. Confirmed this is a genuine regression test,
+not a coincidental pass: temporarily removed the guard and reran, which
+failed exactly as expected.
 
 ### Arbiter decision records (issue #148)
 

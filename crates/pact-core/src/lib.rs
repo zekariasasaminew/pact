@@ -704,7 +704,7 @@ impl Orchestrator {
         let decision_path = self.workspaces.state_dir().join("logs").join(format!("arbiter-{identifier}.decision.json"));
 
         let started_at = unix_now();
-        let outcome = attempt_arbiter_resolution(config, worktree_path, task_text, files, &log_path);
+        let outcome = attempt_arbiter_resolution(config, &self.workspaces, worktree_path, task_text, files, &log_path);
         let ended_at = unix_now();
 
         // Written on every attempt, accepted or rejected -- a passing
@@ -900,11 +900,26 @@ fn build_arbiter_decision(
 /// of repetitive.
 fn attempt_arbiter_resolution(
     config: &ArbiterConfig,
+    workspaces: &pact_vcs::WorkspaceManager,
     worktree_path: &Path,
     task_text: &str,
     files: &[String],
     log_path: &Path,
 ) -> ArbiterOutcome {
+    // A lockfile needs the real package manager to regenerate it
+    // correctly, not a "combine both sides' intent" fresh write -- reject
+    // up front, before spawning a real agent, rather than relying on the
+    // agent to notice and refuse on its own (issue #147).
+    if let Some(lockfile) = files.iter().find(|file| pact_vcs::is_never_auto_resolve(file)) {
+        return ArbiterOutcome::Rejected {
+            reason: format!(
+                "refusing to let arbiter resolve lockfile '{lockfile}' -- lockfiles need the \
+                 real package manager to regenerate them, not a hand-written merge"
+            ),
+            test_passed: None,
+        };
+    }
+
     // Captured before the agent runs so the post-run "did it wipe a
     // conflicted file" check (in `validate_arbiter_scope`) has something
     // to compare against -- every listed file has conflict markers in it
@@ -919,7 +934,55 @@ fn attempt_arbiter_resolution(
         })
         .collect();
 
-    let prompt = build_arbiter_prompt(task_text, files);
+    // Handed to the agent as clean, labeled base/ours/theirs content
+    // instead of asking it to Edit the raw conflict-marker text in place
+    // -- see DESIGN.md ("pact-core > Arbiter Write-fresh redesign", issue
+    // #106) for why: every real attempt under the old Edit-based prompt
+    // failed identically (agent describes the correct fix in plain text,
+    // then refuses to apply it), even under the strongest permission
+    // override, on conflict shapes well within a capable model's reach.
+    let mut stages = Vec::with_capacity(files.len());
+    for file in files {
+        match workspaces.conflict_stages(worktree_path, file) {
+            Ok(Some(s)) => stages.push(s),
+            Ok(None) => {
+                return ArbiterOutcome::Rejected {
+                    reason: format!("'{file}' has no conflict stages to read -- not actually in a conflicted state"),
+                    test_passed: None,
+                }
+            }
+            Err(err) => {
+                return ArbiterOutcome::Rejected {
+                    reason: format!("failed to read conflict stages for '{file}': {err:#}"),
+                    test_passed: None,
+                }
+            }
+        }
+    }
+
+    // Neutralized so a real agent will actually operate on these files at
+    // all -- see DESIGN.md ("pact-core > Arbiter Write-fresh redesign",
+    // issue #106): confirmed by hand, a real agent refuses to touch a file
+    // git still reports as unmerged ("UU"), even under the strongest
+    // permission override, regardless of Edit vs Write. Every rejection
+    // path below restores the original conflict-marker state from the
+    // snapshot -- a declined resolution must leave the workspace exactly
+    // as conflicted as it was before the attempt.
+    let mut neutralized = Vec::with_capacity(files.len());
+    for file in files {
+        match workspaces.neutralize_conflict(worktree_path, file) {
+            Ok(snapshot) => neutralized.push(snapshot),
+            Err(err) => {
+                restore_all(workspaces, worktree_path, &neutralized);
+                return ArbiterOutcome::Rejected {
+                    reason: format!("failed to prepare '{file}' for arbiter: {err:#}"),
+                    test_passed: None,
+                };
+            }
+        }
+    }
+
+    let prompt = build_arbiter_prompt(task_text, &stages);
     let adapter = pact_agents::adapter(config.agent);
     let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
 
@@ -938,16 +1001,18 @@ fn attempt_arbiter_resolution(
     match outcome {
         Ok(run) if run.success => {}
         Ok(run) => {
+            restore_all(workspaces, worktree_path, &neutralized);
             return ArbiterOutcome::Rejected {
                 reason: format!("arbiter agent reported failure resolving {files:?}: {}", run.summary),
                 test_passed: None,
-            }
+            };
         }
         Err(err) => {
+            restore_all(workspaces, worktree_path, &neutralized);
             return ArbiterOutcome::Rejected {
                 reason: format!("arbiter agent failed to run for {files:?}: {err:#}"),
                 test_passed: None,
-            }
+            };
         }
     }
 
@@ -956,12 +1021,14 @@ fn attempt_arbiter_resolution(
     // (conflict markers, an emptied file, and anything changed outside
     // `files`).
     if let Err(reason) = validate_arbiter_scope(worktree_path, files, &pre_run_lengths) {
+        restore_all(workspaces, worktree_path, &neutralized);
         return ArbiterOutcome::Rejected { reason, test_passed: None };
     }
 
     for file in files {
         let add = Command::new("git").args(["add", "--", file]).current_dir(worktree_path).output();
         if !matches!(add, Ok(ref o) if o.status.success()) {
+            restore_all(workspaces, worktree_path, &neutralized);
             return ArbiterOutcome::Rejected {
                 reason: format!("failed to stage {file} after resolution"),
                 test_passed: None,
@@ -971,17 +1038,31 @@ fn attempt_arbiter_resolution(
 
     match run_shell(worktree_path, &config.test_cmd) {
         Ok(true) => ArbiterOutcome::Accepted { resolved_files: files.to_vec() },
-        Ok(false) => ArbiterOutcome::Rejected {
-            reason: format!(
-                "arbiter's resolution for {files:?} failed the test command ('{}') -- not accepting it",
-                config.test_cmd
-            ),
-            test_passed: Some(false),
-        },
-        Err(err) => ArbiterOutcome::Rejected {
-            reason: format!("failed to run the arbiter test command '{}': {err:#}", config.test_cmd),
-            test_passed: None,
-        },
+        Ok(false) => {
+            restore_all(workspaces, worktree_path, &neutralized);
+            ArbiterOutcome::Rejected {
+                reason: format!(
+                    "arbiter's resolution for {files:?} failed the test command ('{}') -- not accepting it",
+                    config.test_cmd
+                ),
+                test_passed: Some(false),
+            }
+        }
+        Err(err) => {
+            restore_all(workspaces, worktree_path, &neutralized);
+            ArbiterOutcome::Rejected {
+                reason: format!("failed to run the arbiter test command '{}': {err:#}", config.test_cmd),
+                test_passed: None,
+            }
+        }
+    }
+}
+
+fn restore_all(workspaces: &pact_vcs::WorkspaceManager, worktree_path: &Path, snapshots: &[pact_vcs::ConflictSnapshot]) {
+    for snapshot in snapshots {
+        if let Err(err) = workspaces.restore_conflict(worktree_path, snapshot) {
+            tracing::warn!("arbiter: failed to restore a file's original conflict state after rejecting its resolution: {err:#}");
+        }
     }
 }
 
@@ -1014,18 +1095,43 @@ fn validate_arbiter_scope(
     Ok(())
 }
 
-fn build_arbiter_prompt(task_text: &str, files: &[String]) -> String {
+/// Builds Arbiter's prompt around each conflicted file's clean three-way
+/// content (base/ours/theirs) rather than its raw on-disk conflict-marker
+/// text -- see DESIGN.md ("pact-core > Arbiter Write-fresh redesign",
+/// issue #106).
+fn build_arbiter_prompt(task_text: &str, stages: &[pact_vcs::ConflictStages]) -> String {
+    let file_names: Vec<&str> = stages.iter().map(|s| s.path.as_str()).collect();
+    let mut sections = String::new();
+    for stage in stages {
+        let base_section = match &stage.base {
+            Some((content, _had_bom)) => content.as_str(),
+            None => "(no common ancestor -- this file was added independently on at least one side)",
+        };
+        sections.push_str(&format!(
+            "\n--- {} ---\nBASE (common ancestor):\n{base_section}\n\n\
+             OURS (already in the target branch):\n{}\n\n\
+             THEIRS (incoming change):\n{}\n",
+            stage.path, stage.ours.0, stage.theirs.0
+        ));
+    }
     format!(
         "You are resolving a real git merge conflict left behind by pact's `merge-all`. \
+         Use the Write tool only for this -- never Edit -- for every listed file: compose the \
+         file's ENTIRE final content yourself from the BASE/OURS/THEIRS text given below (not by \
+         reading and patching the file's current on-disk content), then call Write once per file \
+         with that complete content. Do not use Edit on these files under any circumstances, \
+         even to make a small change -- Edit will be denied. \
          The change being merged in came from this task:\n\n{task_text}\n\n\
-         It conflicts with work already merged from other agents. Git has left standard \
-         conflict markers (<<<<<<<, =======, >>>>>>>) in the following file(s), which is the \
-         directory you are working in right now: {}. \
-         Resolve every conflict marker in these files so the result reflects the intent of BOTH \
-         sides -- do not just pick one side and discard the other unless they are truly \
-         incompatible. Do not edit, create, or delete any file outside this list. Do not run any \
-         `git` command yourself -- pact stages and verifies your result afterward.",
-        files.join(", ")
+         It conflicts with work already merged from other agents. Below is each conflicted \
+         file's three-way content -- BASE (the common ancestor before either side changed it), \
+         OURS (already merged into the target branch), and THEIRS (the incoming change). Your \
+         Write's content should reflect the intent of BOTH sides -- do not just pick one side and \
+         discard the other unless they are truly incompatible. The file on disk right now still \
+         has git's raw conflict markers in it (<<<<<<<, =======, >>>>>>>) -- ignore those, they \
+         are not part of either side's actual content; do not treat this as an incremental edit to \
+         that on-disk text. Do not edit, create, or delete any file outside this list: {}. Do not \
+         run any `git` command yourself -- pact stages and verifies your result afterward.\n{sections}",
+        file_names.join(", ")
     )
 }
 
@@ -1136,16 +1242,44 @@ mod tests {
         assert!(!tokens.contains("src/index.ts."));
     }
 
+    fn conflict_stages(path: &str, base: Option<&str>, ours: &str, theirs: &str) -> pact_vcs::ConflictStages {
+        pact_vcs::ConflictStages {
+            path: path.to_string(),
+            base: base.map(|b| (b.to_string(), false)),
+            ours: (ours.to_string(), false),
+            theirs: (theirs.to_string(), false),
+        }
+    }
+
     #[test]
-    fn build_arbiter_prompt_includes_task_and_files_and_forbids_git() {
-        let prompt = build_arbiter_prompt(
-            "add chunk.ts export",
-            &["src/index.ts".to_string(), "package.json".to_string()],
-        );
+    fn build_arbiter_prompt_includes_task_files_and_three_way_content() {
+        let stages = vec![
+            conflict_stages("src/index.ts", Some("export {}"), "export { a }", "export { b }"),
+            conflict_stages("package.json", None, "{\"a\":1}", "{\"b\":1}"),
+        ];
+        let prompt = build_arbiter_prompt("add chunk.ts export", &stages);
         assert!(prompt.contains("add chunk.ts export"));
         assert!(prompt.contains("src/index.ts"));
         assert!(prompt.contains("package.json"));
+        assert!(prompt.contains("export { a }"));
+        assert!(prompt.contains("export { b }"));
         assert!(prompt.contains("Do not run any `git` command"));
+    }
+
+    #[test]
+    fn build_arbiter_prompt_tells_the_agent_to_write_not_edit() {
+        let stages = vec![conflict_stages("a.txt", Some("base"), "ours", "theirs")];
+        let prompt = build_arbiter_prompt("task", &stages);
+        assert!(prompt.contains("Write"));
+        assert!(prompt.contains("never Edit"));
+        assert!(prompt.contains("Edit will be denied"));
+    }
+
+    #[test]
+    fn build_arbiter_prompt_notes_a_missing_base_explicitly() {
+        let stages = vec![conflict_stages("new.txt", None, "ours version", "theirs version")];
+        let prompt = build_arbiter_prompt("task", &stages);
+        assert!(prompt.contains("no common ancestor"));
     }
 
     #[test]

@@ -2,9 +2,11 @@ mod lock;
 mod semantic_resolvers;
 
 pub use lock::{agent_process_alive, PidLock};
+pub use semantic_resolvers::ConflictStages;
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -1023,6 +1025,111 @@ impl WorkspaceManager {
         };
         Ok(Some(semantic_resolvers::ConflictStages { path: file.to_string(), base, ours, theirs }))
     }
+
+    /// Public entry point for `read_conflict_stages`, for callers outside
+    /// this crate building their own conflict-resolution prompt from the
+    /// raw three-way content -- e.g. Arbiter's Write-fresh redesign (issue
+    /// #106) in pact-core, which needs the same base/ours/theirs content
+    /// this module's own semantic resolvers already read via `git show`.
+    pub fn conflict_stages(&self, worktree_path: &Path, file: &str) -> Result<Option<ConflictStages>> {
+        self.read_conflict_stages(worktree_path, file)
+    }
+
+    /// Temporarily resolves `file`'s conflicted index entry (git's "UU"
+    /// status) to a single plain staged blob -- see DESIGN.md ("pact-core >
+    /// Arbiter Write-fresh redesign", issue #106) for why: confirmed by
+    /// hand, a real agent refuses to write to a file git still reports as
+    /// unmerged, even under the strongest permission override, regardless
+    /// of whether the tool used is Edit or Write. Neutralizing removes
+    /// that specific signal without discarding the real conflict --
+    /// `restore_conflict` puts the file back exactly as it was, using the
+    /// snapshot this returns, for a rejected resolution.
+    pub fn neutralize_conflict(&self, worktree_path: &Path, file: &str) -> Result<ConflictSnapshot> {
+        let ls_files = Command::new("git")
+            .args(["ls-files", "-u", "--", file])
+            .current_dir(worktree_path)
+            .output()
+            .context("failed to spawn `git ls-files -u`")?;
+        let index_info = String::from_utf8_lossy(&ls_files.stdout).to_string();
+
+        let original_content = std::fs::read(worktree_path.join(file))
+            .with_context(|| format!("reading {file} before neutralizing its conflict state"))?;
+
+        // "ours" (stage 2) is always present for a real conflict -- git
+        // wouldn't have left the path unmerged otherwise -- reused as
+        // neutral, marker-free placeholder content for the duration of
+        // the attempt.
+        let ours = self.read_conflict_stage(worktree_path, file, 2)?.map(|(content, _)| content).unwrap_or_default();
+        std::fs::write(worktree_path.join(file), &ours)
+            .with_context(|| format!("writing placeholder content for {file}"))?;
+
+        let add = Command::new("git")
+            .args(["add", "--", file])
+            .current_dir(worktree_path)
+            .output()
+            .with_context(|| format!("failed to spawn `git add` while neutralizing {file}"))?;
+        if !add.status.success() {
+            bail!("failed to stage placeholder content for {file}: {}", String::from_utf8_lossy(&add.stderr));
+        }
+
+        Ok(ConflictSnapshot { file: file.to_string(), original_content, index_info })
+    }
+
+    /// Undoes `neutralize_conflict`, putting `file` back into its original
+    /// unmerged (stage 1/2/3) state -- for a rejected Arbiter resolution,
+    /// so the workspace stays exactly as conflicted as it was before the
+    /// attempt, for `pact resolve`/manual intervention.
+    pub fn restore_conflict(&self, worktree_path: &Path, snapshot: &ConflictSnapshot) -> Result<()> {
+        std::fs::write(worktree_path.join(&snapshot.file), &snapshot.original_content)
+            .with_context(|| format!("restoring {}'s original conflict-marker content", snapshot.file))?;
+
+        // `neutralize_conflict`'s `git add` left a stage-0 entry behind;
+        // `--index-info` below only *adds* the stage 1/2/3 entries, it
+        // doesn't clear an existing stage 0 for the same path -- without
+        // this, the index ends up with stage 0 AND stages 1/2/3 at once,
+        // an invalid mixed state `git status` reports as "UM" (modified),
+        // not the real "UU" (unmerged) the file actually was. Confirmed
+        // by hand: this exact mismatch is what a first attempt at this
+        // function produced.
+        let force_remove = Command::new("git")
+            .args(["update-index", "--force-remove", "--", &snapshot.file])
+            .current_dir(worktree_path)
+            .output()
+            .context("failed to spawn `git update-index --force-remove`")?;
+        if !force_remove.status.success() {
+            bail!(
+                "failed to clear {}'s staged placeholder entry before restoring: {}",
+                snapshot.file,
+                String::from_utf8_lossy(&force_remove.stderr)
+            );
+        }
+
+        let mut update_index = Command::new("git")
+            .args(["update-index", "--index-info"])
+            .current_dir(worktree_path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("failed to spawn `git update-index --index-info`")?;
+        update_index
+            .stdin
+            .take()
+            .context("update-index had no stdin pipe")?
+            .write_all(snapshot.index_info.as_bytes())
+            .context("failed to write index-info to `git update-index`")?;
+        let status = update_index.wait().context("waiting for `git update-index` to exit")?;
+        if !status.success() {
+            bail!("failed to restore {}'s unmerged index entries", snapshot.file);
+        }
+        Ok(())
+    }
+}
+
+/// What `neutralize_conflict` captured about one file, so `restore_conflict`
+/// can put it back exactly as it was.
+pub struct ConflictSnapshot {
+    file: String,
+    original_content: Vec<u8>,
+    index_info: String,
 }
 
 /// Sniffs the indent unit (spaces or a tab) from the first indented line of
@@ -1064,7 +1171,12 @@ fn is_workspace_meta_file(path: &Path) -> bool {
     !stem.ends_with("-deps") && !stem.ends_with("-run")
 }
 
-fn is_never_auto_resolve(path: &str) -> bool {
+/// Whether `path` is a lockfile pact never auto-resolves semantically --
+/// also reused by pact-core's Arbiter as an up-front reject for the same
+/// class of file (issue #147): a lockfile needs the real package manager
+/// to regenerate it correctly, not a "combine both sides' intent" fresh
+/// write, so it's never safe for either mechanism to touch one.
+pub fn is_never_auto_resolve(path: &str) -> bool {
     let basename = Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())

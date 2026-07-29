@@ -18,11 +18,16 @@ use anyhow::{Context, Result};
 /// `WorkspaceManager::read_conflict_stage`). `base` is `None` when stage 1
 /// doesn't exist for this path (e.g. the file was added independently on
 /// both sides).
-pub(crate) struct ConflictStages {
-    pub(crate) path: String,
-    pub(crate) base: Option<(String, bool)>,
-    pub(crate) ours: (String, bool),
-    pub(crate) theirs: (String, bool),
+///
+/// Public (not just crate-internal) since `WorkspaceManager::conflict_stages`
+/// hands this to callers outside this crate too -- e.g. pact-core's Arbiter
+/// Write-fresh prompt (issue #106), which needs the same three-way content
+/// this module's own resolvers already read.
+pub struct ConflictStages {
+    pub path: String,
+    pub base: Option<(String, bool)>,
+    pub ours: (String, bool),
+    pub theirs: (String, bool),
 }
 
 pub(crate) struct ResolvedFile {
