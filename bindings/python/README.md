@@ -46,9 +46,11 @@ asyncio.run(main())
 
 ## API
 
-- `claim_files(globs, *, ttl_seconds=None) -> ClaimResult` -- `accepted`
-  is always `True` (leases are advisory, never enforced); check
-  `has_conflicts`/`conflicts` yourself.
+- `claim_files(globs, *, ttl_seconds=None, fail_on_conflict=False) -> ClaimResult` --
+  by default `accepted` is always `True` (leases are advisory, never
+  enforced); check `has_conflicts`/`conflicts` yourself. Pass
+  `fail_on_conflict=True` to instead raise `PactCoordError` on an
+  overlapping claim (nothing recorded) rather than accepting it.
 - `release_files(globs) -> str` -- pact-coord's own confirmation text
   (e.g. `"released 2 lease(s)"`), not parsed into a count -- that text is
   a sentence, not a stable machine-readable format, by pact-coord's own

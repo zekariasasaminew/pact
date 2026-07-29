@@ -19,6 +19,12 @@ pub struct ClaimFilesParams {
     /// How long the claim lasts, in seconds. Defaults to 15 minutes if
     /// omitted. Must be positive and at most 86400 (24 hours).
     pub ttl_seconds: Option<i64>,
+    /// Opt-in strict mode: reject the claim outright (isError: true) if it
+    /// overlaps another agent's active lease, instead of the default
+    /// advisory behavior (accepted: true, with has_conflicts/conflicts
+    /// for you to judge). A rejected claim is never recorded -- nothing
+    /// changes for anyone if you get this back. Defaults to false.
+    pub fail_on_conflict: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -80,7 +86,7 @@ impl CoordServer {
     }
 
     #[tool(
-        description = "Claim an advisory lease on file glob patterns you're about to edit, so other agents can see you're working on them. This is never enforced against other agents -- the claim is recorded (accepted: true) even when another agent already holds an overlapping one; check has_conflicts/conflicts in the response yourself and decide what to do (e.g. message the other agent or avoid the overlap). Do not treat a successful response as exclusive access."
+        description = "Claim an advisory lease on file glob patterns you're about to edit, so other agents can see you're working on them. By default this is never enforced against other agents -- the claim is recorded (accepted: true) even when another agent already holds an overlapping one; check has_conflicts/conflicts in the response yourself and decide what to do (e.g. message the other agent or avoid the overlap). Pass fail_on_conflict: true to instead reject an overlapping claim outright (isError: true, nothing recorded) rather than accepting it advisorily."
     )]
     fn claim_files(
         &self,
@@ -93,6 +99,7 @@ impl CoordServer {
             &self.agent_id,
             &params.globs,
             params.ttl_seconds,
+            params.fail_on_conflict.unwrap_or(false),
         ) {
             Ok(result) => {
                 log_op(
@@ -244,7 +251,7 @@ mod tests {
     fn claim_files_sets_is_error_on_malformed_glob() {
         let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
         let result = server
-            .claim_files(Parameters(ClaimFilesParams { globs: vec!["[".to_string()], ttl_seconds: None }))
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["[".to_string()], ttl_seconds: None, fail_on_conflict: None }))
             .unwrap();
         assert_eq!(result.is_error, Some(true));
     }
@@ -253,7 +260,25 @@ mod tests {
     fn claim_files_leaves_is_error_false_on_success() {
         let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
         let result = server
-            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: None }))
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: None, fail_on_conflict: None }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn claim_files_with_fail_on_conflict_still_succeeds_when_nothing_conflicts() {
+        // The actual rejection behavior is covered directly in
+        // leases.rs's own tests (real overlapping claims, two holders
+        // sharing one connection) -- this only confirms fail_on_conflict
+        // threads through the MCP layer without breaking the ordinary
+        // non-conflicting path.
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = server
+            .claim_files(Parameters(ClaimFilesParams {
+                globs: vec!["some.txt".to_string()],
+                ttl_seconds: None,
+                fail_on_conflict: Some(true),
+            }))
             .unwrap();
         assert_eq!(result.is_error, Some(false));
     }
@@ -262,7 +287,7 @@ mod tests {
     fn claim_files_sets_is_error_on_invalid_ttl() {
         let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
         let result = server
-            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: Some(-1) }))
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: Some(-1), fail_on_conflict: None }))
             .unwrap();
         assert_eq!(result.is_error, Some(true));
     }
@@ -292,7 +317,7 @@ mod tests {
         // not a self-message leaking through.
         let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
         server
-            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: None }))
+            .claim_files(Parameters(ClaimFilesParams { globs: vec!["some.txt".to_string()], ttl_seconds: None, fail_on_conflict: None }))
             .unwrap();
 
         let result = server.list_claims().unwrap();

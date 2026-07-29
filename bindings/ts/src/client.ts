@@ -143,12 +143,16 @@ export class PactCoordClient {
     return new PactCoordClient(client);
   }
 
-  /** Claims an advisory lease on the given glob patterns. Never enforced
-   * against other agents -- always accepted; check `hasConflicts`/
-   * `conflicts` on the result yourself. */
-  async claimFiles(globs: string[], ttlSeconds?: number): Promise<ClaimResult> {
+  /** Claims an advisory lease on the given glob patterns. By default this
+   * is never enforced against other agents -- always accepted; check
+   * `hasConflicts`/`conflicts` on the result yourself. Pass
+   * `failOnConflict: true` to instead reject an overlapping claim
+   * outright (throws `PactCoordError`, nothing recorded) rather than
+   * accepting it advisorily. */
+  async claimFiles(globs: string[], ttlSeconds?: number, failOnConflict?: boolean): Promise<ClaimResult> {
     const args: Record<string, unknown> = { globs };
     if (ttlSeconds !== undefined) args.ttl_seconds = ttlSeconds;
+    if (failOnConflict !== undefined) args.fail_on_conflict = failOnConflict;
     const text = await this.call("claim_files", args);
     return parseClaimResult(text);
   }
