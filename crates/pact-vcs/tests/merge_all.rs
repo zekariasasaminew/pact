@@ -220,6 +220,77 @@ fn merge_all_dry_run_touches_no_git_state() {
     cleanup(&repo);
 }
 
+/// Regression test for a real, serious finding from an outside R4
+/// regression report (issue #194): `merge_all` used to log a WARN saying
+/// it was "leaving out" a workspace whose auto-commit failed, but never
+/// actually removed it from the batch -- so a failed auto-commit still
+/// fell through to a real merge attempt against a branch with no new
+/// commits (nothing to merge, since the intended changes never landed),
+/// which trivially "succeeds" and gets reported as a clean `merged <id>`,
+/// exit 0, on a branch silently byte-identical to base. Forces a real
+/// `commit_all` failure via a `pre-commit` hook that always exits
+/// non-zero (portable across platforms, unlike relying on a
+/// Windows-specific filename-too-long error) rather than simulating it.
+#[test]
+fn merge_all_reports_skipped_not_merged_when_auto_commit_fails() {
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("add a change").unwrap();
+    std::fs::write(a.path.join("src/other.ts"), "export const OTHER = 999;\n").unwrap();
+
+    // Hooks are shared across every worktree of this repo (there's only
+    // one `.git/hooks`), so this fails `git commit` for the one workspace
+    // this test creates.
+    let hooks_dir = repo.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    let hook_path = hooks_dir.join("pre-commit");
+    std::fs::write(&hook_path, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+    }
+
+    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+
+    assert!(report.merged.is_empty(), "nothing should have been merged since the auto-commit failed");
+    assert_eq!(report.skipped.len(), 1, "the workspace must show up as skipped, not silently dropped");
+    assert_eq!(report.skipped[0].id, a.id);
+    assert!(
+        report.skipped[0].reason.contains("auto-commit"),
+        "expected the skip reason to explain why, got: {}",
+        report.skipped[0].reason
+    );
+
+    // The exact data-loss shape this bug produced: confirm the "merged"
+    // branch is really byte-identical to base, not just that the report
+    // says so.
+    let target_tree = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", &format!("{}^{{tree}}", report.target_branch)])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let base_tree = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", &format!("{}^{{tree}}", report.base_commit)])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(target_tree, base_tree, "the target branch must not silently diverge from base when nothing was actually merged");
+
+    cleanup(&repo);
+}
+
 /// Regression test for the risk-aware sequencing itself (issue #159), not
 /// just `merge_risk_score` in isolation: a workspace touching only
 /// `package.json` (one file, but central) must still be planned *after* a
