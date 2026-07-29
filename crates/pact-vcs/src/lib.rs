@@ -661,16 +661,38 @@ impl WorkspaceManager {
             bail!("could not resolve current HEAD in {}", self.repo_root.display());
         }
 
+        let mut skipped = Vec::new();
+        let mut auto_commit_failed = std::collections::HashSet::new();
         for workspace in &selected {
             if let Err(err) = self.commit_all(&workspace.id) {
                 tracing::warn!(
                     "workspace {}: failed to auto-commit before merge, leaving it out: {err:#}",
                     workspace.id
                 );
+                // The warning above already says "leaving it out" -- this
+                // is what actually makes that true. Before this fix,
+                // nothing removed the workspace from `selected`, so a
+                // failed auto-commit still fell through to a real merge
+                // attempt against a branch with no new commits (the
+                // intended changes never landed), which trivially
+                // "succeeds" with nothing to merge -- reported as a clean
+                // `merged <id>`, exit 0, on a branch byte-identical to
+                // base. A `SkippedWorkspace` entry (not just a WARN log
+                // line) is what actually surfaces this in the CLI report
+                // and flips the exit code to 2 instead of a false-green 0.
+                skipped.push(SkippedWorkspace {
+                    id: workspace.id.clone(),
+                    branch: workspace.branch.clone(),
+                    reason: format!(
+                        "failed to auto-commit its dirty working tree before merge, so nothing \
+                         from it could be merged: {err:#}"
+                    ),
+                });
+                auto_commit_failed.insert(workspace.id.clone());
             }
         }
+        selected.retain(|workspace| !auto_commit_failed.contains(&workspace.id));
 
-        let mut skipped = Vec::new();
         selected.retain(|workspace| {
             if workspace.base_commit.is_empty() {
                 tracing::warn!(

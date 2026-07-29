@@ -195,7 +195,9 @@ workspaces themselves, so this is safe to run regardless of what branch
 
 Phases, all best-effort (one workspace's failure never blocks another's):
 
-1. Auto-commit every selected workspace via `commit_all`.
+1. Auto-commit every selected workspace via `commit_all` -- a workspace
+   whose auto-commit fails is removed from the batch here and recorded
+   as `skipped` (issue #194, see below), not just logged and left in.
 2. Moving-base check -- refuse a workspace whose recorded `base_commit` is
    no longer an ancestor of current HEAD, so merging never silently
    assumes a fork point that isn't real anymore (e.g. HEAD was reset since
@@ -229,6 +231,28 @@ reserved for a hard/unexpected failure. It used to always exit `1` on any
 skip, so a CI wrapper around `merge-all` had no way to tell "half the work
 landed, the rest needs a human" apart from a crash -- both looked
 identical at the process level.
+
+**A real, serious bug in phase 1 found and fixed (issue #194, outside R4
+regression report, 2026-07-29): a false-green summary when auto-commit
+fails.** The phase-1 loop logged `"...leaving it out"` on a `commit_all`
+failure but never actually removed the workspace from the batch. Since
+the intended changes never landed as a commit, that workspace's branch
+had nothing new for `git merge` to do -- a trivial, conflict-free
+no-op that `merge_all` reported as a normal `merged <id>`, exit `0`, on
+a branch silently byte-identical to base. The original report hit this
+across all 10 agents in one real 10-agent Windows run (`git add`
+failing on a filename-too-long error, `node_modules` not in
+`.gitignore`) -- a real data-loss shape: a green CI-friendly summary
+that actually merged nothing. Fixed by recording the failure as a
+`SkippedWorkspace` (the same structured pattern the moving-base check
+already used) before removing it from `selected`, so it shows up in
+the CLI's "skipped -- needs a human" section and flips the exit code
+to `2`. Verified with a real integration test that forces a genuine
+`git commit` failure via a `pre-commit` hook that always exits
+non-zero (portable, not relying on a Windows-specific error), then
+asserts the target branch's tree is byte-identical to base *and* the
+workspace shows up in `report.skipped` -- confirmed as a real
+regression test by temporarily reverting the fix and watching it fail.
 
 **Test scenario notes** (`crates/pact-vcs/tests/merge_all.rs`): the main
 conflict test has workspace A append a new line at the end of `index.ts`,
