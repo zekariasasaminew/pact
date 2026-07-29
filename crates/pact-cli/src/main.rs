@@ -392,6 +392,43 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect and clean the shared npm dependency content store
+    /// (`.pact-<repo>/store/npm`) -- see DESIGN.md ("pact-deps > npm
+    /// store manifest, verification, cleanup", issue #160). Only npm has
+    /// a shared content store today; other package managers use their
+    /// own existing global caches.
+    #[command(subcommand)]
+    Store(StoreCommand),
+}
+
+#[derive(Subcommand)]
+enum StoreCommand {
+    /// List every store entry that has a manifest -- key, age, node/npm
+    /// version, and size.
+    List,
+    /// Check that a store entry's file count and total byte size still
+    /// match what its manifest recorded. Not a byte-for-byte content
+    /// hash -- see the manifest's own doc comment for why a mismatch
+    /// here is still a reliable corruption signal. Verifies every entry
+    /// with a manifest if `key` is omitted.
+    Verify {
+        key: Option<String>,
+    },
+    /// Removes store entries -- never a workspace already materialized
+    /// from one, only the shared entry itself, so nothing currently in
+    /// use is affected. Requires either `--older-than` or `--all`.
+    Clean {
+        /// Remove entries whose `last_used_at` is older than this many
+        /// days.
+        #[arg(long)]
+        older_than_days: Option<u64>,
+        /// Remove every entry with a manifest, regardless of age.
+        #[arg(long)]
+        all: bool,
+        /// List what would be removed without actually removing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -714,6 +751,10 @@ fn main() -> Result<()> {
         Command::CoordStatus => {
             let status = orchestrator.coord_status()?;
             print_coord_status(&status);
+        }
+        Command::Store(store_command) => {
+            let store = orchestrator.npm_store()?;
+            run_store_command(&store, store_command)?;
         }
         Command::History { workspace, since, op_type, limit, json } => {
             let filter = pact_coord::HistoryFilter { workspace_id: workspace, since, op_type, limit };
@@ -1140,6 +1181,126 @@ fn print_coord_status(status: &pact_coord::CoordStatus) {
         for agent in with_pending {
             println!("  {}: {} unread", agent.agent_id, agent.pending);
         }
+    }
+}
+
+/// Implements every `pact store` verb (issue #160) -- see DESIGN.md
+/// ("pact-deps > npm store manifest, verification, cleanup").
+fn run_store_command(store: &pact_deps::ContentStore, command: StoreCommand) -> Result<()> {
+    match command {
+        StoreCommand::List => {
+            let mut entries = store.list_entries()?;
+            if entries.is_empty() {
+                println!("no store entries with a manifest");
+                return Ok(());
+            }
+            entries.sort_by_key(|e| e.key.clone());
+            let now = unix_now();
+            for entry in &entries {
+                println!(
+                    "{}  node{} npm{}  {} file(s), {}  last used {}",
+                    entry.key,
+                    entry.node_major,
+                    entry.npm_version,
+                    entry.file_count,
+                    format_bytes(entry.byte_size),
+                    format_age(now.saturating_sub(entry.last_used_at))
+                );
+            }
+        }
+        StoreCommand::Verify { key } => {
+            let keys = match key {
+                Some(key) => vec![key],
+                None => store.list_entries()?.into_iter().map(|e| e.key).collect(),
+            };
+            if keys.is_empty() {
+                println!("no store entries with a manifest to verify");
+                return Ok(());
+            }
+            let mut any_failed = false;
+            for key in keys {
+                match store.verify_entry(&key) {
+                    Ok(true) => println!("ok: {key}"),
+                    Ok(false) => {
+                        println!("MISMATCH: {key} -- file count/byte size no longer match its manifest");
+                        any_failed = true;
+                    }
+                    Err(err) => {
+                        println!("error: {key}: {err:#}");
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
+            }
+        }
+        StoreCommand::Clean { older_than_days, all, dry_run } => {
+            if !all && older_than_days.is_none() {
+                bail!("pact store clean needs either --older-than-days <N> or --all");
+            }
+            let now = unix_now();
+            let cutoff = older_than_days.map(|days| now.saturating_sub(days * 86_400));
+            let entries = store.list_entries()?;
+            let to_remove: Vec<_> = entries
+                .into_iter()
+                .filter(|e| all || cutoff.is_some_and(|cutoff| e.last_used_at < cutoff))
+                .collect();
+
+            if to_remove.is_empty() {
+                println!("nothing to clean");
+                return Ok(());
+            }
+            for entry in &to_remove {
+                if dry_run {
+                    println!(
+                        "would remove: {} (last used {})",
+                        entry.key,
+                        format_age(now.saturating_sub(entry.last_used_at))
+                    );
+                } else {
+                    match store.remove_entry(&entry.key) {
+                        Ok(()) => println!("removed: {}", entry.key),
+                        Err(err) => println!("failed to remove {}: {err:#}", entry.key),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_age(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s ago")
+    } else if seconds < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
     }
 }
 
