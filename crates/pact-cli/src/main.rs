@@ -64,19 +64,26 @@ enum Command {
         #[arg(long)]
         agent: Option<String>,
 
-        /// Raw safety/approval override passed straight through to the
-        /// chosen agent's own vocabulary: Claude Code's --permission-mode
-        /// values (acceptEdits, bypassPermissions, plan, ...), Codex's
-        /// --sandbox values (read-only, workspace-write, danger-full-access).
-        /// Ignored by Copilot CLI, which has no gradient. Defaults to each
-        /// adapter's own unattended-safety setting -- see the README for
-        /// why that default differs by adapter (Claude Code has a real
-        /// safer default; Copilot CLI and Codex don't yet). Claude Code's
-        /// "plan" mode is read-only for the target repo, but its own
-        /// plan-document feature may still write a real file to the host
-        /// user's ~/.claude/plans/, outside this workspace's isolation and
-        /// pact's own cleanup -- confirmed by hand, see DESIGN.md. Falls
-        /// back to `pact.toml`'s `defaults.safety` if omitted.
+        /// Safety/approval override for the chosen agent. Accepts three
+        /// portable profile names, resolved per-adapter (aliases over the
+        /// raw vocabulary below, not a replacement for it): "strict" (each
+        /// adapter's most restrictive real mode), "workspace-write"
+        /// (pact's own existing default -- for Codex/Gemini this is
+        /// already the only mode confirmed to complete real headless work,
+        /// so there is no safer alias to offer instead), "unrestricted"
+        /// (each adapter's full-bypass mode). Any other value is passed
+        /// straight through raw, unchanged, to the chosen agent's own
+        /// vocabulary: Claude Code's --permission-mode values (acceptEdits,
+        /// bypassPermissions, plan, ...), Codex's --sandbox values
+        /// (read-only, workspace-write, danger-full-access). Ignored by
+        /// Copilot CLI, which has no gradient -- all three profile names
+        /// and every raw value resolve to the same thing for it. Claude
+        /// Code's "plan" mode (and "strict" on it) is read-only for the
+        /// target repo, but its own plan-document feature may still write
+        /// a real file to the host user's ~/.claude/plans/, outside this
+        /// workspace's isolation and pact's own cleanup -- confirmed by
+        /// hand, see DESIGN.md. Falls back to `pact.toml`'s
+        /// `defaults.safety` if omitted.
         #[arg(long)]
         safety: Option<String>,
 
@@ -467,8 +474,9 @@ fn main() -> Result<()> {
 
             match &safety {
                 Some(s) => eprintln!(
-                    "warning: running '{agent}' with an explicit safety override ({s}) -- \
-                     verify this doesn't hang the session on a permission prompt in headless mode."
+                    "warning: running '{agent}' with an explicit safety override ({}) -- \
+                     verify this doesn't hang the session on a permission prompt in headless mode.",
+                    describe_resolved_safety(kind, s)
                 ),
                 None => eprintln!(
                     "warning: running '{agent}' unattended with no human in the loop, using: {}. \
@@ -530,8 +538,9 @@ fn main() -> Result<()> {
                     let adapter = pact_agents::adapter(kind);
                     match &safety {
                         Some(s) => eprintln!(
-                            "warning: running '{agent_name}' with an explicit safety override ({s}) -- \
-                             verify this doesn't hang the session on a permission prompt in headless mode."
+                            "warning: running '{agent_name}' with an explicit safety override ({}) -- \
+                             verify this doesn't hang the session on a permission prompt in headless mode.",
+                            describe_resolved_safety(kind, s)
                         ),
                         None => eprintln!(
                             "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
@@ -1348,6 +1357,19 @@ fn detect_installed_agents() -> Vec<&'static str> {
 /// `None` rather than guessing between them -- see DESIGN.md ("pact-cli >
 /// `--agent` auto-default", issue #121) for why guessing there would be
 /// worse than asking.
+/// For the "explicit safety override" warning: shows what a `--safety`
+/// profile name (`strict`/`workspace-write`/`unrestricted`) actually
+/// resolves to for this specific agent, since that's not obvious from the
+/// profile name alone -- a raw, non-profile value (e.g. `acceptEdits`)
+/// passes through unchanged, exactly as it always has.
+fn describe_resolved_safety(kind: AgentKind, raw: &str) -> String {
+    match pact_agents::resolve_safety_profile(kind, Some(raw)) {
+        Some(resolved) if resolved != raw => format!("{raw} -> {resolved}"),
+        Some(_) => raw.to_string(),
+        None => format!("{raw} -> pact's own existing default for this adapter"),
+    }
+}
+
 fn resolve_default_agent(explicit: Option<String>, config: &PactConfig) -> Option<String> {
     if explicit.is_some() {
         return explicit;
