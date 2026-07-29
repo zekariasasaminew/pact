@@ -2209,6 +2209,60 @@ per the issue's own acceptance criteria -- not everyone needs all of
 them, so a missing `copilot` or `poetry` isn't a failure the way a
 missing `git` is.
 
+### Fake-agent end-to-end harness (issue #157)
+
+Every existing agent-invoking test stubs the agent out entirely --
+`ArbiterResolver`'s closure in `pact-vcs`'s tests never spawns a process,
+and `pact-core`'s own tests inject a fake resolver the same way. That
+leaves the real `spawn -> stream stdout -> AgentAdapter::parse_line ->
+commit -> merge/conflict -> teardown` loop, including the actual
+process-spawning code in `pact_agents::run_and_stream`, unexercised by
+anything short of a real (paid, potentially flaky) agent CLI call --
+which `CLAUDE.md` rules out for tests outright.
+
+`crates/pact-cli/src/bin/fake_agent.rs` is a second `[[bin]]` in the
+`pact-cli` package (auto-discovered from `src/bin/`, no `Cargo.toml`
+change needed -- and the only way `CARGO_BIN_EXE_fake_agent` is reliably
+available to `pact-cli`'s own integration tests, since Cargo only
+guarantees that env var to tests in the *same* package as the binary).
+It impersonates the Claude Code adapter specifically (the only one of
+the four this binary stands in for -- "1-2 fake agents, not all four
+adapters," matching the issue's v1 scope): it reads its `-p` argument as
+a JSON `Script` (`{"writes": {...}, "sleep_ms": _, "summary": _,
+"success": _, "exit_code": _}`, all fields optional) instead of a
+natural-language instruction, performs the scripted file writes relative
+to its CWD (the real worktree `run_and_stream` launches it in), sleeps
+if asked, and prints Claude Code's real `stream-json` schema (`system`/
+`init` then `result`) so `claude_code::parse_line` parses it exactly as
+it would genuine output. `parse_script` also tries extracting the first
+`{...}` substring before giving up to a no-op default -- Arbiter wraps a
+workspace's original task text inside a larger natural-language prompt,
+so the raw `-p` value isn't pure JSON in that path.
+
+Tests in `crates/pact-cli/tests/fake_agent_e2e.rs` copy the compiled
+`fake_agent` binary onto a scratch `PATH` entry as `claude`/`claude.exe`
+(`shim_dir`), then run the real `pact` binary
+(`env!("CARGO_BIN_EXE_pact")`) with `--agent claude` against a real
+throwaway git repo -- so `spawn`/`spawn-many`/`merge-all`/`teardown` all
+run through their actual code paths, just with a scripted, free,
+instant "agent" on the other end of the pipe. This is the harness that
+caught issue #178 (`list_workspaces` crashing on `-deps.json`/`-run.json`
+sidecar files) -- the first test to drive a real `spawn -> list` round
+trip, something no closure-stubbed test could have exercised.
+
+**Deliberately out of scope for this pass**: Arbiter-specific e2e
+scenarios (a fake agent invoked *as* the conflict resolver, verifying
+Arbiter's own prompt-wrapping and scope-enforcement against a real
+subprocess round trip). Scripting a fake agent to produce a distinct
+"correct resolution" versus the original conflicting edit, through
+Arbiter's prompt-wrapping of the task text, adds enough complexity to
+warrant its own follow-up rather than folding it into this harness's
+first pass -- `ArbiterResolver`'s closure-based unit/integration tests
+already cover Arbiter's decision logic; what's missing here is only the
+real-subprocess round trip, which is lower-value for Arbiter
+specifically since its prompt construction (not its process-spawning) is
+where most of its bugs have actually been.
+
 ## CI and release infrastructure
 
 ### Rolling `edge` release
