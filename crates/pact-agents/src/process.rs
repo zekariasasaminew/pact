@@ -53,9 +53,19 @@ pub fn run_and_stream(
     } else {
         Command::new(program)
     };
+    // pact only ever feeds the agent via the task/`-p` argument -- it never
+    // writes to the child's stdin. Explicitly closed rather than left
+    // inherited (Rust's default): an inherited, ambiguous stdin handle
+    // (a terminal, a pipe, whatever pact's own parent process happened to
+    // have) is exactly the kind of thing that can make a CLI behave
+    // differently than a genuinely headless invocation would -- confirmed
+    // by hand, a real Claude Code invocation once printed "no stdin data
+    // received in 3s, proceeding without it" and appeared to have received
+    // an empty task despite a real, non-empty `-p` value (issue #184).
     let mut child = command
         .args(args)
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .group_spawn()

@@ -819,6 +819,24 @@ unconditionally when none was seen would misreport every successful Codex
 run as a failure; the process's own exit code is the honest fallback
 signal instead.
 
+### Agent subprocesses get an explicitly closed stdin (issue #184)
+
+The `Command` built here never called `.stdin(...)` at all, meaning every
+spawned agent process inherited pact's own stdin handle verbatim -- a
+terminal, a pipe, whatever pact's own parent process happened to have.
+pact only ever feeds an agent via its task/`-p` argument, never via
+stdin, so an inherited, ambiguous handle serves no purpose and risks a
+CLI behaving differently than a genuinely headless invocation would.
+Found real-agent-verifying the Arbiter Write-fresh redesign (issue #106):
+one real `claude -p ...` invocation printed "no stdin data received in
+3s, proceeding without it" on stderr and the agent then reported
+receiving an apparently-empty task, despite a real, non-empty `-p` value.
+Not reproduced on every run, so likely dependent on the parent process's
+own stdin state at spawn time rather than deterministic -- but the
+underlying gap (stdin never explicitly closed) was real regardless.
+`.stdin(Stdio::null())` now makes the "no stdin, ever" contract explicit
+instead of leaving it to whatever the parent process happened to have.
+
 ### MCP config format confirmation
 
 `write_mcp_json_config`'s JSON shape was confirmed to work for both Claude
