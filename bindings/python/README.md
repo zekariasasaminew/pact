@@ -62,4 +62,4 @@ asyncio.run(main())
   `check_messages`, calling it never marks anything as read.
 
 All five raise `PactCoordError` (carrying pact-coord's own error text) on
-an MCP `isError: true` response.
+an MCP `is_error: true` response.
