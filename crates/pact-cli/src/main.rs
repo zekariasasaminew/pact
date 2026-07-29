@@ -830,9 +830,9 @@ fn main() -> Result<()> {
 fn print_merge_report(report: &MergeReport) {
     if report.dry_run {
         println!("dry run: would merge onto '{}' from {}", report.target_branch, short(&report.base_commit));
-        println!("  planned order:");
-        for id in &report.planned {
-            println!("    {id}");
+        println!("  planned order (risk score -- changed-file count plus a penalty for central files/lockfiles, see DESIGN.md):");
+        for workspace in &report.planned {
+            println!("    {} (risk: {})", workspace.id, workspace.risk_score);
         }
     } else {
         println!("merged onto '{}' from {}", report.target_branch, short(&report.base_commit));

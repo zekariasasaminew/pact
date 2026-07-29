@@ -21,7 +21,7 @@ worktree &rarr; prepare dependencies before the agent's first command
 &rarr; launch the agent with coordination tools wired in automatically
 &rarr; track every claim, message, and merge in a queryable operation
 log (`pact history`) &rarr; merge completed work back onto one branch,
-sequenced smallest-changeset-first &rarr; verify an AI-proposed conflict resolution
+sequenced by risk (small, low-risk changes first) &rarr; verify an AI-proposed conflict resolution
 against a real test command before ever accepting it (Arbiter). Six
 real subsystems working together, not just a lock server, not just a
 worktree wrapper, and not just an MCP integration -- coordination is
