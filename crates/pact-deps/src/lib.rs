@@ -11,7 +11,7 @@ mod store;
 
 pub use cmdutil::run as run_shimmed;
 pub use detect::{detect, PackageManager};
-pub use store::{ContentStore, LinkMode};
+pub use store::{ContentStore, LinkMode, StoreEntryManifest};
 
 use std::path::{Path, PathBuf};
 
@@ -104,8 +104,9 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
         };
     }
 
-    let key = match hash_file(&lockfile) {
-        Ok(hash) => format!("{}-{hash}", platform_key()),
+    let platform = platform_info();
+    let lockfile_hash = match hash_file(&lockfile) {
+        Ok(hash) => hash,
         Err(err) => {
             return ManagerPrepReport {
                 manager: "npm".to_string(),
@@ -118,6 +119,7 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
             }
         }
     };
+    let key = format!("{}-{lockfile_hash}", platform.key);
     let store = match store_root_for(workspace_path).and_then(ContentStore::new) {
         Ok(store) => store,
         Err(err) => {
@@ -184,6 +186,17 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
         }
     };
 
+    // Manifest bookkeeping (issue #160): a cache hit only needs
+    // `last_used_at` touched (cheap, no directory walk); a fresh populate
+    // needs a full manifest written, since this is the one point where
+    // computing file_count/byte_size is actually worth its cost -- the
+    // entry's content is never expected to change again after this.
+    if store_hit {
+        store.touch_manifest(&key);
+    } else if let Err(err) = store.write_manifest(&key, &platform.node_major, &platform.npm_version, &lockfile_hash) {
+        tracing::warn!("failed to write store manifest for '{key}': {err:#}");
+    }
+
     let node_modules_src = entry.join("node_modules");
     let mut materialization = None;
     let mut warnings = Vec::new();
@@ -247,22 +260,34 @@ fn store_root_for(workspace_path: &Path) -> Result<PathBuf> {
     Ok(state_dir.join("store").join("npm"))
 }
 
+/// `node_major`/`npm_version` are surfaced alongside the computed key
+/// (not just baked into it) so a store manifest (issue #160) can record
+/// them as their own structured fields, without a caller needing to
+/// re-spawn `node --version`/`npm --version` a second time just to get
+/// what `platform_info` already asked them for.
+struct PlatformInfo {
+    key: String,
+    node_major: String,
+    npm_version: String,
+}
+
 /// Distinguishes store entries by OS, architecture, libc flavor (Linux
 /// only), Node major version, and npm's own version -- see DESIGN.md
 /// ("pact-deps > Store key components") for why each dimension is there.
-fn platform_key() -> String {
+fn platform_info() -> PlatformInfo {
     let node_major = cmd_version_part("node", 0)
         .unwrap_or_else(|| "unknown".to_string());
     let npm_version = cmd_version_part("npm", -1)
         .unwrap_or_else(|| "unknown".to_string());
-    format!(
+    let key = format!(
         "{}-{}{}-node{}-npm{}",
         std::env::consts::OS,
         std::env::consts::ARCH,
         libc_suffix(),
         node_major,
         npm_version
-    )
+    );
+    PlatformInfo { key, node_major, npm_version }
 }
 
 /// Runs `<program> --version` and returns either its first dot-separated

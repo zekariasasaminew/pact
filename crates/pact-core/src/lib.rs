@@ -807,6 +807,14 @@ impl Orchestrator {
         pact_coord::status(&self.repo_root)
     }
 
+    /// The shared npm dependency content store for this repo -- what
+    /// `pact store` (issue #160) operates on directly. Cache/
+    /// materialization bookkeeping only, entirely separate from workspace
+    /// state.
+    pub fn npm_store(&self) -> Result<pact_deps::ContentStore> {
+        pact_deps::ContentStore::new(self.workspaces.state_dir().join("store").join("npm"))
+    }
+
     pub fn teardown(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         // WorkspaceManager::remove_workspace already kills any live agent
         // process recorded against this workspace before removing it, and

@@ -884,8 +884,10 @@ dependencies = [
  "pact-vcs",
  "reflink-copy",
  "serde",
+ "serde_json",
  "sha2",
  "tracing",
+ "uuid",
  "walkdir",
 ]
 
