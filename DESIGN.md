@@ -2209,6 +2209,30 @@ per the issue's own acceptance criteria -- not everyone needs all of
 them, so a missing `copilot` or `poetry` isn't a failure the way a
 missing `git` is.
 
+### `find_repo_root` home-directory guard (issue #136)
+
+Found incidentally during #123's error-hint work: `find_repo_root` walks
+up from the current directory looking for the first `.git`, with no
+upper bound but the filesystem root. A user running `pact` from a
+directory nested under an *unrelated* git repo -- most plausibly a
+dotfiles-manager home-directory repo (chezmoi, yadm, and similar all
+work exactly this way) -- silently got that repo's `.pact` state
+instead of an error, with no signal anything unexpected happened.
+Reproduced by accident in this project's own dev environment: the home
+directory happens to be an unrelated git repo, and running `pact list`
+from a plain temp subdirectory under it walked all the way up and
+picked it.
+
+`unexpected_repo_root_warning` warns (never blocks -- an intentional
+home-directory-as-repo setup is plausible, just unusual) on either of
+two cheap signals: the found root is exactly `dirs::home_dir()`, or the
+walk went up `>= 4` directories to find it. The home-directory check is
+precise and covers the concrete failure mode that was actually hit; the
+levels-up check is a broader, fuzzier catch-all for the same class of
+mistake (an unrelated ancestor repo further from home). `--repo`
+explicit is the documented way to silence the warning by being
+unambiguous.
+
 ### Fake-agent end-to-end harness (issue #157)
 
 Every existing agent-invoking test stubs the agent out entirely --
