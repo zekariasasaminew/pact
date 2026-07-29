@@ -45,6 +45,13 @@ pub fn run() -> Result<()> {
     println!();
     println!("cleaning up the demo repo...");
     let _ = std::fs::remove_dir_all(&repo_root);
+    // `run_inner` opens a real WorkspaceManager, which creates its state
+    // directory as a *sibling* of repo_root (`.pact-<repo-name>`), not
+    // inside it -- removing repo_root alone left this orphaned every time
+    // (found in an outside R4 regression report, 2026-07-29, issue #195).
+    if let Ok(state_dir) = WorkspaceManager::state_dir_for(&repo_root) {
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
 
     result
 }

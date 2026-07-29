@@ -54,4 +54,17 @@ fn demo_leaves_no_leftover_temp_directory() {
         "expected {} to be cleaned up after pact demo finished",
         repo_path.display()
     );
+
+    // Regression test for a real leak an outside R4 regression report
+    // found (2026-07-29, issue #195): `WorkspaceManager` creates its state
+    // directory as a *sibling* of the repo root, not inside it, so
+    // checking repo_path alone (above) missed this entirely -- every real
+    // `pact demo` run was leaking one `.pact-pact-demo-<uuid>` directory
+    // into the temp dir, silently, forever.
+    let state_dir = pact_vcs::WorkspaceManager::state_dir_for(repo_path).unwrap();
+    assert!(
+        !state_dir.exists(),
+        "expected {} (the workspace state directory, a sibling of the repo root) to be cleaned up too",
+        state_dir.display()
+    );
 }
