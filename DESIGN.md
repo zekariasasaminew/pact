@@ -2373,6 +2373,26 @@ concurrently with `demo_succeeds_from_outside_any_git_repo` in the same
 test binary (cargo parallelizes tests within one binary by default), since
 the sibling test's own still-running `pact demo` shows up in the sweep.
 
+**Real leak found and fixed (issue #195, outside R4 regression report,
+2026-07-29): cleanup only ever removed the repo directory, never the
+workspace state directory.** `run_inner` opens a real `WorkspaceManager`
+against the temp repo, which creates its state directory (locks/meta/
+workspaces) as a **sibling** of the repo root -- `.pact-<repo-name>`, not
+a subdirectory of it (see "Workspace lifecycle" below). `demo::run`'s
+`remove_dir_all(&repo_root)` never touched that sibling, so every single
+real `pact demo` run since the feature shipped leaked one directory into
+the temp dir -- confirmed by finding over 150 of them already
+accumulated in this project's own dev environment. `demo_leaves_no_leftover_temp_directory`
+had been checking `repo_path.exists()` the whole time, which *was*
+being cleaned up correctly -- that's precisely why this shipped and
+stayed broken silently: the test's own blind spot matched the bug's
+blind spot. Fixed by extracting the sibling-state-dir derivation
+`WorkspaceManager::open` already did inline into a new public
+`WorkspaceManager::state_dir_for(repo_root) -> Result<PathBuf>` (pure
+path math, no filesystem access) that `open` and `demo::run`'s cleanup
+now both call, so the two can never drift apart again -- and extended
+the existing test to check it too, not just the repo path.
+
 ### `--agent` auto-default (issue #121)
 
 Extends the `pact.toml` precedence chain (issue #118, above) with one more
