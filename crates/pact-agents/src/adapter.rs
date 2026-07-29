@@ -91,6 +91,77 @@ pub fn adapter(kind: AgentKind) -> Box<dyn AgentAdapter> {
     }
 }
 
+/// A `--safety` value users can give without knowing any one adapter's own
+/// vocabulary -- see DESIGN.md ("pact-agents > safety profiles", issue
+/// #161). Aliases layered *on top of* the existing raw pass-through, never
+/// a replacement: any other string (`acceptEdits`, `read-only`, ...) keeps
+/// flowing through to `build_command` completely unchanged, exactly as
+/// before this existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyProfile {
+    /// Each adapter's most restrictive real mode.
+    Strict,
+    /// pact's own existing default for that adapter -- deliberately *not*
+    /// a distinct, more-permissive-than-default setting: for Codex and
+    /// Gemini, pact's existing default is already the only mode confirmed
+    /// to complete real headless work at all (see each adapter's own
+    /// DESIGN.md section), so "workspace-write" and "unrestricted" both
+    /// resolve to that same default for those two -- there is no safer
+    /// mode that still gets real work done to alias instead.
+    WorkspaceWrite,
+    /// Each adapter's full-bypass mode.
+    Unrestricted,
+}
+
+impl SafetyProfile {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "strict" => Some(Self::Strict),
+            "workspace-write" => Some(Self::WorkspaceWrite),
+            "unrestricted" => Some(Self::Unrestricted),
+            _ => None,
+        }
+    }
+}
+
+/// Resolves a raw `--safety` value to what `build_command` should actually
+/// receive: if it's one of the three profile names, mapped per-adapter
+/// below; otherwise returned unchanged, so any adapter-specific raw value
+/// keeps working exactly as it did before profiles existed.
+pub fn resolve_safety_profile(agent: AgentKind, safety: Option<&str>) -> Option<String> {
+    let name = safety?;
+    let Some(profile) = SafetyProfile::parse(name) else {
+        return Some(name.to_string());
+    };
+    match (agent, profile) {
+        (AgentKind::Claude, SafetyProfile::Strict) => Some("plan".to_string()),
+        (AgentKind::Claude, SafetyProfile::WorkspaceWrite) => None,
+        (AgentKind::Claude, SafetyProfile::Unrestricted) => Some("bypassPermissions".to_string()),
+
+        // Codex: confirmed by hand (see DESIGN.md "Codex adapter"), a
+        // plain `--sandbox` mode -- even `workspace-write` -- still
+        // refuses to write files at all in headless mode; the only
+        // confirmed-working "gets real work done" setting is the full
+        // bypass flag (pact's existing `None` default). `workspace-write`
+        // here is a deliberately inspect-only/no-real-edits run, faithful
+        // to Codex's own current limitation, not a pact bug.
+        (AgentKind::Codex, SafetyProfile::Strict) => Some("read-only".to_string()),
+        (AgentKind::Codex, SafetyProfile::WorkspaceWrite) => Some("workspace-write".to_string()),
+        (AgentKind::Codex, SafetyProfile::Unrestricted) => None,
+
+        (AgentKind::Gemini, SafetyProfile::Strict) => Some("plan".to_string()),
+        (AgentKind::Gemini, SafetyProfile::WorkspaceWrite) => Some("auto_edit".to_string()),
+        (AgentKind::Gemini, SafetyProfile::Unrestricted) => None,
+
+        // Copilot CLI has no gradient at all -- `build_command` ignores
+        // `safety_override` unconditionally and always passes
+        // `--allow-all-tools` (see `copilot.rs`). All three profiles
+        // resolve to the same no-op here, faithfully: there is no
+        // distinct restricted mode this adapter's CLI actually offers.
+        (AgentKind::Copilot, _) => None,
+    }
+}
+
 /// Writes `{"mcpServers": {<name>: {"command": ..., "args": [...]}}}` to
 /// `path`, the shape Claude Code's `--mcp-config` and Copilot CLI's
 /// `--additional-mcp-config @<path>` both expect -- see DESIGN.md
@@ -110,4 +181,67 @@ pub fn write_mcp_json_config(path: &Path, coord: &CoordConfig) -> Result<()> {
     });
     std::fs::write(path, serde_json::to_vec_pretty(&config)?)
         .with_context(|| format!("writing MCP config file to {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_safety_profile_maps_claude_strict_and_unrestricted() {
+        assert_eq!(resolve_safety_profile(AgentKind::Claude, Some("strict")), Some("plan".to_string()));
+        assert_eq!(
+            resolve_safety_profile(AgentKind::Claude, Some("unrestricted")),
+            Some("bypassPermissions".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_safety_profile_workspace_write_is_claudes_own_default() {
+        assert_eq!(resolve_safety_profile(AgentKind::Claude, Some("workspace-write")), None);
+    }
+
+    #[test]
+    fn resolve_safety_profile_maps_codex_profiles() {
+        assert_eq!(resolve_safety_profile(AgentKind::Codex, Some("strict")), Some("read-only".to_string()));
+        assert_eq!(
+            resolve_safety_profile(AgentKind::Codex, Some("workspace-write")),
+            Some("workspace-write".to_string())
+        );
+        assert_eq!(resolve_safety_profile(AgentKind::Codex, Some("unrestricted")), None);
+    }
+
+    #[test]
+    fn resolve_safety_profile_maps_gemini_profiles() {
+        assert_eq!(resolve_safety_profile(AgentKind::Gemini, Some("strict")), Some("plan".to_string()));
+        assert_eq!(
+            resolve_safety_profile(AgentKind::Gemini, Some("workspace-write")),
+            Some("auto_edit".to_string())
+        );
+        assert_eq!(resolve_safety_profile(AgentKind::Gemini, Some("unrestricted")), None);
+    }
+
+    #[test]
+    fn resolve_safety_profile_is_a_no_op_for_copilot_regardless_of_profile() {
+        for profile in ["strict", "workspace-write", "unrestricted"] {
+            assert_eq!(resolve_safety_profile(AgentKind::Copilot, Some(profile)), None);
+        }
+    }
+
+    #[test]
+    fn resolve_safety_profile_passes_through_a_raw_non_profile_value_unchanged() {
+        assert_eq!(
+            resolve_safety_profile(AgentKind::Claude, Some("acceptEdits")),
+            Some("acceptEdits".to_string())
+        );
+        assert_eq!(
+            resolve_safety_profile(AgentKind::Codex, Some("danger-full-access")),
+            Some("danger-full-access".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_safety_profile_is_none_when_no_override_given() {
+        assert_eq!(resolve_safety_profile(AgentKind::Claude, None), None);
+    }
 }

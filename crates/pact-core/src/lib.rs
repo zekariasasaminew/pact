@@ -352,7 +352,8 @@ impl Orchestrator {
             .coord_config(&preview_workspace, coord_name, coord_override)
             .ok();
 
-        let (program, args) = adapter.build_command(task, safety_override, coord.as_ref(), &path);
+        let safety = pact_agents::resolve_safety_profile(agent, safety_override);
+        let (program, args) = adapter.build_command(task, safety.as_deref(), coord.as_ref(), &path);
         if let Some(coord) = &coord {
             let _ = std::fs::remove_file(&coord.config_path);
         }
@@ -413,8 +414,9 @@ impl Orchestrator {
             }
         };
 
+        let safety = pact_agents::resolve_safety_profile(agent, safety_override);
         let (program, args) =
-            adapter.build_command(task, safety_override, coord.as_ref(), &workspace.path);
+            adapter.build_command(task, safety.as_deref(), coord.as_ref(), &workspace.path);
         let log_path = self
             .workspaces
             .state_dir()
@@ -984,7 +986,8 @@ fn attempt_arbiter_resolution(
 
     let prompt = build_arbiter_prompt(task_text, &stages);
     let adapter = pact_agents::adapter(config.agent);
-    let (program, args) = adapter.build_command(&prompt, config.safety_override.as_deref(), None, worktree_path);
+    let safety = pact_agents::resolve_safety_profile(config.agent, config.safety_override.as_deref());
+    let (program, args) = adapter.build_command(&prompt, safety.as_deref(), None, worktree_path);
 
     let supervisor = Supervisor::new();
     let outcome = pact_agents::run_and_stream(
