@@ -1832,7 +1832,12 @@ registry issue -- none of which should leave a workspace with no
 
 ### Store key components
 
-`platform_key` distinguishes store entries by OS, architecture, libc
+`platform_info` (renamed from `platform_key` when issue #160 needed its
+`node_major`/`npm_version` components as their own structured fields,
+not just baked into the key string -- returning both avoids a second
+`node --version`/`npm --version` subprocess spawn just to get what this
+function already asked them for) distinguishes store entries by OS,
+architecture, libc
 flavor (Linux only), Node major version, and npm's own version -- see
 issue #7's risk analysis for why each of these, beyond the original
 os/arch/node-major set, turned out to matter: npm version because
@@ -1848,6 +1853,69 @@ identifies itself; anything else on Linux is assumed glibc. Best-effort:
 if detection is inconclusive, "glibc" is the safer assumption (the
 overwhelming majority of non-Alpine Linux), not silently omitting the
 dimension entirely.
+
+### npm store manifest, verification, cleanup (issue #160)
+
+From an outside code review (2026-07-24, triage discussion): the shared
+npm content store had no manifest, no way to verify an entry wasn't
+corrupt, and no cleanup command -- it could only grow. Marked "design
+first" at the time, since the cleanup policy specifically needed
+thought (LRU vs TTL, safety against a concurrently-populating entry).
+Picked sensible defaults this pass rather than leaving it unbuilt
+further, matching the same reasoning as issue #159 (below): none of
+this is a public API commitment, easy to retune later.
+
+**Manifest** (`ContentStore::write_manifest`/`touch_manifest`/
+`read_manifest`, a sibling `<key>.manifest.json` next to each `<key>/`
+entry directory, matching the existing `<key>.lock` convention): `key`,
+`created_at`, `last_used_at`, `node_major`, `npm_version`,
+`lockfile_hash`, `file_count`, `byte_size` -- the exact fields the
+review proposed. `file_count`/`byte_size` are computed by walking the
+entry directory once, but only on a real populate (a cache miss) --
+a cache hit only calls `touch_manifest` (updates `last_used_at`,
+no walk), since the entry's content is never expected to change again
+after population. An entry populated before this feature existed, or
+whose manifest write failed, simply has no manifest -- `list`/`clean`
+treat it as invisible rather than erroring; the entry itself still
+works fine for materialization regardless.
+
+**`pact store list`** -- every entry with a manifest: key, node/npm
+version, file count, human-readable size, and how long ago it was last
+used.
+
+**`pact store verify [key]`** (all entries with a manifest if `key` is
+omitted) -- confirms the entry's current file count and total byte size
+still match what its manifest recorded. Deliberately not a
+byte-for-byte content hash: re-hashing a potentially large
+`node_modules` tree on every verify would defeat the point of caching
+it. A mismatch here means something changed since population, which
+should never legitimately happen to a shared store entry (nothing is
+supposed to write into one afterward), so this is a reliable-enough
+corruption signal without that cost. Exits non-zero if any entry fails.
+
+**`pact store clean --older-than-days <N> | --all [--dry-run]`** --
+removes entries by `last_used_at` age or unconditionally. Chose
+`last_used_at` over `created_at` for the age check specifically because
+an entry that's still being hit regularly shouldn't be evicted just for
+being old -- LRU-style, not pure TTL, on the theory that "still useful"
+is what actually matters for a cache. Safe against a
+concurrently-populating entry: `remove_entry` acquires the exact same
+per-key `PidLock` `populate_if_absent` already uses before deleting
+anything, so a `clean` racing a real `spawn` for the same lockfile hash
+either waits for that population to finish first or the population
+waits for `clean` to finish removing a *stale* entry first -- never a
+torn read of a half-written `node_modules`. Removing an entry never
+affects a workspace that already materialized from it (copied or
+hardlinked files are independent copies at that point) -- only future
+materializations from that key.
+
+Verified for real, not synthetically: a real `pact spawn` against a
+real npm workspace (zero-dependency lockfile, so `npm ci` runs
+instantly with no network access) populates a real entry, then `pact
+store list`/`verify`/`clean --dry-run`/`clean --all` are driven against
+what was actually populated, confirming the full list -> verify ->
+dry-run -> real-removal -> empty round trip end to end
+(`crates/pact-cli/tests/store.rs`).
 
 ### Windows `.cmd` shim resolution
 
