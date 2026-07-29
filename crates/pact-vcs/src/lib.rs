@@ -255,6 +255,20 @@ pub struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
+    /// Derives the sibling `.pact-<repo-name>` state directory for
+    /// `repo_root` -- pure path math, no filesystem access, so a caller
+    /// that needs it (e.g. `pact demo`'s own cleanup, issue #195 from the
+    /// 2026-07-29 R4 regression report) can compute it without needing an
+    /// already-open `WorkspaceManager`. `open` uses this same derivation
+    /// itself, so the two can never drift apart.
+    pub fn state_dir_for(repo_root: &Path) -> Result<PathBuf> {
+        let repo_name = repo_root
+            .file_name()
+            .context("repo root has no directory name")?;
+        let parent = repo_root.parent().context("repo root has no parent directory")?;
+        Ok(parent.join(format!(".pact-{}", repo_name.to_string_lossy())))
+    }
+
     pub fn open(repo_root: impl Into<PathBuf>) -> Result<Self> {
         let repo_root = repo_root.into();
         if !repo_root.join(".git").exists() {
@@ -264,13 +278,7 @@ impl WorkspaceManager {
             );
         }
 
-        let repo_name = repo_root
-            .file_name()
-            .context("repo root has no directory name")?;
-        let state_dir = repo_root
-            .parent()
-            .context("repo root has no parent directory")?
-            .join(format!(".pact-{}", repo_name.to_string_lossy()));
+        let state_dir = Self::state_dir_for(&repo_root)?;
 
         std::fs::create_dir_all(state_dir.join("locks"))?;
         std::fs::create_dir_all(state_dir.join("meta"))?;
