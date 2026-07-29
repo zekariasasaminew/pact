@@ -514,7 +514,7 @@ impl WorkspaceManager {
         for entry in std::fs::read_dir(&meta_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") && is_workspace_meta_file(&path) {
                 let contents = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
                 out.push(serde_json::from_str(strip_bom(&contents))?);
@@ -1050,6 +1050,20 @@ fn strip_bom(s: &str) -> &str {
     s.strip_prefix('\u{FEFF}').unwrap_or(s)
 }
 
+/// `meta/` holds one canonical `<id>.json` per workspace plus sibling
+/// observability files (`<id>-deps.json`, `<id>-run.json`) written by
+/// dependency prep and agent runs -- both must be excluded here or their
+/// non-`Workspace`-shaped JSON breaks `list_workspaces`'s deserialization.
+/// Safe to match by suffix: every id ends in a random lowercase-hex
+/// suffix, which can never itself end in "-deps" or "-run" (`p`/`s`/`r`/`u`
+/// aren't hex digits).
+fn is_workspace_meta_file(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    !stem.ends_with("-deps") && !stem.ends_with("-run")
+}
+
 fn is_never_auto_resolve(path: &str) -> bool {
     let basename = Path::new(path)
         .file_name()
@@ -1432,6 +1446,19 @@ mod tests {
     fn detect_json_indent_falls_back_to_two_space_for_minified_json() {
         let text = "{\"a\":1}";
         assert_eq!(detect_json_indent(text), b"  ".to_vec());
+    }
+
+    #[test]
+    fn is_workspace_meta_file_accepts_the_canonical_id_json() {
+        assert!(is_workspace_meta_file(Path::new(
+            "/state/meta/writes-hello-txt-hello-from-a-fa-ed19eee2.json"
+        )));
+    }
+
+    #[test]
+    fn is_workspace_meta_file_rejects_the_deps_and_run_sidecar_files() {
+        assert!(!is_workspace_meta_file(Path::new("/state/meta/some-id-deps.json")));
+        assert!(!is_workspace_meta_file(Path::new("/state/meta/some-id-run.json")));
     }
 
     #[test]
