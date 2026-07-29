@@ -231,6 +231,58 @@ fn merge_all_detects_and_persists_a_real_conflict_between_two_fake_agents() {
     cleanup(&shim);
 }
 
+fn state_dir_for(repo: &Path) -> PathBuf {
+    repo.parent()
+        .unwrap()
+        .join(format!(".pact-{}", repo.file_name().unwrap().to_string_lossy()))
+}
+
+/// Regression test for issue #147's remaining Arbiter scope guard: a
+/// lockfile needs the real package manager to regenerate it, not a
+/// hand-written merge, so Arbiter must refuse one outright rather than
+/// asking a real agent to resolve it. Confirms both the refusal (merge-all
+/// still reports it skipped) and that the refusal happens *before* ever
+/// spawning a real agent process -- no `arbiter-*.jsonl` log, which
+/// `run_and_stream` only creates once a process actually starts.
+#[test]
+fn merge_all_refuses_to_let_arbiter_touch_a_conflicted_lockfile() {
+    let repo = init_repo("arbiter-lockfile");
+    run_git(&repo, &["checkout", "-b", "main-work"]);
+    std::fs::write(repo.join("package-lock.json"), "{\n  \"lockfileVersion\": 1,\n  \"base\": true\n}\n").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add lockfile"]);
+    let shim = shim_dir();
+
+    let task_a = script(&[("package-lock.json", "{\n  \"lockfileVersion\": 1,\n  \"a\": true\n}\n")], "edited lockfile (A)");
+    let task_b = script(&[("package-lock.json", "{\n  \"lockfileVersion\": 1,\n  \"b\": true\n}\n")], "edited lockfile (B)");
+    let spawn = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--task", &task_a, "--task", &task_b]);
+    assert!(spawn.status.success(), "spawn-many failed: {}", String::from_utf8_lossy(&spawn.stderr));
+
+    let pass_cmd = if cfg!(windows) { "exit 0" } else { "true" };
+    let merge = pact(&repo, &shim, &["merge-all", "--test-cmd", pass_cmd, "--arbiter-agent", "claude"]);
+    assert_eq!(
+        merge.status.code(),
+        Some(2),
+        "expected exit 2 (skipped) since arbiter must refuse the lockfile, got: {:?}\nstdout: {}",
+        merge.status.code(),
+        stdout(&merge)
+    );
+    assert!(stdout(&merge).contains("package-lock.json"), "got: {}", stdout(&merge));
+
+    let logs_dir = state_dir_for(&repo).join("logs");
+    let arbiter_log_exists = std::fs::read_dir(&logs_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().starts_with("arbiter-") && e.file_name().to_string_lossy().ends_with(".jsonl"))
+        })
+        .unwrap_or(false);
+    assert!(!arbiter_log_exists, "expected no arbiter-*.jsonl log -- a real agent process should never have been spawned for a lockfile");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
