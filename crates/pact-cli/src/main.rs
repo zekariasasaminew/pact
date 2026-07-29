@@ -1558,8 +1558,12 @@ fn print_event(event: &AgentEvent, verbose: bool) {
 /// Walks up from `start` looking for a directory containing `.git`.
 fn find_repo_root(start: &Path) -> Result<PathBuf> {
     let mut dir = start.to_path_buf();
+    let mut levels_up: u32 = 0;
     loop {
         if dir.join(".git").exists() {
+            if let Some(warning) = unexpected_repo_root_warning(&dir, dirs::home_dir().as_deref(), levels_up) {
+                eprintln!("warning: {warning}");
+            }
             return Ok(dir);
         }
         if !dir.pop() {
@@ -1569,7 +1573,37 @@ fn find_repo_root(start: &Path) -> Result<PathBuf> {
                 start.display()
             );
         }
+        levels_up += 1;
     }
+}
+
+/// `find_repo_root` has no upper bound other than the filesystem root -- a
+/// user running `pact` from a directory nested under an *unrelated* git
+/// repo (most plausibly a dotfiles-manager home-directory repo, e.g.
+/// chezmoi/yadm) silently gets that repo's `.pact` state instead of an
+/// error (issue #136). Never blocks (an intentional home-directory-as-repo
+/// setup is plausible, just unusual) -- only warns, with `--repo` as the
+/// documented way to be explicit.
+const REPO_ROOT_LEVELS_UP_WORTH_A_WARNING: u32 = 4;
+
+fn unexpected_repo_root_warning(root: &Path, home: Option<&Path>, levels_up: u32) -> Option<String> {
+    if home.is_some_and(|home| home == root) {
+        return Some(format!(
+            "pact found a git repository at your home directory ('{}') and is about to store \
+             its state there -- if this isn't the repo you meant to run pact in, pass --repo \
+             explicitly.",
+            root.display()
+        ));
+    }
+    if levels_up >= REPO_ROOT_LEVELS_UP_WORTH_A_WARNING {
+        return Some(format!(
+            "pact found the nearest git repository {levels_up} directories above the current \
+             one, at '{}' -- if this isn't the repo you meant to run pact in, pass --repo \
+             explicitly.",
+            root.display()
+        ));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1594,6 +1628,30 @@ mod tests {
     #[test]
     fn git_version_supports_worktree_none_for_unparseable_input() {
         assert_eq!(git_version_supports_worktree("not a git version string"), None);
+    }
+
+    #[test]
+    fn unexpected_repo_root_warning_fires_for_the_home_directory() {
+        let home = Path::new("/home/zekar");
+        assert!(unexpected_repo_root_warning(home, Some(home), 0).is_some());
+    }
+
+    #[test]
+    fn unexpected_repo_root_warning_fires_when_walked_up_far_enough() {
+        let root = Path::new("/some/very/distant/ancestor");
+        assert!(unexpected_repo_root_warning(root, Some(Path::new("/home/zekar")), 4).is_some());
+    }
+
+    #[test]
+    fn unexpected_repo_root_warning_is_silent_for_a_nearby_ordinary_repo() {
+        let root = Path::new("/home/zekar/projects/pact");
+        assert!(unexpected_repo_root_warning(root, Some(Path::new("/home/zekar")), 1).is_none());
+    }
+
+    #[test]
+    fn unexpected_repo_root_warning_is_silent_with_no_home_dir_known() {
+        let root = Path::new("/some/repo");
+        assert!(unexpected_repo_root_warning(root, None, 0).is_none());
     }
 
     #[test]
