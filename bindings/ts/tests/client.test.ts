@@ -79,6 +79,19 @@ describe("PactCoordClient", () => {
     }, { pactBin });
   });
 
+  it("rejects instead of accepting when failOnConflict is set on an overlapping claim", async () => {
+    mkdirSync(join(scratchRepo, "src"));
+    writeFileSync(join(scratchRepo, "src", "shared.py"), "# shared\n");
+
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      await client.claimFiles(["src/shared.py"]);
+    }, { pactBin });
+
+    await withClient(scratchRepo, "agent-b", scratchRepo, async (client) => {
+      await expect(client.claimFiles(["src/shared.py"], undefined, true)).rejects.toBeInstanceOf(PactCoordError);
+    }, { pactBin });
+  });
+
   it("lists active leases across agents via listClaims", async () => {
     await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
       expect(await client.listClaims()).toEqual([]);

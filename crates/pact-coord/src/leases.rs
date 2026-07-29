@@ -107,6 +107,7 @@ pub fn claim_files(
     holder: &str,
     patterns: &[String],
     ttl_seconds: Option<i64>,
+    fail_on_conflict: bool,
 ) -> Result<ClaimResult> {
     if let Some(ttl) = ttl_seconds {
         if ttl <= 0 {
@@ -153,6 +154,21 @@ pub fn claim_files(
                 });
             }
         }
+    }
+
+    // Opt-in strict mode (issue #162): reject the claim outright, before
+    // anything is recorded, rather than the default advisory behavior
+    // (accept + report conflicts for the caller to judge). Checked before
+    // the INSERT loop below so a rejected claim leaves no trace in
+    // `leases` at all -- a caller retrying after resolving the overlap
+    // shouldn't find its own earlier, rejected attempt still on record.
+    if fail_on_conflict && !conflicts.is_empty() {
+        bail!(
+            "claim rejected: overlaps {} existing lease(s) held by another agent (e.g. '{}' held by '{}')",
+            conflicts.len(),
+            conflicts[0].pattern,
+            conflicts[0].holder
+        );
     }
 
     // ON CONFLICT keyed on (holder, pattern) -- see the leases_holder_pattern
@@ -262,7 +278,7 @@ mod tests {
     fn claim_files_rejects_negative_ttl() {
         let conn = test_conn();
         let root = std::env::temp_dir();
-        let err = claim_files(&conn, &root, "agent-a", &[], Some(-1)).unwrap_err();
+        let err = claim_files(&conn, &root, "agent-a", &[], Some(-1), false).unwrap_err();
         assert!(err.to_string().contains("must be positive"), "unexpected error: {err}");
     }
 
@@ -270,7 +286,7 @@ mod tests {
     fn claim_files_rejects_zero_ttl() {
         let conn = test_conn();
         let root = std::env::temp_dir();
-        let err = claim_files(&conn, &root, "agent-a", &[], Some(0)).unwrap_err();
+        let err = claim_files(&conn, &root, "agent-a", &[], Some(0), false).unwrap_err();
         assert!(err.to_string().contains("must be positive"), "unexpected error: {err}");
     }
 
@@ -278,7 +294,7 @@ mod tests {
     fn claim_files_rejects_ttl_above_24_hours() {
         let conn = test_conn();
         let root = std::env::temp_dir();
-        let err = claim_files(&conn, &root, "agent-a", &[], Some(9_999_999_999)).unwrap_err();
+        let err = claim_files(&conn, &root, "agent-a", &[], Some(9_999_999_999), false).unwrap_err();
         assert!(err.to_string().contains("at most"), "unexpected error: {err}");
     }
 
@@ -286,7 +302,7 @@ mod tests {
     fn claim_files_accepts_ttl_within_bounds() {
         let conn = test_conn();
         let root = std::env::temp_dir();
-        let result = claim_files(&conn, &root, "agent-a", &[], Some(3600)).unwrap();
+        let result = claim_files(&conn, &root, "agent-a", &[], Some(3600), false).unwrap();
         assert!(result.accepted);
         assert!(!result.has_conflicts);
     }
@@ -295,7 +311,7 @@ mod tests {
     fn claim_files_accepts_default_ttl_when_omitted() {
         let conn = test_conn();
         let root = std::env::temp_dir();
-        let result = claim_files(&conn, &root, "agent-a", &[], None).unwrap();
+        let result = claim_files(&conn, &root, "agent-a", &[], None, false).unwrap();
         assert!(result.accepted);
         assert!(!result.has_conflicts);
     }
@@ -309,9 +325,9 @@ mod tests {
         let conn = test_conn();
         let root = std::env::temp_dir();
 
-        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
-        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
-        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900), false).unwrap();
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900), false).unwrap();
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900), false).unwrap();
 
         assert_eq!(lease_count(&conn), 1, "3 identical claims from the same holder must not accumulate rows");
     }
@@ -321,8 +337,8 @@ mod tests {
         let conn = test_conn();
         let root = std::env::temp_dir();
 
-        let first = claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(60)).unwrap();
-        let second = claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(3600)).unwrap();
+        let first = claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(60), false).unwrap();
+        let second = claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(3600), false).unwrap();
 
         assert!(second.expires_at >= first.expires_at);
     }
@@ -332,8 +348,8 @@ mod tests {
         let conn = test_conn();
         let root = std::env::temp_dir();
 
-        claim_files(&conn, &root, "agent-a", &["a.txt".to_string()], Some(900)).unwrap();
-        claim_files(&conn, &root, "agent-a", &["b.txt".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["a.txt".to_string()], Some(900), false).unwrap();
+        claim_files(&conn, &root, "agent-a", &["b.txt".to_string()], Some(900), false).unwrap();
 
         assert_eq!(lease_count(&conn), 2);
     }
@@ -343,11 +359,11 @@ mod tests {
         let root = temp_workspace_with_files(&["src/add.js"]);
         let conn = test_conn();
 
-        let first = claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+        let first = claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900), false).unwrap();
         assert!(!first.has_conflicts);
         assert!(first.conflicts.is_empty());
 
-        let second = claim_files(&conn, &root, "agent-b", &["src/add.js".to_string()], Some(900)).unwrap();
+        let second = claim_files(&conn, &root, "agent-b", &["src/add.js".to_string()], Some(900), false).unwrap();
         assert!(second.accepted, "leases are advisory -- a conflicting claim is still accepted");
         assert!(second.has_conflicts);
         assert!(!second.conflicts.is_empty());
@@ -356,10 +372,53 @@ mod tests {
     }
 
     #[test]
+    fn claim_files_with_fail_on_conflict_rejects_an_overlapping_claim() {
+        let root = temp_workspace_with_files(&["src/add.js"]);
+        let conn = test_conn();
+
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900), false).unwrap();
+
+        let err = claim_files(&conn, &root, "agent-b", &["src/add.js".to_string()], Some(900), true).unwrap_err();
+        assert!(err.to_string().contains("agent-a"), "expected the rejection reason to name the conflicting holder");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claim_files_with_fail_on_conflict_does_not_record_the_rejected_claim() {
+        let root = temp_workspace_with_files(&["src/add.js"]);
+        let conn = test_conn();
+
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900), false).unwrap();
+        let _ = claim_files(&conn, &root, "agent-b", &["src/add.js".to_string()], Some(900), true).unwrap_err();
+
+        let leases = list_active_leases(&conn).unwrap();
+        assert!(
+            !leases.iter().any(|l| l.holder == "agent-b"),
+            "a rejected fail_on_conflict claim must not be recorded at all: {leases:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claim_files_with_fail_on_conflict_still_accepts_a_non_overlapping_claim() {
+        let root = temp_workspace_with_files(&["a.txt", "b.txt"]);
+        let conn = test_conn();
+
+        claim_files(&conn, &root, "agent-a", &["a.txt".to_string()], Some(900), false).unwrap();
+        let result = claim_files(&conn, &root, "agent-b", &["b.txt".to_string()], Some(900), true).unwrap();
+        assert!(result.accepted);
+        assert!(!result.has_conflicts);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn release_files_matches_exact_pattern_string() {
         let conn = test_conn();
         let root = std::env::temp_dir();
-        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["same.txt".to_string()], Some(900), false).unwrap();
 
         let released = release_files(&conn, &root, "agent-a", &["same.txt".to_string()]).unwrap();
         assert_eq!(released, 1);
@@ -369,7 +428,7 @@ mod tests {
     fn release_files_matches_by_glob_overlap_with_a_different_pattern_string() {
         let root = temp_workspace_with_files(&["src/add.js", "src/sub.js"]);
         let conn = test_conn();
-        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900), false).unwrap();
 
         let released = release_files(&conn, &root, "agent-a", &["src/*.js".to_string()]).unwrap();
         assert_eq!(
@@ -384,7 +443,7 @@ mod tests {
     fn release_files_does_not_release_another_holders_lease() {
         let root = temp_workspace_with_files(&["src/add.js"]);
         let conn = test_conn();
-        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900), false).unwrap();
 
         let released = release_files(&conn, &root, "agent-b", &["src/*.js".to_string()]).unwrap();
         assert_eq!(released, 0);
@@ -396,7 +455,7 @@ mod tests {
     fn release_files_returns_zero_for_a_non_overlapping_pattern() {
         let root = temp_workspace_with_files(&["src/add.js", "src/sub.js"]);
         let conn = test_conn();
-        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900)).unwrap();
+        claim_files(&conn, &root, "agent-a", &["src/add.js".to_string()], Some(900), false).unwrap();
 
         let released = release_files(&conn, &root, "agent-a", &["src/sub.js".to_string()]).unwrap();
         assert_eq!(released, 0);
