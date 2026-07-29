@@ -205,7 +205,8 @@ fn merge_all_dry_run_touches_no_git_state() {
 
     assert!(report.dry_run);
     assert!(report.merged.is_empty(), "dry run must not actually merge anything");
-    assert_eq!(report.planned, vec![a.id.clone()]);
+    assert_eq!(report.planned.len(), 1);
+    assert_eq!(report.planned[0].id, a.id);
 
     let branches_after = String::from_utf8(
         Command::new("git").args(["branch"]).current_dir(&repo).output().unwrap().stdout,
@@ -217,6 +218,43 @@ fn merge_all_dry_run_touches_no_git_state() {
     );
 
     cleanup(&repo);
+}
+
+/// Regression test for the risk-aware sequencing itself (issue #159), not
+/// just `merge_risk_score` in isolation: a workspace touching only
+/// `package.json` (one file, but central) must still be planned *after* a
+/// workspace touching three unrelated plain files, even though the plain
+/// changeset is larger by raw file count.
+#[test]
+fn merge_all_dry_run_sequences_a_central_file_touch_after_a_larger_plain_changeset() {
+    let root = init_repo_with_package_json();
+    let manager = WorkspaceManager::open(&root).unwrap();
+
+    let central = manager.create_workspace("bump a dependency").unwrap();
+    std::fs::write(
+        central.path.join("package.json"),
+        "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"a\": \"2.0.0\"\n  }\n}\n",
+    )
+    .unwrap();
+
+    let plain = manager.create_workspace("add three new files").unwrap();
+    std::fs::write(plain.path.join("a.ts"), "export const A = 1;\n").unwrap();
+    std::fs::write(plain.path.join("b.ts"), "export const B = 1;\n").unwrap();
+    std::fs::write(plain.path.join("c.ts"), "export const C = 1;\n").unwrap();
+
+    let report = manager.merge_all(None, None, &[], None, None, true).unwrap();
+    assert!(report.dry_run);
+    assert_eq!(report.planned.len(), 2);
+    assert_eq!(report.planned[0].id, plain.id, "the larger plain changeset should still be sequenced first");
+    assert_eq!(report.planned[1].id, central.id, "the smaller but central-file change should be sequenced later");
+    assert!(
+        report.planned[1].risk_score > report.planned[0].risk_score,
+        "expected the central-file workspace's risk score ({}) to exceed the plain one's ({})",
+        report.planned[1].risk_score,
+        report.planned[0].risk_score
+    );
+
+    cleanup(&root);
 }
 
 #[test]

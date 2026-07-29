@@ -140,8 +140,17 @@ pub struct MergeReport {
     /// Populated only for `--dry-run`: the merge order that *would* be
     /// used, after sequencing and the moving-base check, without any git
     /// state actually being touched.
-    pub planned: Vec<String>,
+    pub planned: Vec<PlannedWorkspace>,
     pub dry_run: bool,
+}
+
+/// One workspace's position in `merge_all`'s computed merge order, plus
+/// the risk score that produced it -- see `merge_risk_score` (issue
+/// #159).
+#[derive(Debug, Clone, Serialize)]
+pub struct PlannedWorkspace {
+    pub id: String,
+    pub risk_score: usize,
 }
 
 enum MergeOutcome {
@@ -185,6 +194,56 @@ const NEVER_AUTO_RESOLVE: &[&str] = &[
     "Pipfile.lock",
     "go.sum",
 ];
+
+/// Files whose basename marks them as "central" to a repo -- a package
+/// manifest, schema file, or common barrel/router entry point -- worth a
+/// risk penalty in `merge_risk_score` beyond raw changed-file count
+/// (issue #159). Deliberately basename-based and modest in scope: this
+/// can't know a repo's own conventions (a project's actual barrel file
+/// could be named anything), so it only catches the common,
+/// cross-ecosystem cases. See DESIGN.md ("pact-vcs > Risk-aware merge
+/// ordering") for the weights and what was deliberately left out.
+const CENTRAL_FILE_BASENAMES: &[&str] = &[
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "go.mod",
+    "requirements.txt",
+    "Gemfile",
+    "composer.json",
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "router.ts",
+    "routes.ts",
+];
+
+const CENTRAL_FILE_PENALTY: usize = 3;
+const LOCKFILE_PENALTY: usize = 5;
+
+/// Weights a workspace's changed-file set for `merge_all`'s sequencing
+/// (issue #159) -- a one-file change to `package.json` can be much
+/// riskier than a ten-file isolated feature, but plain changed-file count
+/// treats them identically. Base score is still the changed-file count
+/// (smallest-changeset-first was already a reasonable default); each
+/// lockfile or central file touched adds a flat penalty on top so a
+/// workspace touching one gets sequenced later, when more of the
+/// integration branch's real state already exists to conflict against
+/// sooner rather than later. Not a precise science -- a first-cut
+/// heuristic, deliberately simple and tunable, not an attempt to model
+/// real conflict probability.
+fn merge_risk_score(files: &[String]) -> usize {
+    let mut score = files.len();
+    for file in files {
+        let basename = Path::new(file).file_name().and_then(|n| n.to_str()).unwrap_or(file.as_str());
+        if is_never_auto_resolve(file) {
+            score += LOCKFILE_PENALTY;
+        } else if CENTRAL_FILE_BASENAMES.contains(&basename) {
+            score += CENTRAL_FILE_PENALTY;
+        }
+    }
+    score
+}
 
 /// Owns the lifecycle of git-worktree-backed agent workspaces for one repo.
 /// State (locks, worktree metadata, and the worktrees themselves) lives as a
@@ -650,7 +709,7 @@ impl WorkspaceManager {
             .map(|w| {
                 let n = self
                     .workspace_changes(&w.id)
-                    .map(|c| c.files.len())
+                    .map(|c| merge_risk_score(&c.files))
                     .unwrap_or(usize::MAX);
                 (n, w)
             })
@@ -668,7 +727,10 @@ impl WorkspaceManager {
                 merged: Vec::new(),
                 skipped,
                 conflicted: Vec::new(),
-                planned: sized.into_iter().map(|(_, w)| w.id).collect(),
+                planned: sized
+                    .into_iter()
+                    .map(|(risk_score, w)| PlannedWorkspace { id: w.id, risk_score })
+                    .collect(),
                 dry_run: true,
             });
         }
@@ -1385,6 +1447,40 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_risk_score_is_plain_file_count_with_no_central_files() {
+        let files = vec!["src/a.ts".to_string(), "src/b.ts".to_string()];
+        assert_eq!(merge_risk_score(&files), 2);
+    }
+
+    #[test]
+    fn merge_risk_score_adds_a_penalty_for_a_central_file() {
+        let files = vec!["package.json".to_string()];
+        assert_eq!(merge_risk_score(&files), 1 + CENTRAL_FILE_PENALTY);
+    }
+
+    #[test]
+    fn merge_risk_score_adds_a_larger_penalty_for_a_lockfile() {
+        let files = vec!["package-lock.json".to_string()];
+        assert_eq!(merge_risk_score(&files), 1 + LOCKFILE_PENALTY);
+    }
+
+    #[test]
+    fn merge_risk_score_finds_central_files_regardless_of_directory() {
+        let files = vec!["nested/deep/package.json".to_string()];
+        assert_eq!(merge_risk_score(&files), 1 + CENTRAL_FILE_PENALTY);
+    }
+
+    #[test]
+    fn merge_risk_score_can_rank_a_smaller_changeset_riskier_than_a_larger_one() {
+        let central_only = vec!["package.json".to_string()];
+        let many_plain_files = vec!["a.ts".to_string(), "b.ts".to_string(), "c.ts".to_string()];
+        assert!(
+            merge_risk_score(&central_only) > merge_risk_score(&many_plain_files),
+            "a single central-file change should outweigh several plain-file changes"
+        );
+    }
 
     #[test]
     fn commit_message_short_single_line_task() {

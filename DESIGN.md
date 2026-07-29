@@ -202,8 +202,13 @@ Phases, all best-effort (one workspace's failure never blocks another's):
    the workspace was created). A workspace whose changes can't be sized in
    the next phase (e.g. `workspace_changes` failed) sorts last rather than
    being dropped, so a bug in sizing never silently excludes it.
-3. Sequence the rest smallest-changeset-first, on the theory that landing
-   small compatible changes before a large one reduces cascade conflicts.
+3. Sequence the rest by risk score (`merge_risk_score`, issue #159) --
+   changed-file count plus a penalty for touching a central file or
+   lockfile, ascending -- on the theory that landing small, low-risk
+   changes before a bigger or more central one reduces cascade
+   conflicts. Plain changed-file count alone (the original heuristic)
+   still anchors the score; the penalty only pulls a *smaller* but
+   riskier change later than a same-or-larger plain one, not the reverse.
 4. Merge each into a fresh `target_branch` (default `pact/merged-<id>`)
    one at a time, skipping (not aborting the whole run on) a real
    conflict.
@@ -235,10 +240,54 @@ real, unavoidable conflict between exactly those two, confirmed by hand
 against real git before writing the test: single-line-file appends turned
 out to conflict far more readily than multi-line context does (see the
 trial report this whole feature is built against). Since C and D touch the
-same single file, they tie on the smallest-changeset-first heuristic, so
-which one merges first (and therefore which one the *other* conflicts
-against) isn't specified -- the test asserts that exactly one of them
-merged, not which one.
+same single file, they tie on the risk-score heuristic, so which one
+merges first (and therefore which one the *other* conflicts against)
+isn't specified -- the test asserts that exactly one of them merged,
+not which one.
+
+### Risk-aware merge ordering (issue #159)
+
+From an outside code review (2026-07-24, triage discussion): plain
+changed-file count treats a one-file change to `package.json` the same
+as a ten-file isolated feature, when the former is often the riskier
+change to land in the middle of a batch. Marked "design first" at the
+time -- the weighting scheme needed a decision the review flagged but
+didn't resolve (what counts as "central," how much weight per factor).
+Picked sensible defaults this pass rather than leaving it unbuilt
+further, on the reasoning that none of it is a public API commitment
+and is easy to retune later if the weights turn out wrong in practice.
+
+`merge_risk_score(files) -> usize`: base score is still the plain
+changed-file count (the original heuristic was directionally right,
+just too coarse) -- `+3` per file whose basename is a common package
+manifest, schema-adjacent, or barrel/router entry point
+(`CENTRAL_FILE_BASENAMES`: `package.json`, `Cargo.toml`,
+`pyproject.toml`, `go.mod`, `requirements.txt`, `Gemfile`,
+`composer.json`, `index.{ts,tsx,js}`, `router.ts`, `routes.ts`), `+5`
+per lockfile (reusing `is_never_auto_resolve`'s existing list -- lockfiles
+already get the strongest "don't touch casually" treatment elsewhere in
+this codebase, for the same underlying reason). Deliberately
+basename-based, not path-aware or content-aware: this can't know a
+repo's own conventions (a project's real barrel file could be named
+anything), so it only catches the common, cross-ecosystem cases -- a
+first-cut heuristic, not an attempt to model real conflict probability.
+
+**Deliberately deferred, not half-built**: the triage's other proposed
+factors --`overlap_with_other_workspaces`, `prior_conflict_history`,
+`active_claim_overlap` -- would require `pact-vcs` to depend on
+`pact-core`'s Weaver prediction and/or `pact-coord`'s operation log and
+live lease state, a real cross-crate architectural change, not a weight
+tweak. Left out of this pass rather than bolted on awkwardly just to
+check the box; the four-factor file-content-only version above is a
+complete, self-contained improvement on its own.
+
+`--dry-run` now shows each workspace's computed risk score alongside
+the planned order (`MergeReport::planned` changed from `Vec<String>` to
+`Vec<PlannedWorkspace { id, risk_score }>`), so the reasoning behind the
+order is inspectable, not just the order itself -- confirmed for real
+via a `--dry-run` preview showing a workspace touching three plain
+files sequenced *before* one touching only `package.json`, despite the
+`package.json` workspace changing fewer files overall.
 
 ### Test-gated merge (issue #65)
 
