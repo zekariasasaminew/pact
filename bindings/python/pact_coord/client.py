@@ -24,7 +24,7 @@ from mcp.client.stdio import stdio_client
 
 
 class PactCoordError(Exception):
-    """Raised when a pact-coord tool call returns isError: true.
+    """Raised when a pact-coord tool call returns is_error: true.
 
     Carries the exact error text pact-coord itself produced (e.g. "error:
     invalid glob pattern '['"), not a generic MCP protocol error.
@@ -193,7 +193,7 @@ class PactCoordClient:
     async def _call(self, tool: str, args: dict[str, Any]) -> str:
         result = await self._session.call_tool(tool, args)
         text = "".join(block.text for block in result.content if hasattr(block, "text"))
-        if result.isError:
+        if result.is_error:
             raise PactCoordError(text)
         return text
 
