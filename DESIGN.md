@@ -2572,6 +2572,17 @@ caught issue #178 (`list_workspaces` crashing on `-deps.json`/`-run.json`
 sidecar files) -- the first test to drive a real `spawn -> list` round
 trip, something no closure-stubbed test could have exercised.
 
+**Regression coverage backfilled after the fact**: at the time #178 was
+found and fixed, the harness itself didn't yet have a dedicated test for
+the exact scenario that caught it -- a real `spawn` that goes through
+real dependency prep (writing the `-deps.json` sidecar), followed by a
+real `list`. `spawn_through_real_dependency_prep_then_list_does_not_crash`
+closes that gap: a zero-dependency `package.json` with no lockfile
+(the "plain-install-no-lockfile" prep strategy -- a real, instant,
+no-network `npm install --no-package-lock`) is enough to reproduce the
+exact conditions #178 needed, without needing a real network-dependent
+install.
+
 **Deliberately out of scope for this pass**: Arbiter-specific e2e
 scenarios (a fake agent invoked *as* the conflict resolver, verifying
 Arbiter's own prompt-wrapping and scope-enforcement against a real

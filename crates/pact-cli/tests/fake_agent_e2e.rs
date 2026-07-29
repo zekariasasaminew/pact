@@ -283,6 +283,48 @@ fn merge_all_refuses_to_let_arbiter_touch_a_conflicted_lockfile() {
     cleanup(&shim);
 }
 
+/// Regression test for issue #178 (backfilled per #71, once this
+/// harness existed to make it possible): `list_workspaces` used to crash
+/// on the `-deps.json` sidecar file dependency prep writes alongside a
+/// workspace's own `meta/<id>.json`, since nothing before this harness
+/// ever drove a real `spawn -> (real dependency prep) -> list` round
+/// trip -- every prior test either stubbed the agent out entirely or
+/// never touched a real package manager. A zero-dependency `package.json`
+/// with no lockfile takes the "plain-install-no-lockfile" prep strategy
+/// (a real `npm install --no-package-lock`, no network access needed),
+/// which is exactly what writes the sidecar file that broke `list`.
+#[test]
+fn spawn_through_real_dependency_prep_then_list_does_not_crash() {
+    let repo = init_repo("dependency-prep-list");
+    std::fs::write(repo.join("package.json"), "{\"name\":\"scratch\",\"version\":\"1.0.0\"}").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add package.json"]);
+    let shim = shim_dir();
+
+    let task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let spawn = pact(&repo, &shim, &["spawn", &task, "--agent", "claude"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+
+    let deps_dir = state_dir_for(&repo).join("meta");
+    let has_deps_sidecar = std::fs::read_dir(&deps_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with("-deps.json")))
+        .unwrap_or(false);
+    assert!(has_deps_sidecar, "expected dependency prep to have written a -deps.json sidecar file");
+
+    let list = pact(&repo, &shim, &["list"]);
+    assert!(
+        list.status.success(),
+        "list must not crash on a workspace that went through real dependency prep -- stdout: {}\nstderr: {}",
+        stdout(&list),
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let id = workspace_id_from_spawn_output(&spawn);
+    assert!(stdout(&list).contains(&id), "expected the workspace to actually appear in `list`, got: {}", stdout(&list));
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
