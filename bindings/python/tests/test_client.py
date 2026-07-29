@@ -79,6 +79,20 @@ async def test_two_agents_claiming_overlapping_globs_surfaces_a_conflict(scratch
 
 
 @pytest.mark.asyncio
+async def test_claim_files_with_fail_on_conflict_raises_instead_of_accepting(scratch_repo: Path) -> None:
+    (scratch_repo / "src").mkdir()
+    (scratch_repo / "src" / "shared.py").write_text("# shared\n")
+
+    pact_bin = _find_pact_binary()
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client_a:
+        await client_a.claim_files(["src/shared.py"])
+
+    async with PactCoordClient.spawn(scratch_repo, "agent-b", scratch_repo, pact_bin=pact_bin) as client_b:
+        with pytest.raises(PactCoordError, match="agent-a"):
+            await client_b.claim_files(["src/shared.py"], fail_on_conflict=True)
+
+
+@pytest.mark.asyncio
 async def test_list_claims_shows_active_leases_across_agents(scratch_repo: Path) -> None:
     pact_bin = _find_pact_binary()
     async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client:

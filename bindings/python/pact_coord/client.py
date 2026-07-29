@@ -151,13 +151,20 @@ class PactCoordClient:
         )
         return _PactCoordSession(params)
 
-    async def claim_files(self, globs: list[str], *, ttl_seconds: Optional[int] = None) -> ClaimResult:
-        """Claims an advisory lease on the given glob patterns. Never
-        enforced against other agents -- always accepted; check
-        `has_conflicts`/`conflicts` on the result yourself."""
+    async def claim_files(
+        self, globs: list[str], *, ttl_seconds: Optional[int] = None, fail_on_conflict: bool = False
+    ) -> ClaimResult:
+        """Claims an advisory lease on the given glob patterns. By default
+        this is never enforced against other agents -- always accepted;
+        check `has_conflicts`/`conflicts` on the result yourself. Pass
+        `fail_on_conflict=True` to instead reject an overlapping claim
+        outright (raises `PactCoordError`, nothing recorded) rather than
+        accepting it advisorily."""
         args: dict[str, Any] = {"globs": globs}
         if ttl_seconds is not None:
             args["ttl_seconds"] = ttl_seconds
+        if fail_on_conflict:
+            args["fail_on_conflict"] = fail_on_conflict
         text = await self._call("claim_files", args)
         return _parse_claim_result(text)
 

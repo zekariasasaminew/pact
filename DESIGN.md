@@ -1232,6 +1232,42 @@ negative TTL silently produced an already-expired lease and an unbounded
 one produced an `expires_at` centuries out, both misleadingly returning
 `accepted: true` either way.
 
+### Opt-in strict claim response (issue #162)
+
+pact has no mechanism to physically stop an agent from writing a file --
+it never sits between an agent and its own file-write tool calls, by
+design (doing so would require CLI-specific integration that breaks
+agent-agnosticism). The `granted`->`accepted` rename (issue #36, above)
+exists precisely because pretending to lock something it can't enforce
+was found actively misleading. A real queueing/blocking primitive
+(`claim_files` actually waiting until a conflicting lease frees) was
+considered and explicitly rejected in the same triage discussion this
+issue came from -- a bigger build, real UX risk (a hung MCP tool call
+needs a mandatory max-wait), not justified by current evidence of need.
+
+Chosen direction instead: an opt-in `fail_on_conflict` boolean param on
+`claim_files`. Default `false` (unchanged advisory behavior, the only
+mode that existed before this). When `true` and the claim overlaps
+another holder's active lease, `claim_files` now returns `Err` *before*
+touching the `leases` table at all -- checked ahead of the `INSERT`
+loop, not after -- so a rejected claim leaves no trace: a caller
+retrying after resolving the overlap won't find its own earlier,
+rejected attempt still on record. The MCP layer needed no new plumbing
+for this: `leases::claim_files` returning `Err` already flows through
+the exact same `error_result`/`isError: true` path a malformed glob or
+invalid `ttl_seconds` already used, since it's the same `Result`
+being handled. Same mechanism throughout, no new state, no
+blocking/queueing.
+
+Verified for real across the whole surface, not just the Rust layer:
+3 new `pact-coord` unit tests (rejects an overlapping claim, doesn't
+record it, still accepts a non-conflicting one), plus a matching real
+end-to-end test in both `bindings/python` and `bindings/ts` -- two real
+`pact mcp-serve` sessions, one claiming a real file first, the second
+retrying with `fail_on_conflict` and asserting the SDK's own
+`PactCoordError` is raised, not just that the Rust-level function
+returns `Err`.
+
 ### `list_claims` MCP tool (issue #149)
 
 From an outside code review (2026-07-24), verified against source: only

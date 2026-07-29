@@ -191,7 +191,7 @@ mod tests {
         {
             let conn = db::open(&repo_root).unwrap();
             messages::send_message(&conn, "agent-a", None, "bcast", "hello").unwrap();
-            leases::claim_files(&conn, &repo_root, "agent-a", &["a.txt".to_string()], Some(900)).unwrap();
+            leases::claim_files(&conn, &repo_root, "agent-a", &["a.txt".to_string()], Some(900), false).unwrap();
         }
 
         let snapshot = status(&repo_root).unwrap();

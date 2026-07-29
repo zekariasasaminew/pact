@@ -47,9 +47,11 @@ Or manage the client's lifetime yourself with `PactCoordClient.spawn`/`close`.
 
 ## API
 
-- `claimFiles(globs, ttlSeconds?) -> ClaimResult` -- `accepted` is always
-  `true` (leases are advisory, never enforced); check `hasConflicts`/
-  `conflicts` yourself.
+- `claimFiles(globs, ttlSeconds?, failOnConflict?) -> ClaimResult` -- by
+  default `accepted` is always `true` (leases are advisory, never
+  enforced); check `hasConflicts`/`conflicts` yourself. Pass
+  `failOnConflict: true` to instead throw `PactCoordError` on an
+  overlapping claim (nothing recorded) rather than accepting it.
 - `releaseFiles(globs) -> string` -- pact-coord's own confirmation text
   (e.g. `"released 2 lease(s)"`), not parsed into a count -- that text is
   a sentence, not a stable machine-readable format, by pact-coord's own
