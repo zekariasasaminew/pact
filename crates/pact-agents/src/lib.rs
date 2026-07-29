@@ -17,7 +17,7 @@ mod gemini;
 mod process;
 mod supervisor;
 
-pub use adapter::{adapter, AgentAdapter, AgentKind, CoordConfig};
+pub use adapter::{adapter, resolve_safety_profile, AgentAdapter, AgentKind, CoordConfig, SafetyProfile};
 pub use event::AgentEvent;
 pub use process::{run_and_stream, RunOutcome};
 pub use supervisor::Supervisor;

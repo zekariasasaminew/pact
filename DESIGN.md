@@ -1148,6 +1148,63 @@ dropping either half. The MCP config passed via `--additional-mcp-config
 CLI's own docs; without it the argument would be parsed as an inline JSON
 string instead.
 
+### Safety profiles (issue #161)
+
+From an outside code review (2026-07-24, triage discussion): `--safety`
+was a raw pass-through to whatever vocabulary the specific agent CLI
+uses -- Claude Code's `--permission-mode`, Codex's `--sandbox`, Gemini's
+`--approval-mode`, and Copilot ignoring it entirely (no gradient). A user
+wanting "the safest sane setting for unattended use" across agents
+needed to know all four vocabularies. Resolved direction from that
+discussion: add three pact-level profile names as **aliases** layered on
+top of the existing raw pass-through, never a replacement -- any other
+value (`acceptEdits`, `read-only`, ...) keeps flowing through to
+`build_command` completely unchanged.
+
+`pact_agents::resolve_safety_profile(agent, safety)` is the single
+resolution point, called right before each of the three places that
+already call `adapter.build_command` (`spawn_preview`,
+`spawn_with_supervisor`, Arbiter's `attempt_arbiter_resolution`) --
+deliberately *not* resolved once at the CLI layer, since `spawn-many`
+shares one `--safety` string across a batch that can mix agent kinds;
+resolving per-adapter right where the agent is already known handles a
+mixed-agent batch correctly for free, with no CLI-layer change needed at
+all beyond documenting the three names in `--help`.
+
+Mapping, confirmed by hand via free `--dry-run` previews across all four
+adapters (no real agent spend needed to verify a resolved command
+string):
+
+| profile | Claude Code | Codex | Gemini | Copilot |
+|---|---|---|---|---|
+| `strict` | `--permission-mode plan` | `--sandbox read-only` | `--approval-mode plan` | `--allow-all-tools` (unchanged) |
+| `workspace-write` | *(no flag -- pact's existing curated-allowlist default)* | `--sandbox workspace-write` | `--approval-mode auto_edit` | `--allow-all-tools` (unchanged) |
+| `unrestricted` | `--permission-mode bypassPermissions` | *(no flag -- pact's existing full-bypass default)* | *(no flag -- pact's existing yolo default)* | `--allow-all-tools` (unchanged) |
+
+Two deliberate non-uniformities, not oversights:
+
+- **Codex's `workspace-write` doesn't currently get real work done.**
+  Confirmed by hand (see "Codex adapter" above): even a plain `--sandbox
+  workspace-write`, without the bypass flag, still refuses to write
+  files in headless mode -- the agent reports "approvals are disabled"
+  and gives up. `workspace-write` here is faithfully a deliberately
+  read-only/inspect-only run for Codex today, not a safer "still gets
+  work done" middle ground -- that's Codex's own current CLI
+  limitation, not something this aliasing layer can paper over.
+- **Codex's and Gemini's `unrestricted` is the same as their existing
+  default**, and **Copilot's three profiles all resolve to the same
+  no-op.** Both are honest, not lazy: pact's existing defaults for
+  Codex/Gemini are already the only mode confirmed to complete real
+  headless work at all (no safer alias exists to offer instead, per each
+  adapter's own DESIGN.md section), and Copilot's CLI genuinely offers
+  no distinct restricted mode through this adapter to alias in the first
+  place.
+
+The "explicit safety override" warning (`spawn`/`spawn-many`) shows what
+a profile name actually resolves to for the chosen agent (e.g. `strict
+-> plan`), since that mapping isn't obvious from the profile name alone
+-- a raw, non-profile value still just echoes back unchanged.
+
 ## pact-coord — MCP coordination server
 
 Advisory, glob-based, TTL-expiring file leases plus a threaded message log
