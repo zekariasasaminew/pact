@@ -108,6 +108,7 @@ pub struct SpawnManyOutcome {
 
 /// One file touched by more than one active workspace sharing a common
 /// merge-base -- see `Orchestrator::detect_conflicts` (issue #8).
+#[derive(Debug, Clone)]
 pub struct FileConflict {
     pub file: String,
     /// At least 2 workspace ids -- every workspace (sharing the same
