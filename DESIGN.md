@@ -1189,6 +1189,40 @@ Deliberately defensive: any line that doesn't parse as JSON, or whose
 silently dropped -- exactly because this schema is unverified and *will*
 need correcting once run against a real session.
 
+**Partial live verification (2026-07-30, issue #9)**: real auth now
+available (Google discontinued the old "Sign in with Google" / Gemini
+Code Assist OAuth path for individuals in favor of its new Antigravity
+product line -- confirmed directly from the CLI's own failure message,
+`This client is no longer supported for Gemini Code Assist for
+individuals`; the still-maintained path for headless `gemini` is a plain
+AI Studio API key via `GEMINI_API_KEY`), which made a first real
+`pact spawn --agent gemini` possible. Confirmed for real: the adapter's
+mechanics all work end to end against actual `gemini` output --
+`--skip-trust`/`--approval-mode yolo` launch cleanly, a real `{"type":
+"init", ...}` event arrives and parses as `AgentEvent::Init` exactly as
+coded, and the coordination "never reported a status" warning fires
+correctly (expected, since the task never called an MCP tool). One real
+schema gap found: `gemini`'s actual output includes a
+`{"type":"message","role":"user","content":...}` event (an echo of the
+prompt back on the stream) that `parse_line` doesn't explicitly match --
+harmless today since the catch-all correctly routes it to `Other`, not a
+bug, but worth naming as confirmed real shape rather than still-guessed.
+
+**Still unconfirmed**: every real spawn attempt (three, across two
+sessions) hit the AI Studio free-tier key's request quota before
+producing a real assistant/tool-call/result event -- `TerminalQuotaError:
+You have exhausted your daily quota on this model` with `limit: 20`,
+confirming this key's cap is a low fixed per-day count, not the ~1000/day
+figure associated with the (now Antigravity-only) OAuth path. That means
+the `assistant_message`/`tool_call`/`result` branches of `parse_line` are
+still guesses, exactly as before -- only `init` (and the newly-seen,
+already-correctly-ignored `message` echo) moved from guessed to
+confirmed. Also noted in passing, not yet investigated: `-m
+gemini-2.5-flash` was silently not honored -- the quota error reported
+`model: gemini-3.5-flash` instead, a model never requested. Re-attempt
+once the daily quota resets (or with a paid/billed key) to close the
+remaining gap in issue #9.
+
 ### Copilot CLI safety default
 
 Unlike Claude Code, no confirmed non-hanging alternative to
