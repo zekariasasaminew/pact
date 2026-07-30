@@ -80,7 +80,7 @@ fn inspect_shows_persisted_dependency_prep_and_run_metadata() {
     std::fs::write(
         meta_dir.join(format!("{}-run.json", ws.id)),
         format!(
-            r#"{{"workspace_id":"{}","agent":"claude","program":"claude","args":["-p","do it"],"cwd":"/tmp","started_at":100,"ended_at":142,"exit_success":true,"summary":"Created foo.rs","coord_status":"connected","log_path":"/tmp/log.jsonl"}}"#,
+            r#"{{"workspace_id":"{}","agent":"claude","program":"claude","args":["-p","do it"],"cwd":"/tmp","started_at":100,"ended_at":142,"exit_success":true,"summary":"Created foo.rs","coord_status":"connected","files_touched":true,"log_path":"/tmp/log.jsonl"}}"#,
             ws.id
         ),
     )
