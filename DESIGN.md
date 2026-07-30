@@ -2248,6 +2248,34 @@ internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
 lines interleave at line granularity, never mid-line.
 
+### `teardown` bulk mode (issue #214, outside Windows Copilot report)
+
+`teardown` required a workspace `<id>` -- no way to tear down every active
+workspace at once, asymmetric with `commit-all` (which already documented
+"without --id, commits every active workspace that's dirty"). After a
+run leaves several workspaces active, cleanup meant N separate `pact
+teardown --force <id>` invocations, each needing the full id slug typed
+out by hand.
+
+`id` is now `Option<String>`, mirroring `commit-all`'s exact pattern:
+omitted means every active workspace, torn down independently -- one
+that fails (a dirty workspace without `--force`, most commonly) is
+reported and the batch continues rather than aborting, same "report and
+continue" shape `commit-all` already used. Cross-workspace conflict
+detection (previously computed once per single `teardown` call, right
+before removal since it needs the branch teardown deletes) is now
+computed once for the whole batch up front instead of once per
+workspace -- a minor, deliberate timing change: still informational-only
+(never blocks a teardown), and avoids N redundant `detect_conflicts`
+calls for a bulk invocation. `FileConflict` gained a plain `Clone` derive
+to support filtering a shared snapshot per workspace in the loop.
+
+Verified end-to-end via the fake-agent harness (issue #157): bulk
+teardown removes every workspace and `list` reports none left; a bulk
+teardown where every workspace is dirty (no `--force`) reports each one
+failed and leaves all of them still active, rather than tearing down
+none or aborting after the first failure.
+
 ### `--union` renamed to `--append-only` (issue #11)
 
 From an outside code review (2026-07-24): "union" implies something more

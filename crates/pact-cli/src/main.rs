@@ -345,10 +345,15 @@ enum Command {
         #[arg(long = "arbiter-safety")]
         arbiter_safety: Option<String>,
     },
-    /// Tear down an agent workspace
+    /// Tear down an agent workspace. Without an id, tears down every active
+    /// workspace -- each one independently, so one that fails (e.g. dirty
+    /// without --force) is reported and the rest still proceed, rather than
+    /// aborting the whole batch (same "report and continue" shape as
+    /// `commit-all`).
     Teardown {
-        /// Workspace id (as shown by `list`)
-        id: String,
+        /// Only tear down this workspace (as shown by `list`), instead of
+        /// every active workspace.
+        id: Option<String>,
 
         /// Don't delete the pact/<id> branch -- keep it around to inspect
         /// or rebase the workspace's commits after tearing it down.
@@ -847,27 +852,41 @@ fn main() -> Result<()> {
             keep_branch,
             force,
         } => {
-            // Computed *before* removal -- workspace_changes needs the
-            // branch, which teardown deletes. Informational only: this
-            // never blocks the teardown itself, only warns.
-            match orchestrator.detect_conflicts() {
-                Ok(all) => {
-                    let relevant: Vec<_> = all
-                        .into_iter()
-                        .filter(|c| c.workspace_ids.iter().any(|w| w == &id))
-                        .collect();
+            let ids: Vec<String> = match id {
+                Some(id) => vec![id],
+                None => orchestrator.list()?.into_iter().map(|w| w.id).collect(),
+            };
+            if ids.is_empty() {
+                println!("no active workspaces");
+                return Ok(());
+            }
+
+            let all_conflicts = orchestrator.detect_conflicts().ok();
+            let mut any_failed = false;
+            for id in ids {
+                // Computed *before* removal -- workspace_changes needs the
+                // branch, which teardown deletes. Informational only: this
+                // never blocks the teardown itself, only warns.
+                if let Some(all) = &all_conflicts {
+                    let relevant: Vec<FileConflict> =
+                        all.iter().filter(|c| c.workspace_ids.iter().any(|w| w == &id)).cloned().collect();
                     if !relevant.is_empty() {
-                        eprintln!(
-                            "warning: workspace {id} shares changes with another active workspace:"
-                        );
+                        eprintln!("warning: workspace {id} shares changes with another active workspace:");
                         print_conflicts(&relevant);
                     }
                 }
-                Err(err) => tracing::warn!("could not check for cross-workspace conflicts: {err:#}"),
-            }
 
-            orchestrator.teardown(&id, keep_branch, force)?;
-            println!("removed workspace {id}");
+                match orchestrator.teardown(&id, keep_branch, force) {
+                    Ok(()) => println!("removed workspace {id}"),
+                    Err(err) => {
+                        println!("{id}: failed to tear down: {err:#}");
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
+            }
         }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),

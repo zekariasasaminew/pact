@@ -178,6 +178,81 @@ fn spawn_that_writes_a_file_shows_plain_clean_in_list() {
     cleanup(&shim);
 }
 
+/// Regression test for issue #214, outside Windows Copilot report: `teardown`
+/// had no bulk mode (unlike `commit-all`, which already supported "every
+/// active workspace" when `--id` is omitted). Confirms `teardown` with no id
+/// removes every active workspace, mirroring `commit-all`'s exact pattern.
+#[test]
+fn teardown_with_no_id_removes_every_active_workspace() {
+    let repo = init_repo("teardown-bulk");
+    let shim = shim_dir();
+
+    let task_a = script(&[("alpha.txt", "ALPHA")], "created alpha.txt");
+    let task_b = script(&[("beta.txt", "BETA")], "created beta.txt");
+    let spawn = pact(
+        &repo,
+        &shim,
+        &["spawn-many", "--agent", "claude", "--task", &task_a, "--task", &task_b],
+    );
+    assert!(spawn.status.success(), "spawn-many failed: {}", String::from_utf8_lossy(&spawn.stderr));
+
+    let teardown = pact(&repo, &shim, &["teardown", "--force"]);
+    assert!(
+        teardown.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&teardown),
+        String::from_utf8_lossy(&teardown.stderr)
+    );
+    let teardown_text = stdout(&teardown);
+    assert_eq!(
+        teardown_text.matches("removed workspace ").count(),
+        2,
+        "expected both workspaces torn down, got: {teardown_text}"
+    );
+
+    let list = pact(&repo, &shim, &["list"]);
+    assert!(stdout(&list).contains("no active workspaces"), "got: {}", stdout(&list));
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// A dirty workspace without `--force` among a bulk teardown must be
+/// reported and skipped, not abort the rest of the batch -- same
+/// "report and continue" shape as `commit-all`.
+#[test]
+fn teardown_with_no_id_reports_a_dirty_workspace_but_continues_the_batch() {
+    let repo = init_repo("teardown-bulk-partial-failure");
+    let shim = shim_dir();
+
+    let task_a = script(&[("alpha.txt", "ALPHA")], "created alpha.txt");
+    let task_b = script(&[("beta.txt", "BETA")], "created beta.txt");
+    let spawn = pact(
+        &repo,
+        &shim,
+        &["spawn-many", "--agent", "claude", "--task", &task_a, "--task", &task_b],
+    );
+    assert!(spawn.status.success(), "spawn-many failed: {}", String::from_utf8_lossy(&spawn.stderr));
+
+    // No --force: teardown refuses on a dirty workspace (both are dirty,
+    // since a fake-agent write is never auto-committed), so this exercises
+    // the "report and continue" path for every workspace in the batch.
+    let teardown = pact(&repo, &shim, &["teardown"]);
+    assert_eq!(teardown.status.code(), Some(1), "expected exit 1 since every workspace is dirty");
+    let teardown_text = stdout(&teardown);
+    assert_eq!(
+        teardown_text.matches("failed to tear down").count(),
+        2,
+        "expected both dirty workspaces reported as failed, got: {teardown_text}"
+    );
+
+    let list = pact(&repo, &shim, &["list"]);
+    assert!(!stdout(&list).contains("no active workspaces"), "expected both workspaces to still be active");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 #[test]
 fn spawn_many_runs_two_fake_agents_concurrently() {
     let repo = init_repo("spawn-many");
