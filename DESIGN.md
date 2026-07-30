@@ -893,6 +893,27 @@ integration wasn't end-to-end tested against a real agent CLI -- doing
 so would mean a real, billed agent spawn, which this project's test
 conventions explicitly avoid (see CLAUDE.md).
 
+**`coord_status` can go stale mid-session, confirmed by design, not a bug
+(issue #201, outside R5 report):** an outside tester killed the
+`mcp-serve` sidecar 8s into a 66s run and found `coord_status:
+"connected"` still reported at the end, expecting something like
+`"disconnected"`. Investigated and confirmed this is the field's actual,
+already-documented semantics working as intended, not broken wiring:
+`coord_status` is a passive relay of the *last* `AgentEvent::CoordStatus`
+the agent CLI itself chose to report via its own event stream -- pact
+never independently polls the sidecar's liveness because pact doesn't
+own that process at all. The agent CLI spawns `mcp-serve` itself as its
+own MCP client (per `--additional-mcp-config`/equivalent), so pact has
+no process handle on it to check. Whether the field ever updates past
+its first "connected" depends entirely on whether the agent notices the
+pipe died -- which it only has occasion to do on its *next* coordination
+tool call. A task that makes no further coordination call after a
+mid-session sidecar death, like the report's repro, gives the agent
+nothing to notice or report. Doc comment on the field tightened to spell
+this out explicitly. A true independent liveness check would mean pact
+supervising the sidecar itself instead of the agent CLI owning it -- a
+real architectural change, not attempted here.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
