@@ -797,6 +797,34 @@ the outcome was rejected. Confirmed this is a genuine regression test,
 not a coincidental pass: temporarily removed the guard and reran, which
 failed exactly as expected.
 
+**False-positive on the canonical fan-out workflow, fixed (issue #199, outside R5 report):**
+`validate_arbiter_scope`'s out-of-scope check compared post-run `git
+status --porcelain` only against the conflicted-files list -- it never
+accounted for files git's own 3-way merge had *already* auto-carried
+into the working tree from THEIRS before the arbiter agent ran at all
+(an add-only file with no OURS counterpart merges cleanly, no conflict,
+no arbiter involvement). Real repro from the report: 4 fan-out agents
+each add their own `plugins/<name>.js` + `tests/<name>.test.js` and
+touch a shared `app.js` registration block -- exactly the primary
+README workflow. `merge-all` correctly lands one clean, leaves three
+conflicted on `app.js` only; every `pact resolve` attempt on those three
+rejected with "changed files outside the conflicted-file list", listing
+the *other* workspaces' own `plugins/*.js`/`tests/*.js` files that git's
+merge had auto-added, not anything the arbiter agent touched. Under the
+Write-fresh redesign this meant `pact resolve` rejected on every attempt
+against the canonical workflow -- the pre-#187 arbiter was the one
+actually landing conflicts in that report's own testing.
+
+Fix: `attempt_arbiter_resolution` now snapshots `changed_paths` *before*
+`neutralize_conflict`/the agent run (`baseline_changed`), and
+`validate_arbiter_scope` excludes that baseline from the post-run diff
+alongside the conflicted-files list itself -- isolating "the arbiter's
+model changed this" from "git's merge already left this dirty." Two new
+tests cover both directions: a pre-existing baseline change is ignored,
+and a change that only appears *after* the agent ran (not in the
+baseline) is still correctly rejected -- the fix narrows the check, it
+doesn't disable it.
+
 ### Arbiter decision records (issue #148)
 
 Reviewer's proposed "durable audit artifact per attempt" -- a passing

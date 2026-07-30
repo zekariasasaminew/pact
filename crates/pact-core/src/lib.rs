@@ -930,6 +930,28 @@ fn attempt_arbiter_resolution(
         };
     }
 
+    // Captured before the agent runs (and before `neutralize_conflict`
+    // touches anything) so the out-of-scope check in
+    // `validate_arbiter_scope` can tell "the arbiter's model changed this"
+    // apart from "git's own merge already left this dirty" -- e.g. a file
+    // that only exists in THEIRS gets auto-added to the working tree by
+    // `git merge` with no conflict at all, well before the arbiter ever
+    // runs; counting that against the arbiter rejected every real-world
+    // conflict shape where each side also adds its own new files (issue
+    // #199, R5-D). Failure here means `git status` itself is broken in
+    // this worktree, which every later step needs anyway -- fail the same
+    // way the post-run check already does rather than pressing on with an
+    // empty baseline that would silently reintroduce the bug.
+    let baseline_changed = match pact_vcs::changed_paths(worktree_path) {
+        Ok(changed) => changed,
+        Err(err) => {
+            return ArbiterOutcome::Rejected {
+                reason: format!("could not snapshot the workspace's pre-existing changes before running the arbiter: {err:#}"),
+                test_passed: None,
+            };
+        }
+    };
+
     // Captured before the agent runs so the post-run "did it wipe a
     // conflicted file" check (in `validate_arbiter_scope`) has something
     // to compare against -- every listed file has conflict markers in it
@@ -1031,7 +1053,7 @@ fn attempt_arbiter_resolution(
     // `validate_arbiter_scope` for what's actually checked and why
     // (conflict markers, an emptied file, and anything changed outside
     // `files`).
-    if let Err(reason) = validate_arbiter_scope(worktree_path, files, &pre_run_lengths) {
+    if let Err(reason) = validate_arbiter_scope(worktree_path, files, &pre_run_lengths, &baseline_changed) {
         restore_all(workspaces, worktree_path, &neutralized);
         return ArbiterOutcome::Rejected { reason, test_passed: None };
     }
@@ -1081,6 +1103,7 @@ fn validate_arbiter_scope(
     worktree_path: &Path,
     files: &[String],
     pre_run_lengths: &std::collections::HashMap<&String, usize>,
+    baseline_changed: &[String],
 ) -> Result<(), String> {
     for file in files {
         let Ok(content) = std::fs::read_to_string(worktree_path.join(file)) else {
@@ -1096,7 +1119,10 @@ fn validate_arbiter_scope(
 
     match pact_vcs::changed_paths(worktree_path) {
         Ok(changed) => {
-            let out_of_scope: Vec<&String> = changed.iter().filter(|path| !files.contains(path)).collect();
+            let out_of_scope: Vec<&String> = changed
+                .iter()
+                .filter(|path| !files.contains(path) && !baseline_changed.contains(path))
+                .collect();
             if !out_of_scope.is_empty() {
                 return Err(format!("changed files outside the conflicted-file list {out_of_scope:?}"));
             }
@@ -1369,7 +1395,7 @@ mod tests {
 
         std::fs::write(root.join("conflicted.txt"), "resolved content\n").unwrap();
 
-        assert!(validate_arbiter_scope(&root, &files, &pre).is_ok());
+        assert!(validate_arbiter_scope(&root, &files, &pre, &[]).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1380,7 +1406,7 @@ mod tests {
         let pre = pre_run_lengths_for(&root, &files);
         // conflicted.txt is untouched -- markers still present.
 
-        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        let err = validate_arbiter_scope(&root, &files, &pre, &[]).unwrap_err();
         assert!(err.contains("conflict markers"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1393,7 +1419,7 @@ mod tests {
 
         std::fs::write(root.join("conflicted.txt"), "   \n\n").unwrap();
 
-        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        let err = validate_arbiter_scope(&root, &files, &pre, &[]).unwrap_err();
         assert!(err.contains("emptied"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1406,7 +1432,7 @@ mod tests {
 
         std::fs::remove_file(root.join("conflicted.txt")).unwrap();
 
-        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        let err = validate_arbiter_scope(&root, &files, &pre, &[]).unwrap_err();
         assert!(err.contains("could not re-read"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1422,7 +1448,7 @@ mod tests {
         // unrelated file is exactly what the prompt says not to do.
         std::fs::write(root.join("untouched.txt"), "surprise edit\n").unwrap();
 
-        let err = validate_arbiter_scope(&root, &files, &pre).unwrap_err();
+        let err = validate_arbiter_scope(&root, &files, &pre, &[]).unwrap_err();
         assert!(err.contains("outside the conflicted-file list"), "got: {err}");
         assert!(err.contains("untouched.txt"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
@@ -1441,7 +1467,51 @@ mod tests {
 
         std::fs::write(root.join("brand_new.txt"), "new content\n").unwrap();
 
-        assert!(validate_arbiter_scope(&root, &files, &pre).is_ok());
+        assert!(validate_arbiter_scope(&root, &files, &pre, &[]).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_ignores_changes_already_present_in_the_baseline() {
+        // Real-world shape (issue #199, R5-D): git's own 3-way merge
+        // auto-carries an add-only THEIRS file into the working tree
+        // before the arbiter agent ever runs -- e.g. a workspace-scoped
+        // file each fan-out task adds alongside a shared conflicted file.
+        // That must not count as the arbiter changing something outside
+        // its remit.
+        let root = arbiter_test_repo("ignores-baseline");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+
+        // Simulates the state right after `git merge` left the worktree
+        // conflicted: an untracked file already sitting there, unrelated
+        // to anything the arbiter itself will do.
+        std::fs::write(root.join("plugins_version.js"), "// carried in by git merge\n").unwrap();
+        let baseline = pact_vcs::changed_paths(&root).unwrap();
+        assert!(baseline.iter().any(|p| p == "plugins_version.js"));
+
+        std::fs::write(root.join("conflicted.txt"), "resolved content\n").unwrap();
+
+        assert!(validate_arbiter_scope(&root, &files, &pre, &baseline).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_still_rejects_a_change_not_in_the_baseline() {
+        // The fix for #199 must not become "ignore everything" -- a file
+        // that was clean at baseline and only becomes dirty after the
+        // agent ran is still a real out-of-scope change.
+        let root = arbiter_test_repo("baseline-does-not-cover-later-edits");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+        let baseline = pact_vcs::changed_paths(&root).unwrap();
+        assert!(baseline.is_empty());
+
+        std::fs::write(root.join("conflicted.txt"), "resolved content\n").unwrap();
+        std::fs::write(root.join("untouched.txt"), "surprise edit\n").unwrap();
+
+        let err = validate_arbiter_scope(&root, &files, &pre, &baseline).unwrap_err();
+        assert!(err.contains("untouched.txt"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
