@@ -127,6 +127,14 @@ export class PactCoordClient {
    * Spawns `pact --repo <repoRoot> mcp-serve --agent-id <agentId>
    * --workspace <workspace>` and returns a connected `PactCoordClient`.
    * Caller is responsible for calling `close()` when done.
+   *
+   * `workspace` MUST be a real, existing directory -- the actual
+   * worktree root a real `pact spawn` would have created. It's used as
+   * `claimFiles`/`releaseFiles`' glob expansion root; a nonexistent path
+   * doesn't fail loudly, it silently expands every glob pattern to an
+   * empty set, so overlap checks never find a conflict even though the
+   * lease itself still gets recorded (issue #207, see
+   * `crates/pact-coord/src/leases.rs`).
    */
   static async spawn(
     repoRoot: string,

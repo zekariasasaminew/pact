@@ -132,6 +132,14 @@ class PactCoordClient:
         --workspace <workspace>` and returns an async context manager
         yielding a connected `PactCoordClient`.
 
+        `workspace` MUST be a real, existing directory -- the actual
+        worktree root a real `pact spawn` would have created. It's used
+        as `claim_files`/`release_files`' glob expansion root; a
+        nonexistent path doesn't fail loudly, it silently expands every
+        glob pattern to an empty set, so overlap checks never find a
+        conflict even though the lease itself still gets recorded (issue
+        #207, see `crates/pact-coord/src/leases.rs`).
+
         `pact_bin` is resolved via `shutil.which` first so a bare "pact"
         works the same way it would from a shell with pact on PATH; pass
         an explicit path if pact isn't on PATH.
