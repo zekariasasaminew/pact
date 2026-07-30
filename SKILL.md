@@ -79,6 +79,15 @@ Every spawned agent automatically gets four MCP tools — `claim_files`,
 you're an agent operating *inside* a pact workspace (not the human driving
 pact from the outside), the conventions are:
 
+**Your host CLI names these tools differently — check your own real tool
+list rather than assuming the bare name below works.** The bare names
+(`claim_files`, etc.) are pact-coord's own tool names, but each agent CLI
+namespaces MCP tools its own way before showing them to you: Claude Code
+exposes them as `mcp__pact-coord__claim_files`, Copilot CLI as
+`pact-coord-claim_files`. Calling the bare, unprefixed name has been
+observed to fail tool lookup even when the coordination server is
+correctly connected.
+
 1. **Claim before writing.** Call `claim_files` with the glob(s) you're about
    to edit before you start, so other concurrent agents can see it.
 2. **Leases are advisory, not enforced.** A `claim_files` response always has
