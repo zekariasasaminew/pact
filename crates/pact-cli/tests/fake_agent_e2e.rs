@@ -126,6 +126,58 @@ fn spawn_runs_a_fake_agent_and_lands_its_scripted_edit() {
     cleanup(&shim);
 }
 
+/// Regression test for issue #212, outside Windows Copilot report: a task
+/// that reports success but touches zero files (a real shape -- an agent
+/// that was told a target file must already exist, found it missing, and
+/// silently reported success instead of failing loudly) must not look
+/// identical to a normal clean run in `pact list`. Ground-truth
+/// `files_touched` (via real `git status`), not the agent's own claimed
+/// success, is what this distinguishes on.
+#[test]
+fn spawn_that_writes_nothing_is_flagged_as_no_files_touched_in_list() {
+    let repo = init_repo("no-files-touched");
+    let shim = shim_dir();
+
+    let noop_task = script(&[], "reported success without doing anything");
+    let spawn = pact(&repo, &shim, &["spawn", &noop_task, "--agent", "claude"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+    let id = workspace_id_from_spawn_output(&spawn);
+
+    let list = pact(&repo, &shim, &["list"]);
+    let list_text = stdout(&list);
+    let workspace_line = list_text.lines().find(|l| l.starts_with(&id)).unwrap();
+    assert!(
+        workspace_line.contains("[clean, no files touched]"),
+        "expected a distinct no-op signal, got: {workspace_line}"
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// Contrast case for the test above: a spawn that genuinely writes a file
+/// must show plain `[clean]`, not the no-op annotation -- confirms the new
+/// signal doesn't fire on every successful run, only a real no-op one.
+#[test]
+fn spawn_that_writes_a_file_shows_plain_clean_in_list() {
+    let repo = init_repo("files-touched");
+    let shim = shim_dir();
+
+    let real_task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let spawn = pact(&repo, &shim, &["spawn", &real_task, "--agent", "claude"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+    let id = workspace_id_from_spawn_output(&spawn);
+
+    let list = pact(&repo, &shim, &["list"]);
+    let list_text = stdout(&list);
+    let workspace_line = list_text.lines().find(|l| l.starts_with(&id)).unwrap();
+    assert!(workspace_line.contains("[dirty]"), "expected a real file write to show dirty, got: {workspace_line}");
+    assert!(!workspace_line.contains("no files touched"), "got: {workspace_line}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 /// Regression test for issue #214, outside Windows Copilot report: `teardown`
 /// had no bulk mode (unlike `commit-all`, which already supported "every
 /// active workspace" when `--id` is omitted). Confirms `teardown` with no id
