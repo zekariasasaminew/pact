@@ -131,6 +131,9 @@ impl SafetyProfile {
 pub fn resolve_safety_profile(agent: AgentKind, safety: Option<&str>) -> Option<String> {
     let name = safety?;
     let Some(profile) = SafetyProfile::parse(name) else {
+        if let Some(warning) = raw_safety_value_warning(agent, name) {
+            tracing::warn!("{warning}");
+        }
         return Some(name.to_string());
     };
     match (agent, profile) {
@@ -160,6 +163,29 @@ pub fn resolve_safety_profile(agent: AgentKind, safety: Option<&str>) -> Option<
         // distinct restricted mode this adapter's CLI actually offers.
         (AgentKind::Copilot, _) => None,
     }
+}
+
+/// Copilot CLI's own vocabulary has no safety gradient at all -- `--safety`
+/// is a guaranteed no-op there regardless of what raw string is passed, so
+/// a raw value that doesn't even match one of pact's own portable profile
+/// names (`strict`/`workspace-write`/`unrestricted`) is worth flagging: a
+/// deliberate profile name is self-explanatory and already documented as a
+/// no-op for this adapter, but an unrecognized raw value most likely means
+/// the caller assumed Copilot has a real vocabulary the way Claude
+/// Code/Codex/Gemini do (issue #205, outside R5 report). Deliberately
+/// scoped to Copilot only -- the other three adapters' own raw vocabularies
+/// are real and evolving, and pact doesn't want to hard-code them here just
+/// to warn on a typo, risking false positives against a legitimate new
+/// value.
+fn raw_safety_value_warning(agent: AgentKind, name: &str) -> Option<String> {
+    if agent != AgentKind::Copilot || SafetyProfile::parse(name).is_some() {
+        return None;
+    }
+    Some(format!(
+        "--safety \"{name}\" was passed through raw for Copilot, which has no safety gradient \
+         and ignores it entirely -- if this was meant to be one of pact's own portable profile \
+         names (strict/workspace-write/unrestricted), it may be a typo"
+    ))
 }
 
 /// Writes `{"mcpServers": {<name>: {"command": ..., "args": [...]}}}` to
@@ -243,5 +269,30 @@ mod tests {
     #[test]
     fn resolve_safety_profile_is_none_when_no_override_given() {
         assert_eq!(resolve_safety_profile(AgentKind::Claude, None), None);
+    }
+
+    #[test]
+    fn raw_safety_value_warning_fires_for_copilot_on_an_unrecognized_raw_value() {
+        let warning = raw_safety_value_warning(AgentKind::Copilot, "accpetEdits").unwrap();
+        assert!(warning.contains("accpetEdits"), "got: {warning}");
+        assert!(warning.contains("no safety gradient"), "got: {warning}");
+    }
+
+    #[test]
+    fn raw_safety_value_warning_is_none_for_a_recognized_profile_name() {
+        // A deliberate portable profile name is self-explanatory and
+        // already documented as a no-op for Copilot -- only genuinely
+        // unrecognized raw values should warn, not every no-op.
+        assert!(SafetyProfile::parse("strict").is_some());
+        assert_eq!(raw_safety_value_warning(AgentKind::Copilot, "strict"), None);
+    }
+
+    #[test]
+    fn raw_safety_value_warning_is_none_for_non_copilot_agents() {
+        // The other adapters' raw vocabularies are real and evolving --
+        // deliberately not hard-coded here, so no warning fires for them.
+        for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Gemini] {
+            assert_eq!(raw_safety_value_warning(agent, "totally-bogus-value"), None);
+        }
     }
 }
