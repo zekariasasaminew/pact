@@ -914,6 +914,31 @@ this out explicitly. A true independent liveness check would mean pact
 supervising the sidecar itself instead of the agent CLI owning it -- a
 real architectural change, not attempted here.
 
+**`files_touched`: a ground-truth signal for "did the run actually do
+anything," independent of the agent's own success claim (issue #212,
+outside Windows Copilot report):** a task told an agent its target file
+must already exist, and to exit non-zero if it didn't -- the file was
+missing, Copilot's own prose said "I will exit with a non-zero code,"
+but its `type: "result"` event reported `exitCode: 0` anyway. Root cause
+isn't Copilot-specific: its contract (like Codex's `turn.completed`,
+already documented above) has no task-semantic success channel at all,
+only "did the CLI process exit cleanly." Rather than trying to override
+`exit_success` with a heuristic (the reporter's own report flags this as
+unreliable -- a legitimate read-only/inspect task also touches zero
+files, so "zero files touched" alone can't safely demote a run to
+failure without risking false negatives on correct runs), added a
+separate, adapter-agnostic `files_touched: bool` computed from a real
+`pact_vcs::changed_paths` check on the workspace right after the run --
+ground truth, not any agent's self-report. Deliberately kept out of
+`exit_success` entirely; `pact list` surfaces `[clean, no files
+touched]` distinctly from plain `[clean]` (which still covers the
+completely normal case of a workspace that's clean because it was
+already committed/merged), and `pact inspect` prints an explicit note
+alongside a "last run" that succeeded without touching anything.
+Verified end-to-end via the fake-agent harness (issue #157): a
+scripted no-op-but-successful spawn shows the distinct annotation, a
+real scripted file write does not.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
