@@ -345,10 +345,15 @@ enum Command {
         #[arg(long = "arbiter-safety")]
         arbiter_safety: Option<String>,
     },
-    /// Tear down an agent workspace
+    /// Tear down an agent workspace. Without an id, tears down every active
+    /// workspace -- each one independently, so one that fails (e.g. dirty
+    /// without --force) is reported and the rest still proceed, rather than
+    /// aborting the whole batch (same "report and continue" shape as
+    /// `commit-all`).
     Teardown {
-        /// Workspace id (as shown by `list`)
-        id: String,
+        /// Only tear down this workspace (as shown by `list`), instead of
+        /// every active workspace.
+        id: Option<String>,
 
         /// Don't delete the pact/<id> branch -- keep it around to inspect
         /// or rebase the workspace's commits after tearing it down.
@@ -670,8 +675,21 @@ fn main() -> Result<()> {
                     Ok(false) => "clean",
                     Err(_) => "unknown", // e.g. workspace directory itself is gone
                 };
+                // Distinguishes "clean because the run genuinely touched
+                // nothing" from plain "clean" (which also covers the
+                // normal post-commit/merge case) -- issue #212, outside
+                // report: a task that should have failed loudly instead
+                // reported success with zero files touched, and pact's
+                // own [clean] display looked identical to a legitimate
+                // read-only task. Informational only, not a fail signal --
+                // a genuinely read-only task also touches zero files.
+                let no_files_touched = dirty == "clean"
+                    && orchestrator
+                        .run_metadata(&workspace.id)
+                        .is_some_and(|meta| meta.exit_success && !meta.files_touched);
+                let suffix = if no_files_touched { ", no files touched" } else { "" };
                 println!(
-                    "{}  {}  {}  [{dirty}]",
+                    "{}  {}  {}  [{dirty}{suffix}]",
                     workspace.id,
                     workspace.branch,
                     workspace.path.display()
@@ -834,27 +852,41 @@ fn main() -> Result<()> {
             keep_branch,
             force,
         } => {
-            // Computed *before* removal -- workspace_changes needs the
-            // branch, which teardown deletes. Informational only: this
-            // never blocks the teardown itself, only warns.
-            match orchestrator.detect_conflicts() {
-                Ok(all) => {
-                    let relevant: Vec<_> = all
-                        .into_iter()
-                        .filter(|c| c.workspace_ids.iter().any(|w| w == &id))
-                        .collect();
+            let ids: Vec<String> = match id {
+                Some(id) => vec![id],
+                None => orchestrator.list()?.into_iter().map(|w| w.id).collect(),
+            };
+            if ids.is_empty() {
+                println!("no active workspaces");
+                return Ok(());
+            }
+
+            let all_conflicts = orchestrator.detect_conflicts().ok();
+            let mut any_failed = false;
+            for id in ids {
+                // Computed *before* removal -- workspace_changes needs the
+                // branch, which teardown deletes. Informational only: this
+                // never blocks the teardown itself, only warns.
+                if let Some(all) = &all_conflicts {
+                    let relevant: Vec<FileConflict> =
+                        all.iter().filter(|c| c.workspace_ids.iter().any(|w| w == &id)).cloned().collect();
                     if !relevant.is_empty() {
-                        eprintln!(
-                            "warning: workspace {id} shares changes with another active workspace:"
-                        );
+                        eprintln!("warning: workspace {id} shares changes with another active workspace:");
                         print_conflicts(&relevant);
                     }
                 }
-                Err(err) => tracing::warn!("could not check for cross-workspace conflicts: {err:#}"),
-            }
 
-            orchestrator.teardown(&id, keep_branch, force)?;
-            println!("removed workspace {id}");
+                match orchestrator.teardown(&id, keep_branch, force) {
+                    Ok(()) => println!("removed workspace {id}"),
+                    Err(err) => {
+                        println!("{id}: failed to tear down: {err:#}");
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
+            }
         }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),
@@ -1108,6 +1140,12 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
             println!("  agent: {}", run.agent);
             println!("  command: {} {}", run.program, run.args.join(" "));
             println!("  {} in {duration}s: {}", if run.exit_success { "succeeded" } else { "failed" }, run.summary);
+            if run.exit_success && !run.files_touched {
+                println!(
+                    "  note: reported success but touched zero files -- could be a legitimate \
+                     read-only task, or a task that silently didn't do what it was asked (issue #212)"
+                );
+            }
             println!("  coordination: {}", run.coord_status.as_deref().unwrap_or("no coordination config attached"));
             println!("  log: {}", run.log_path.display());
         }

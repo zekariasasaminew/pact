@@ -53,6 +53,18 @@ pub struct RunMetadata {
     /// further coordination tool call for the rest of the run). See
     /// DESIGN.md ("pact-core > Structured run metadata", issue #201).
     pub coord_status: Option<String>,
+    /// Whether the workspace's working tree actually changed as a result
+    /// of this run, per real `git status` -- not the agent's own
+    /// self-reported success/exit-code, which can't distinguish "did
+    /// nothing, correctly" from "did nothing, but claimed success" (issue
+    /// #212, outside Windows Copilot report: a task told to fail loudly if
+    /// its target file was missing instead reported `exitCode: 0` with
+    /// zero files touched). Ground-truth, adapter-agnostic, and
+    /// deliberately *not* folded into `exit_success` -- a legitimate
+    /// read-only/inspect task also touches zero files, so this is
+    /// informational, surfaced by `pact list`, not a pass/fail signal on
+    /// its own. See DESIGN.md ("pact-core > Structured run metadata").
+    pub files_touched: bool,
     pub log_path: PathBuf,
 }
 
@@ -108,6 +120,7 @@ pub struct SpawnManyOutcome {
 
 /// One file touched by more than one active workspace sharing a common
 /// merge-base -- see `Orchestrator::detect_conflicts` (issue #8).
+#[derive(Debug, Clone)]
 pub struct FileConflict {
     pub file: String,
     /// At least 2 workspace ids -- every workspace (sharing the same
@@ -493,6 +506,11 @@ impl Orchestrator {
                 Err(err) => format!("failed to run: {err:#}"),
             },
             coord_status: coord_last_status,
+            // Fails closed (assumes touched) on a `git status` error,
+            // matching `validate_arbiter_scope`'s existing "can't verify
+            // -> don't claim clean" posture rather than risking a false
+            // "nothing happened" read.
+            files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             log_path: log_path.clone(),
         };
         let run_meta_path = self.workspaces.state_dir().join("meta").join(format!("{}-run.json", workspace.id));
@@ -1534,6 +1552,7 @@ mod tests {
             exit_success: true,
             summary: "Created foo.rs".to_string(),
             coord_status: Some("connected".to_string()),
+            files_touched: true,
             log_path: PathBuf::from("/tmp/state/logs/ws-1.jsonl"),
         };
 
@@ -1547,6 +1566,7 @@ mod tests {
         assert_eq!(round_tripped.ended_at, 142);
         assert!(round_tripped.exit_success);
         assert_eq!(round_tripped.coord_status.as_deref(), Some("connected"));
+        assert!(round_tripped.files_touched);
     }
 
     #[test]
@@ -1564,6 +1584,7 @@ mod tests {
             exit_success: false,
             summary: "failed to run: spawn error".to_string(),
             coord_status: None,
+            files_touched: false,
             log_path: PathBuf::from("/tmp/state/logs/ws-2.jsonl"),
         };
 
@@ -1571,6 +1592,7 @@ mod tests {
         let round_tripped: RunMetadata = serde_json::from_str(&json).unwrap();
         assert!(round_tripped.coord_status.is_none());
         assert!(!round_tripped.exit_success);
+        assert!(!round_tripped.files_touched);
     }
 
     #[test]

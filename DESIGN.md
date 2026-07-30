@@ -914,6 +914,31 @@ this out explicitly. A true independent liveness check would mean pact
 supervising the sidecar itself instead of the agent CLI owning it -- a
 real architectural change, not attempted here.
 
+**`files_touched`: a ground-truth signal for "did the run actually do
+anything," independent of the agent's own success claim (issue #212,
+outside Windows Copilot report):** a task told an agent its target file
+must already exist, and to exit non-zero if it didn't -- the file was
+missing, Copilot's own prose said "I will exit with a non-zero code,"
+but its `type: "result"` event reported `exitCode: 0` anyway. Root cause
+isn't Copilot-specific: its contract (like Codex's `turn.completed`,
+already documented above) has no task-semantic success channel at all,
+only "did the CLI process exit cleanly." Rather than trying to override
+`exit_success` with a heuristic (the reporter's own report flags this as
+unreliable -- a legitimate read-only/inspect task also touches zero
+files, so "zero files touched" alone can't safely demote a run to
+failure without risking false negatives on correct runs), added a
+separate, adapter-agnostic `files_touched: bool` computed from a real
+`pact_vcs::changed_paths` check on the workspace right after the run --
+ground truth, not any agent's self-report. Deliberately kept out of
+`exit_success` entirely; `pact list` surfaces `[clean, no files
+touched]` distinctly from plain `[clean]` (which still covers the
+completely normal case of a workspace that's clean because it was
+already committed/merged), and `pact inspect` prints an explicit note
+alongside a "last run" that succeeded without touching anything.
+Verified end-to-end via the fake-agent harness (issue #157): a
+scripted no-op-but-successful spawn shows the distinct annotation, a
+real scripted file write does not.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
@@ -1028,6 +1053,79 @@ own stdin state at spawn time rather than deterministic -- but the
 underlying gap (stdin never explicitly closed) was real regardless.
 `.stdin(Stdio::null())` now makes the "no stdin, ever" contract explicit
 instead of leaving it to whatever the parent process happened to have.
+
+### Windows multi-line prompt truncation (issue #210)
+
+From an outside Windows Copilot stress-test report: every agent spawn on
+Windows used to be wrapped in `cmd /C <program> <args...>` (the same
+rationale as `cmdutil::run`'s Windows `.cmd` shim resolution, see
+`pact-deps`'s own section on this) -- but `cmd.exe`'s own command-line
+reader treats a raw embedded newline as ending the current line, **no
+matter how the argument is quoted**. Confirmed by hand with a harmless
+local `.cmd` shim (not a real agent call): a 2-line task prompt through
+`cmd /C echoargs -p "<2-line-text>" --output-format json --allow-all-tools`
+arrived at the child as exactly `["-p", "<line 1 only>"]` -- both the
+rest of the prompt *and every flag after it* silently vanished. Since a
+multi-line task prompt is a very common shape (numbered steps,
+multi-sentence instructions), this silently dropped `--allow-all-tools`/
+`--additional-mcp-config`/`--output-format json` on a real fraction of
+Windows spawns, running the child in each CLI's interactive default
+instead (burning real API credits) while `cmd /C`'s own exit code 0 still
+made pact report `exit_success: true`. Not Copilot-specific: `codex.cmd`
+and `gemini.cmd` are the byte-identical npm `cmd-shim` template as
+`copilot.cmd` (confirmed by reading all three installed shims directly --
+only the final script path differs), and `claude.exe` was wrapped in the
+same `cmd /C` unconditionally too -- all 4 adapters were exposed.
+
+**The report's own suggested fix ("modern Rust resolves PATHEXT natively,
+just drop the wrapper") is empirically wrong for this project's actual
+environment -- verified by hand before considering it, not taken on
+faith.** Tested directly on rustc 1.96.1 (well past the claimed Rust
+1.60 cutoff): a bare `Command::new("<name>")` for a real `.cmd`-shimmed
+program fails outright with `program not found` -- matching this
+project's own already-documented finding (`pact-deps` > Windows `.cmd`
+shim resolution). Dropping the wrapper as suggested would have been a
+straight regression, breaking every Windows spawn rather than fixing the
+multi-line case. Also tested and ruled out: pointing `Command::new`
+directly at a resolved `.cmd` file path (Rust's own "BatBadBut"
+mitigation rejects it: `batch file arguments are invalid`), the
+interactive-`cmd.exe` caret-newline line-continuation escape (`^` +
+`\n`, doesn't survive `cmd /C`'s re-tokenization), and `%VAR%`-expansion
+indirection (same truncation, plus loses quoting).
+
+**What actually works, confirmed by hand:** a genuine native `.exe`
+target spawned with no `cmd.exe` in the chain at all preserves an
+embedded newline in an argument perfectly, every subsequent flag intact
+-- the truncation is 100% specific to `cmd.exe`'s own line-oriented
+reparsing, not a fundamental Windows/Rust argv-passing limit. All 3
+current `.cmd`-shimmed agents are npm's own standard `cmd-shim` template
+verbatim (`... & "%_prog%" "%dp0%\<relative-script>.js" %*`, `%_prog%`
+being the shim's own sibling `node.exe` if present, else bare `node` from
+PATH) -- the same technique Node's own `cross-spawn` library uses for
+this exact class of problem on Windows.
+
+New `pact-agents::windows_shim` (windows-only, `#[cfg(windows)]`)
+resolves `program` to a directly-executable target before `cmd.exe` is
+ever involved: a real `.exe` found on PATH needs no wrapper at all (fixes
+`claude.exe` with zero added complexity); a `.cmd`/`.bat` shim matching
+the standard npm template gets parsed for its real interpreter + script,
+spawned directly (fixes Copilot/Codex/Gemini). Anything that resolves
+neither way falls back to the old `cmd /C` wrapper exactly as before, so
+nothing regresses for an unrecognized shape. `process::build_agent_command`
+is the single call site, `#[cfg(windows)]`/`#[cfg(not(windows))]` split so
+non-Windows platforms are unaffected (unchanged direct `Command::new`).
+
+Verified for real at every layer, not just unit-tested against
+synthetic fixtures: the shim parser's tests use the byte-for-byte real
+template captured from the actual installed `copilot.cmd`/`codex.cmd`/
+`gemini.cmd`; a `#[ignore]`d manual-verification test (`cargo test --
+--ignored`) resolves all 4 real installed agent CLIs on this machine and
+confirms the resolved interpreter/script actually exist; and a full-stack
+proof spawned the real `node.exe` this project's `copilot` resolves to
+(via PATH, since this machine's copilot install has no sibling
+`node.exe`) against a harmless echo script with a real multi-line
+argument plus trailing flags -- all arrived at the child completely
+intact, with zero `cmd.exe` involved.
 
 ### MCP config format confirmation
 
@@ -2149,6 +2247,34 @@ not by default.
 internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
 lines interleave at line granularity, never mid-line.
+
+### `teardown` bulk mode (issue #214, outside Windows Copilot report)
+
+`teardown` required a workspace `<id>` -- no way to tear down every active
+workspace at once, asymmetric with `commit-all` (which already documented
+"without --id, commits every active workspace that's dirty"). After a
+run leaves several workspaces active, cleanup meant N separate `pact
+teardown --force <id>` invocations, each needing the full id slug typed
+out by hand.
+
+`id` is now `Option<String>`, mirroring `commit-all`'s exact pattern:
+omitted means every active workspace, torn down independently -- one
+that fails (a dirty workspace without `--force`, most commonly) is
+reported and the batch continues rather than aborting, same "report and
+continue" shape `commit-all` already used. Cross-workspace conflict
+detection (previously computed once per single `teardown` call, right
+before removal since it needs the branch teardown deletes) is now
+computed once for the whole batch up front instead of once per
+workspace -- a minor, deliberate timing change: still informational-only
+(never blocks a teardown), and avoids N redundant `detect_conflicts`
+calls for a bulk invocation. `FileConflict` gained a plain `Clone` derive
+to support filtering a shared snapshot per workspace in the loop.
+
+Verified end-to-end via the fake-agent harness (issue #157): bulk
+teardown removes every workspace and `list` reports none left; a bulk
+teardown where every workspace is dirty (no `--force`) reports each one
+failed and leaves all of them still active, rather than tearing down
+none or aborting after the first failure.
 
 ### `--union` renamed to `--append-only` (issue #11)
 
