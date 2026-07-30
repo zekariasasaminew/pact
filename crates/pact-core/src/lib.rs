@@ -43,9 +43,15 @@ pub struct RunMetadata {
     pub ended_at: u64,
     pub exit_success: bool,
     pub summary: String,
-    /// The coordination server's last reported status before the process
-    /// exited (e.g. "connected", "pending", "failed"), or `None` if no
-    /// coordination config was attached to this run at all.
+    /// The coordination server's *last self-reported* status from the
+    /// agent CLI's own event stream (e.g. "connected", "pending",
+    /// "failed"), or `None` if no coordination config was attached to
+    /// this run at all. Not a live liveness probe -- pact doesn't own the
+    /// `mcp-serve` sidecar process (the agent CLI spawns it as its own
+    /// MCP client), so this can go stale if the sidecar dies mid-session
+    /// and the agent never has occasion to notice (e.g. it makes no
+    /// further coordination tool call for the rest of the run). See
+    /// DESIGN.md ("pact-core > Structured run metadata", issue #201).
     pub coord_status: Option<String>,
     pub log_path: PathBuf,
 }
