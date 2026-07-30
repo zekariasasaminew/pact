@@ -17,6 +17,37 @@ pub struct RunOutcome {
     pub summary: String,
 }
 
+/// Builds the `Command` used to launch an agent CLI. On Windows, resolving
+/// straight to a real, directly-executable target (a native `.exe`, or the
+/// interpreter+script a `.cmd` shim ultimately execs -- see
+/// `windows_shim::resolve`) avoids `cmd.exe` reparsing the command line at
+/// all, since that reparsing silently truncates a multi-line `-p` prompt
+/// (and every flag after it) at the first embedded newline -- confirmed by
+/// hand, see DESIGN.md ("pact-agents > Windows multi-line prompt
+/// truncation", issue #210). Only falls back to the old `cmd /C <program>`
+/// wrapper when `program` doesn't resolve either way (an unrecognized
+/// shim shape), preserving prior behavior for that case exactly.
+#[cfg(windows)]
+fn build_agent_command(program: &str) -> Command {
+    match crate::windows_shim::resolve(program) {
+        Some(resolved) => {
+            let mut c = Command::new(resolved.program);
+            c.args(&resolved.leading_args);
+            c
+        }
+        None => {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(program);
+            c
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn build_agent_command(program: &str) -> Command {
+    Command::new(program)
+}
+
 /// Spawns `program args` in `cwd`, streaming its stdout as NDJSON to
 /// `on_event` and appending every raw line to `log_path` -- see DESIGN.md
 /// ("pact-agents > run_and_stream") for `on_pid`'s timing, the stderr
@@ -44,15 +75,7 @@ pub fn run_and_stream(
             .with_context(|| format!("opening log file {}", log_path.display()))?,
     ));
 
-    // Windows .cmd shim resolution -- see DESIGN.md ("pact-deps > Windows
-    // .cmd shim resolution"), same rationale as cmdutil::run.
-    let mut command = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(program);
-        c
-    } else {
-        Command::new(program)
-    };
+    let mut command = build_agent_command(program);
     // pact only ever feeds the agent via the task/`-p` argument -- it never
     // writes to the child's stdin. Explicitly closed rather than left
     // inherited (Rust's default): an inherited, ambiguous stdin handle

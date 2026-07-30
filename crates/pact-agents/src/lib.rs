@@ -16,6 +16,8 @@ mod event;
 mod gemini;
 mod process;
 mod supervisor;
+#[cfg(windows)]
+mod windows_shim;
 
 pub use adapter::{adapter, resolve_safety_profile, AgentAdapter, AgentKind, CoordConfig, SafetyProfile};
 pub use event::AgentEvent;
