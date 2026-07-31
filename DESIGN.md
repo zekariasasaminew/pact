@@ -730,6 +730,52 @@ conflict, resumable via `pact resolve`. This redesign makes Arbiter
 and verified improvement over a 0% success rate -- it does not yet make
 every attempt succeed.
 
+### Arbiter merge-state neutralization (issue #185)
+
+Follow-up to the previous section's leading hypothesis, not chased
+further at the time: `neutralize_conflict`'s per-file index fix cleared
+one file's own "UU" status, but the *repository as a whole* was still
+genuinely mid-merge (`.git/MERGE_HEAD`/`MERGE_MSG`/`MERGE_MODE` present)
+for the duration of the attempt, since the merge as a whole hasn't been
+committed or aborted yet -- by design, Arbiter needs to still be
+"inside" the conflict to resolve it. `WorkspaceManager::
+neutralize_merge_state`/`restore_merge_state` extends the same
+snapshot-then-restore pattern to that repo-level state: reads and
+removes `MERGE_HEAD` (and `MERGE_MSG`/`MERGE_MODE` if present) from the
+worktree's *own* git-dir -- resolved via `git rev-parse --git-dir`
+rather than assumed as `.git/worktrees/<name>` by convention, since a
+non-worktree checkout has no `worktrees/` subdirectory at all -- and
+`Ok(None)` when the worktree isn't actually mid-merge.
+
+**Restored unconditionally, not just on rejection** -- unlike
+`neutralize_conflict`/`restore_conflict`, which stay neutralized on
+acceptance (the file is genuinely no longer conflicted, that's the
+desired end state). `MergeStateSnapshot` is different: `merge_branch_into`
+always runs `git commit --no-edit` (accepted) or `git merge --abort`
+(rejected) immediately after Arbiter returns, and both need `MERGE_HEAD`
+present to behave as a real merge conclusion rather than a plain commit.
+`attempt_arbiter_resolution` in pact-core wraps the entire attempt (the
+pre-existing function, renamed to `attempt_arbiter_resolution_inner`) so
+every exit path -- accepted or rejected -- restores the merge state
+before returning control to `merge_branch_into`.
+
+Covered by `crates/pact-vcs/tests/arbiter_conflict_prep.rs` against a
+real conflicted repo: `MERGE_HEAD` actually disappears and the
+mid-merge banner clears once both the per-file and repo-level state are
+neutralized together; restoring puts the exact original `MERGE_HEAD`
+bytes back and a real `git commit --no-edit` still succeeds afterward
+(the same sequence `merge_branch_into` performs); a no-op when the
+worktree isn't mid-merge at all.
+
+**Honestly unverified against a real agent as of this fix** -- issue
+#185's own real-agent evidence (one `Write` denial that survived
+per-file neutralization) is the motivating case, but confirming this
+repo-level fix actually resolves *that* denial needs another real,
+billed Arbiter invocation, which wasn't spent unilaterally implementing
+this. Issue #185 stays open for that live re-verification; this is a
+plausible, well-reasoned fix for a real gap in the neutralization
+approach, not a confirmed resolution.
+
 ### Arbiter scope enforcement (issue #146/#147)
 
 From an outside code review (2026-07-24, full triage:
