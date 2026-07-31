@@ -932,7 +932,43 @@ fn build_arbiter_decision(
 /// early-return pairs, which is what made building a complete
 /// `decision.json` on every path (issue #148) straightforward instead
 /// of repetitive.
+/// Wraps `attempt_arbiter_resolution_inner` with repo-level merge-state
+/// neutralization -- see DESIGN.md ("pact-core > Arbiter merge-state
+/// neutralization", issue #185). Restored unconditionally after the inner
+/// attempt returns, accepted or rejected: the merge itself isn't finished
+/// either way, `merge_branch_into` still needs `MERGE_HEAD` present for the
+/// `git commit --no-edit`/`git merge --abort` it runs right after this
+/// returns.
 fn attempt_arbiter_resolution(
+    config: &ArbiterConfig,
+    workspaces: &pact_vcs::WorkspaceManager,
+    worktree_path: &Path,
+    task_text: &str,
+    files: &[String],
+    log_path: &Path,
+) -> ArbiterOutcome {
+    let merge_state = match workspaces.neutralize_merge_state(worktree_path) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return ArbiterOutcome::Rejected {
+                reason: format!("failed to neutralize the worktree's merge state before running arbiter: {err:#}"),
+                test_passed: None,
+            }
+        }
+    };
+
+    let outcome = attempt_arbiter_resolution_inner(config, workspaces, worktree_path, task_text, files, log_path);
+
+    if let Some(snapshot) = &merge_state {
+        if let Err(err) = workspaces.restore_merge_state(snapshot) {
+            tracing::warn!("arbiter: failed to restore the worktree's merge state after an attempt: {err:#}");
+        }
+    }
+
+    outcome
+}
+
+fn attempt_arbiter_resolution_inner(
     config: &ArbiterConfig,
     workspaces: &pact_vcs::WorkspaceManager,
     worktree_path: &Path,

@@ -1214,6 +1214,67 @@ impl WorkspaceManager {
         }
         Ok(())
     }
+
+    /// Temporarily removes `worktree_path`'s repo-level "mid-merge" markers
+    /// (`MERGE_HEAD`/`MERGE_MSG`/`MERGE_MODE`) -- see DESIGN.md ("pact-core >
+    /// Arbiter merge-state neutralization", issue #185) for why:
+    /// `neutralize_conflict`'s per-file index fix (issue #106) wasn't
+    /// sufficient on its own -- a real agent's Write tool was still denied
+    /// once even after the specific file's own "UU" status was cleared,
+    /// with the repo as a whole still reporting itself mid-merge via these
+    /// markers regardless of any single file's index state. `Ok(None)` when
+    /// the worktree isn't actually mid-merge (nothing to neutralize).
+    pub fn neutralize_merge_state(&self, worktree_path: &Path) -> Result<Option<MergeStateSnapshot>> {
+        let git_dir = self.worktree_git_dir(worktree_path)?;
+        let merge_head_path = git_dir.join("MERGE_HEAD");
+        if !merge_head_path.exists() {
+            return Ok(None);
+        }
+
+        let merge_head = std::fs::read(&merge_head_path)
+            .with_context(|| format!("reading {}", merge_head_path.display()))?;
+        let merge_msg = std::fs::read(git_dir.join("MERGE_MSG")).ok();
+        let merge_mode = std::fs::read(git_dir.join("MERGE_MODE")).ok();
+
+        std::fs::remove_file(&merge_head_path)
+            .with_context(|| format!("removing {}", merge_head_path.display()))?;
+        if merge_msg.is_some() {
+            let _ = std::fs::remove_file(git_dir.join("MERGE_MSG"));
+        }
+        if merge_mode.is_some() {
+            let _ = std::fs::remove_file(git_dir.join("MERGE_MODE"));
+        }
+
+        Ok(Some(MergeStateSnapshot { git_dir, merge_head, merge_msg, merge_mode }))
+    }
+
+    /// Undoes `neutralize_merge_state`, putting the repo-level merge
+    /// markers back exactly as they were -- called regardless of whether
+    /// the arbiter attempt was accepted or rejected, since either way the
+    /// merge itself isn't finished yet (`merge_branch_into` still needs
+    /// `MERGE_HEAD` present for the `git commit --no-edit`/`git merge
+    /// --abort` it runs right after).
+    pub fn restore_merge_state(&self, snapshot: &MergeStateSnapshot) -> Result<()> {
+        std::fs::write(snapshot.git_dir.join("MERGE_HEAD"), &snapshot.merge_head).context("restoring MERGE_HEAD")?;
+        if let Some(msg) = &snapshot.merge_msg {
+            std::fs::write(snapshot.git_dir.join("MERGE_MSG"), msg).context("restoring MERGE_MSG")?;
+        }
+        if let Some(mode) = &snapshot.merge_mode {
+            std::fs::write(snapshot.git_dir.join("MERGE_MODE"), mode).context("restoring MERGE_MODE")?;
+        }
+        Ok(())
+    }
+
+    /// Resolves `worktree_path`'s own git-dir via `git rev-parse
+    /// --git-dir` rather than assuming `.git/worktrees/<name>` by
+    /// convention -- `MERGE_HEAD` et al. are worktree-specific, but a
+    /// non-worktree checkout (a plain clone, or a manual scratch repo used
+    /// for verification) has no `worktrees/` subdirectory at all.
+    fn worktree_git_dir(&self, worktree_path: &Path) -> Result<PathBuf> {
+        let raw = run_git_text(worktree_path, &["rev-parse", "--git-dir"])?;
+        let path = PathBuf::from(&raw);
+        Ok(if path.is_absolute() { path } else { worktree_path.join(path) })
+    }
 }
 
 /// What `neutralize_conflict` captured about one file, so `restore_conflict`
@@ -1222,6 +1283,16 @@ pub struct ConflictSnapshot {
     file: String,
     original_content: Vec<u8>,
     index_info: String,
+}
+
+/// What `neutralize_merge_state` captured about a worktree's repo-level
+/// merge markers, so `restore_merge_state` can put them back exactly as
+/// they were.
+pub struct MergeStateSnapshot {
+    git_dir: PathBuf,
+    merge_head: Vec<u8>,
+    merge_msg: Option<Vec<u8>>,
+    merge_mode: Option<Vec<u8>>,
 }
 
 /// Sniffs the indent unit (spaces or a tab) from the first indented line of
