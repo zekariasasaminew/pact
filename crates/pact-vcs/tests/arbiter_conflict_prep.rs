@@ -125,3 +125,83 @@ fn conflict_stages_survive_a_neutralize_restore_round_trip() {
 
     cleanup(&repo);
 }
+
+/// Issue #185: `neutralize_conflict`'s per-file "UU" fix alone wasn't
+/// enough -- a real agent's Write was still denied once with the repo as a
+/// whole still reporting itself mid-merge, regardless of any single file's
+/// index state. `neutralize_merge_state` clears the repo-level markers
+/// (`MERGE_HEAD`/`MERGE_MSG`/`MERGE_MODE`) that produce that banner.
+#[test]
+fn neutralize_merge_state_clears_the_mid_merge_markers_and_banner() {
+    let repo = init_conflicted_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+    let merge_head_path = repo.join(".git").join("MERGE_HEAD");
+    assert!(merge_head_path.exists(), "expected a real conflicted merge to leave MERGE_HEAD behind");
+
+    manager.neutralize_conflict(&repo, "file.txt").unwrap();
+    let status_before = git_output(&repo, &["status"]);
+    assert!(
+        status_before.contains("All conflicts fixed but you are still merging")
+            || status_before.contains("You have unmerged paths"),
+        "expected the mid-merge banner while only the per-file state is neutralized:\n{status_before}"
+    );
+
+    manager.neutralize_merge_state(&repo).unwrap();
+    assert!(!merge_head_path.exists(), "expected neutralize_merge_state to remove MERGE_HEAD");
+    let status_after = git_output(&repo, &["status"]);
+    assert!(
+        !status_after.contains("merging") && !status_after.contains("unmerged paths"),
+        "expected no mid-merge banner once both the file and repo-level state are neutralized:\n{status_after}"
+    );
+
+    cleanup(&repo);
+}
+
+#[test]
+fn restore_merge_state_puts_the_original_markers_back() {
+    let repo = init_conflicted_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+    let merge_head_path = repo.join(".git").join("MERGE_HEAD");
+    let original_merge_head = std::fs::read(&merge_head_path).unwrap();
+
+    let snapshot = manager.neutralize_merge_state(&repo).unwrap().expect("repo should be mid-merge");
+    assert!(!merge_head_path.exists());
+
+    manager.restore_merge_state(&snapshot).unwrap();
+    assert!(merge_head_path.exists(), "expected MERGE_HEAD to be restored");
+    assert_eq!(std::fs::read(&merge_head_path).unwrap(), original_merge_head);
+
+    // The file itself was never resolved in this test (only the
+    // repo-level merge markers were exercised) -- resolve it for real so
+    // the commit below matches what `merge_branch_into` actually does
+    // once an arbiter attempt is accepted: file staged, MERGE_HEAD
+    // restored, then `git commit --no-edit`.
+    std::fs::write(repo.join("file.txt"), "line1\nresolved\nline3\n").unwrap();
+    run_git(&repo, &["add", "file.txt"]);
+
+    let commit = Command::new("git").args(["commit", "--no-edit"]).current_dir(&repo).output().unwrap();
+    assert!(
+        commit.status.success(),
+        "expected `git commit` to still work as a real merge commit after restoring MERGE_HEAD:\n{}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    cleanup(&repo);
+}
+
+#[test]
+fn neutralize_merge_state_is_a_no_op_outside_a_merge() {
+    let root = std::env::temp_dir().join(format!("pact-vcs-arbiter-no-merge-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    run_git(&root, &["init", "-q"]);
+    run_git(&root, &["config", "user.email", "test@test.com"]);
+    run_git(&root, &["config", "user.name", "test"]);
+    std::fs::write(root.join("file.txt"), "content\n").unwrap();
+    run_git(&root, &["add", "-A"]);
+    run_git(&root, &["commit", "-q", "-m", "init"]);
+
+    let manager = WorkspaceManager::open(&root).unwrap();
+    assert!(manager.neutralize_merge_state(&root).unwrap().is_none());
+
+    cleanup(&root);
+}
