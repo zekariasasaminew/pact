@@ -518,3 +518,160 @@ fn teardown_kills_a_still_running_fake_agent_process() {
     cleanup(&repo);
     cleanup(&shim);
 }
+
+fn status_json(repo: &Path, shim: &Path) -> serde_json::Value {
+    let status = pact(repo, shim, &["status", "--json"]);
+    assert!(
+        status.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&status),
+        String::from_utf8_lossy(&status.stderr)
+    );
+    serde_json::from_str(&stdout(&status)).unwrap_or_else(|err| panic!("`pact status --json` didn't print valid JSON: {err}"))
+}
+
+/// Issue #221: `pact status --json` must reflect a real completed spawn's
+/// dirty/files-touched state, reusing exactly the same `is_dirty`/
+/// `run_metadata` ground truth `list`'s own regression tests already pin
+/// down -- this just checks `status` surfaces it identically, not that the
+/// underlying signal itself is correct (that's `list`'s job).
+#[test]
+fn status_json_reflects_a_dirty_workspace_after_a_real_write() {
+    let repo = init_repo("status-dirty");
+    let shim = shim_dir();
+
+    let task = script(&[("hello.txt", "hello from a fake agent")], "created hello.txt");
+    let spawn = pact(&repo, &shim, &["spawn", &task, "--agent", "claude"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+    let id = workspace_id_from_spawn_output(&spawn);
+
+    let report = status_json(&repo, &shim);
+    let workspaces = report["workspaces"].as_array().expect("workspaces array");
+    let row = workspaces.iter().find(|w| w["id"] == id).expect("spawned workspace present in status");
+    assert_eq!(row["dirty"], serde_json::json!(true));
+    assert_eq!(row["no_files_touched"], serde_json::json!(false));
+    assert_eq!(row["agent_alive"], serde_json::Value::Null, "agent process already exited by the time spawn returned");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// Contrast case, and the actual new logic this feature adds beyond what
+/// `list` already reports: a no-op run's workspace must both flag
+/// `no_files_touched` and surface a "what next" hint pointing at `pact
+/// inspect <id>` -- issue #212's ground-truth signal, consumed by #221's
+/// new hint chain.
+#[test]
+fn status_json_flags_a_no_op_workspace_and_hints_at_it() {
+    let repo = init_repo("status-no-op");
+    let shim = shim_dir();
+
+    let noop_task = script(&[], "reported success without doing anything");
+    let spawn = pact(&repo, &shim, &["spawn", &noop_task, "--agent", "claude"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+    let id = workspace_id_from_spawn_output(&spawn);
+
+    let report = status_json(&repo, &shim);
+    let workspaces = report["workspaces"].as_array().expect("workspaces array");
+    let row = workspaces.iter().find(|w| w["id"] == id).expect("spawned workspace present in status");
+    assert_eq!(row["dirty"], serde_json::json!(false));
+    assert_eq!(row["no_files_touched"], serde_json::json!(true));
+
+    let hints = report["hints"].as_array().expect("hints array");
+    assert!(
+        hints.iter().any(|h| h.as_str().is_some_and(|s| s.contains("touched zero files") && s.contains(&id))),
+        "expected a hint pointing at the no-op workspace, got: {hints:?}"
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// The human-readable path (not just `--json`) must actually list every
+/// spawned workspace and its own "what next" section -- a plain smoke test
+/// against real output, not a structural JSON check.
+#[test]
+fn status_human_readable_lists_workspaces_and_hints() {
+    let repo = init_repo("status-human");
+    let shim = shim_dir();
+
+    let noop_task = script(&[], "reported success without doing anything");
+    let spawn = pact(&repo, &shim, &["spawn", &noop_task, "--agent", "claude"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+    let id = workspace_id_from_spawn_output(&spawn);
+
+    let status = pact(&repo, &shim, &["status"]);
+    assert!(status.status.success(), "stdout: {}\nstderr: {}", stdout(&status), String::from_utf8_lossy(&status.stderr));
+    let text = stdout(&status);
+    assert!(text.contains("agents detected:"), "got: {text}");
+    assert!(text.contains(&id), "expected the workspace id in the workspaces table, got: {text}");
+    assert!(text.contains("what next:"), "expected a hints section for a no-op workspace, got: {text}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// The "still running" branch of the hint chain -- the one piece of
+/// `status`'s new logic `list`'s own tests don't already exercise, since
+/// `list` has no equivalent hint concept. Reuses the same background-spawn
+/// + poll pattern as `teardown_kills_a_still_running_fake_agent_process`.
+#[test]
+fn status_reports_a_still_running_agent_and_hints_to_wait() {
+    let repo = init_repo("status-running");
+    let shim = shim_dir();
+
+    let long_sleep_task = serde_json::json!({
+        "writes": {"slow.txt": "eventually"},
+        "sleep_ms": 60_000u64,
+        "summary": "done sleeping",
+    })
+    .to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pact"))
+        .args(["--repo", repo.to_str().unwrap(), "spawn", &long_sleep_task, "--agent", "claude"])
+        .env("PATH", path_with_shim_first(&shim))
+        .spawn()
+        .expect("failed to spawn `pact spawn` in the background");
+
+    let mut recorded_pid: Option<u32> = None;
+    let found_running = wait_until(
+        || {
+            let list = pact(&repo, &shim, &["list"]);
+            let text = stdout(&list);
+            let Some(pid_line) = text.lines().find(|l| l.trim_start().starts_with("agent pid:") && l.contains("(running)")) else {
+                return false;
+            };
+            recorded_pid = pid_line.split_whitespace().nth(2).and_then(|s| s.parse().ok());
+            recorded_pid.is_some()
+        },
+        Duration::from_secs(10),
+    );
+    assert!(found_running, "fake agent never reported as running before the sleep completed");
+    let pid = recorded_pid.expect("recorded a running pid");
+
+    let report = status_json(&repo, &shim);
+    let workspaces = report["workspaces"].as_array().expect("workspaces array");
+    let row = workspaces.iter().find(|w| w["agent_pid"] == pid).expect("the running workspace present in status");
+    assert_eq!(row["agent_alive"], serde_json::json!(true));
+
+    let hints = report["hints"].as_array().expect("hints array");
+    assert!(
+        hints.iter().any(|h| h.as_str().is_some_and(|s| s.contains("still running"))),
+        "expected a 'still running' hint, got: {hints:?}"
+    );
+
+    let list_text = stdout(&pact(&repo, &shim, &["list"]));
+    let id = list_text.lines().next().unwrap().split_whitespace().next().unwrap().to_string();
+    let teardown = pact(&repo, &shim, &["teardown", &id, "--force"]);
+    assert!(teardown.status.success(), "stdout: {}\nstderr: {}", stdout(&teardown), String::from_utf8_lossy(&teardown.stderr));
+
+    let killed = wait_until(|| !agent_process_alive(pid), Duration::from_secs(5));
+    assert!(killed, "expected pid {pid} to no longer be alive after `pact teardown --force`");
+
+    let _ = wait_until(|| matches!(child.try_wait(), Ok(Some(_))), Duration::from_secs(5));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
