@@ -2924,6 +2924,57 @@ real-subprocess round trip, which is lower-value for Arbiter
 specifically since its prompt construction (not its process-spawning) is
 where most of its bugs have actually been.
 
+### `spawn-many --dry-run --estimate-cost` (issue #222)
+
+Outside feature notes observed that first-time users on API-metered
+adapters (Claude Code/Codex/Gemini, unlike Copilot's flat-rate plans)
+hesitate to run `spawn-many` because they can't predict cost --
+`--dry-run` shows what pact *would* do but nothing about tokens or
+dollars. `--estimate-cost` (requires `--dry-run`) prints an input-token
+count and a dollar range per adapter right after the existing per-task
+preview, before `return Ok(())`.
+
+**Simplification found while implementing, vs. the source notes**: they
+suggested adding a new `preview_prompt()` method to `AgentAdapter` to get
+the exact prompt string a launch would use. Not needed -- `batch:
+Vec<SpawnManyTask>` (built before the dry-run branch even runs) already
+holds every task's raw prompt text in memory, which is the dominant
+token cost. `estimate_input_tokens` just char-counts that directly
+(`chars().count() / 4`, within ~15% of cl100k for English prose/code --
+no tokenizer dependency, since the estimate is already presented as a
+range, not one number).
+
+**Rate card** (`adapter_rate`): a static per-`AgentKind` table, (cheapest
+model, priciest model) input/output $/MTok, verified against each
+provider's own published pricing page on `RATES_LAST_UPDATED_LABEL`
+(2026-08-03), not guessed -- Anthropic's Haiku 4.5/Opus 5, OpenAI's
+gpt-5-nano/flagship GPT-5-class model, Google's Gemini Flash-Lite/Pro.
+Copilot is `flat_rate: true` (Pro/Business is quota-bounded, not
+token-metered) and prints request-quota impact instead of a dollar
+range. A `RATES_STALE_AFTER_SECS` (90 days) check against the pinned
+timestamp prints a `WARN` rather than silently presenting old numbers as
+current.
+
+**Mixed-adapter batches** (`claude:`/`copilot:` task prefixes) get one
+breakdown per adapter (grouped in `print_cost_estimate` via a
+`BTreeMap<&str, (task_count, input_tokens)>`), not one misleading
+combined number -- matches the source notes' explicit "don't build
+per-task rate overrides, just split by adapter" guidance.
+
+**What's deliberately not estimated**, stated explicitly in the printed
+output every time: output tokens (10x-100x input is typical but wildly
+task-dependent), file-read tokens (agent-dependent, e.g. Copilot reads
+more liberally than Claude Code), and MCP tool-call overhead. An honest
+floor, not a total -- matches the source notes' "false precision is
+worse than an honest wide range" framing.
+
+**Out of scope for this issue**: `--json` output for the estimate.
+`spawn-many` has no `--json` flag at all today (unlike `history`/
+`merge-all --dry-run`/`doctor`/`status`) -- adding one just for the cost
+estimate, without also JSON-ifying the existing per-task preview it sits
+alongside, would be a half-measure; left for whenever `spawn-many`
+itself gets a `--json` mode.
+
 ## CI and release infrastructure
 
 ### Rolling `edge` release
