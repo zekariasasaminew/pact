@@ -518,3 +518,59 @@ fn teardown_kills_a_still_running_fake_agent_process() {
     cleanup(&repo);
     cleanup(&shim);
 }
+
+/// Issue #222: `--estimate-cost` must be rejected without `--dry-run` --
+/// running it for real would spawn a paid agent first and print the
+/// estimate only after the money's already spent, which defeats the
+/// entire point.
+#[test]
+fn spawn_many_estimate_cost_requires_dry_run() {
+    let repo = init_repo("estimate-cost-requires-dry-run");
+    let shim = shim_dir();
+
+    let result = pact(&repo, &shim, &["spawn-many", "--task", "do something", "--agent", "claude", "--estimate-cost"]);
+    assert!(!result.status.success(), "expected --estimate-cost without --dry-run to be rejected by clap");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("dry_run") || String::from_utf8_lossy(&result.stderr).contains("dry-run"),
+        "expected an error mentioning the --dry-run requirement, got: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// A mixed-adapter batch (`claude:`/`copilot:` prefixes) must print one
+/// cost breakdown per adapter, not one misleading combined number -- and
+/// the flat-rate adapter (Copilot) must show quota impact, not a dollar
+/// range that doesn't apply to it.
+#[test]
+fn spawn_many_estimate_cost_splits_a_mixed_adapter_batch() {
+    let repo = init_repo("estimate-cost-mixed");
+    let shim = shim_dir();
+
+    let result = pact(
+        &repo,
+        &shim,
+        &[
+            "spawn-many",
+            "--task",
+            "claude:fix the auth bug",
+            "--task",
+            "copilot:write unit tests",
+            "--agent",
+            "claude",
+            "--dry-run",
+            "--estimate-cost",
+        ],
+    );
+    assert!(result.status.success(), "stdout: {}\nstderr: {}", stdout(&result), String::from_utf8_lossy(&result.stderr));
+    let text = stdout(&result);
+    assert!(text.contains("cost estimate"), "got: {text}");
+    assert!(text.contains("adapter:       claude"), "expected a claude breakdown, got: {text}");
+    assert!(text.contains("adapter:       copilot"), "expected a copilot breakdown, got: {text}");
+    assert!(text.contains("quota-eligible"), "expected Copilot's flat-rate quota framing, not a dollar range, got: {text}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
