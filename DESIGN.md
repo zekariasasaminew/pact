@@ -2924,6 +2924,41 @@ real-subprocess round trip, which is lower-value for Arbiter
 specifically since its prompt construction (not its process-spawning) is
 where most of its bugs have actually been.
 
+### `pact status` (issue #221)
+
+Outside feature notes observed that understanding what pact is doing
+after a `spawn-many` requires composing four separate commands (`list`,
+`history`, `coord-status`, `inspect <id>`) -- a first-time user has to
+already know all four exist before they can get a full picture. `pact
+status [--json]` is one screen aggregating what those commands already
+compute: no new data collection, just presentation. `build_status_rows`
+reuses `Command::List`'s exact per-workspace logic (`Orchestrator::
+is_dirty`, `run_metadata`'s `files_touched` annotation from issue #212,
+`agent_process_alive`) and folds in each workspace's own coordination
+claims/pending count from the same `CoordStatus` snapshot `coord-status`
+already returns. `status_hints` is a small, deliberately dumb
+pattern-matched rule set (N running / M touched-zero-files / any open
+conflict / all-idle-suggest-merge) -- same shape as the existing
+error-message hint chain (issue #123), no fuzzy logic.
+
+**One correction made to the source notes before implementing**: they
+suggested a header line like "coord server: running (pid 12744, uptime
+23m)". That doesn't match pact's actual architecture -- `mcp-serve` is a
+per-agent-session subprocess the agent CLI itself spawns as its own MCP
+client, not a standing daemon pact owns or can query the liveness of
+(see issue #201, "`coord_status` field can go stale after `mcp-serve`
+dies mid-session -- confirmed by design"). There is no single
+repo-wide coord-server PID to report. Replaced with an aggregate lease/
+message count from the same `Orchestrator::coord_status` snapshot
+`coord-status` already computes, which is real.
+
+**Deliberately out of scope for this issue**: `--watch`/`--refresh`
+polling mode. Every value `status` aggregates is a cheap filesystem/
+SQLite read, so a refresh loop is straightforward to add later, but it's
+a distinct small design surface (when to exit, terminal clear/reprint
+vs. a plain `--refresh N`-and-exit) left for a follow-up rather than
+folded into the first cut.
+
 ## CI and release infrastructure
 
 ### Rolling `edge` release
