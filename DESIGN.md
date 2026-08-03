@@ -3010,6 +3010,34 @@ a distinct small design surface (when to exit, terminal clear/reprint
 vs. a plain `--refresh N`-and-exit) left for a follow-up rather than
 folded into the first cut.
 
+### Test suite's own state-directory leak (issue #225)
+
+Found by accident while checking scratch directories during an
+unrelated session: `WorkspaceManager::open` unconditionally creates the
+sibling `.pact-<repo-name>` state directory (`locks/`, `meta/`,
+`workspaces/`) the moment it's called, regardless of whether a
+workspace is ever actually created in it. Every integration test that
+calls `open` directly, or runs the real `pact` binary (which calls it
+internally), leaked one of these on every run unless its own
+`cleanup()` helper explicitly removed it too -- confirmed by counting
+**~5800** leaked directories accumulated in `%TEMP%` from this
+project's own test runs over the prior three weeks.
+
+Same root cause class as issue #195 (`pact demo` leaking its state
+dir), but broader: #195's fix only patched `demo::run`'s own cleanup
+path, never the test suite's 15 separate `cleanup()` helpers (this
+codebase doesn't share a common test-utils module -- each integration
+test file is self-contained, per existing convention). 14 of the 15
+had the exact same blind spot (`remove_dir_all(root)` without also
+removing `WorkspaceManager::state_dir_for(root)`, the same shared
+derivation #195 introduced); `spawn_dry_run.rs` alone did it correctly
+(via its own local reimplementation of the same path math), proof the
+pattern was known but never applied everywhere. Mechanical fix, no
+`pact` behavior change: every `cleanup()` now also removes
+`WorkspaceManager::state_dir_for(root)`. Verified by running the full
+suite once with `%TEMP%` cleared first and confirming zero `.pact-*`
+directories remained afterward, not just that the code compiles.
+
 ## CI and release infrastructure
 
 ### Rolling `edge` release

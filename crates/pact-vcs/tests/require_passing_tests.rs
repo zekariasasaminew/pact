@@ -35,6 +35,9 @@ fn init_repo() -> PathBuf {
 
 fn cleanup(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
+    if let Ok(state_dir) = WorkspaceManager::state_dir_for(root) {
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
 }
 
 fn always_fail_cmd() -> &'static str {
