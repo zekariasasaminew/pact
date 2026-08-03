@@ -35,6 +35,9 @@ fn init_repo(name: &str) -> PathBuf {
 fn cleanup(paths: &[&Path]) {
     for path in paths {
         let _ = std::fs::remove_dir_all(path);
+        if let Ok(state_dir) = pact_vcs::WorkspaceManager::state_dir_for(path) {
+            let _ = std::fs::remove_dir_all(state_dir);
+        }
     }
 }
 

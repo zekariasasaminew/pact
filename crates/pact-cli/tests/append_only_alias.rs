@@ -34,6 +34,9 @@ fn init_repo_with_barrel(name: &str) -> PathBuf {
 
 fn cleanup(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
+    if let Ok(state_dir) = WorkspaceManager::state_dir_for(root) {
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
 }
 
 fn run_merge_all(repo: &Path, flag: &str) -> std::process::Output {

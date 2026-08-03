@@ -36,6 +36,9 @@ fn init_repo_with_zero_dependency_lockfile() -> PathBuf {
 
 fn cleanup(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
+    if let Ok(state_dir) = pact_vcs::WorkspaceManager::state_dir_for(root) {
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
 }
 
 fn shim_dir() -> PathBuf {
