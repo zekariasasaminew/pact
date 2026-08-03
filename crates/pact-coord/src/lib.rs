@@ -22,11 +22,12 @@ pub use persisted_conflicts::PersistedConflict;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::Value;
 
 /// One agent's pending (unread) message count, as of the moment
 /// `CoordStatus` was computed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentPending {
     pub agent_id: String,
     pub pending: i64,

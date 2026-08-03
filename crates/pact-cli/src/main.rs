@@ -160,6 +160,19 @@ enum Command {
     },
     /// List active agent workspaces
     List,
+    /// One-screen repo-wide view: detected agent CLIs, an aggregate
+    /// coordination snapshot (active leases/pending messages), open
+    /// persisted conflicts, and every active workspace's dirty/agent-
+    /// liveness/files-touched state -- what `list`/`coord-status`/
+    /// `resolve --list`/`doctor` would otherwise take four separate
+    /// commands to piece together. Read-only, computes nothing new (issue
+    /// #221).
+    Status {
+        /// Print the full snapshot as JSON instead of a human-readable
+        /// screen.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show what an agent has done in a workspace: committed changes on
     /// its branch (relative to where it forked from) and anything still
     /// only in its working tree.
@@ -709,6 +722,9 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Status { json } => {
+            run_status(&orchestrator, json)?;
+        }
         Command::Diff { id } => {
             let diff = orchestrator.diff(&id)?;
             println!("workspace {id}: committed on branch (vs. merge-base)");
@@ -1220,6 +1236,165 @@ fn print_coord_status(status: &pact_coord::CoordStatus) {
             println!("  {}: {} unread", agent.agent_id, agent.pending);
         }
     }
+}
+
+/// One workspace's row in `pact status` -- combines `Workspace`, dirty
+/// status, agent liveness, the `files_touched` annotation (issue #212),
+/// and this workspace's own coordination claims/pending messages. See
+/// DESIGN.md ("pact-cli > `pact status` (issue #221)").
+struct StatusWorkspaceRow {
+    workspace: pact_vcs::Workspace,
+    dirty: Option<bool>,
+    agent_alive: Option<bool>,
+    no_files_touched: bool,
+    pending_messages: i64,
+    held_claims: Vec<String>,
+}
+
+fn build_status_rows(orchestrator: &Orchestrator, coord: &pact_coord::CoordStatus) -> Result<Vec<StatusWorkspaceRow>> {
+    let workspaces = orchestrator.list()?;
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| {
+            let dirty = orchestrator.is_dirty(&workspace.id).ok();
+            let agent_alive = workspace.agent_pid.map(pact_core::agent_process_alive);
+            let no_files_touched = dirty == Some(false)
+                && orchestrator
+                    .run_metadata(&workspace.id)
+                    .is_some_and(|meta| meta.exit_success && !meta.files_touched);
+            let pending_messages = coord
+                .pending_messages
+                .iter()
+                .find(|p| p.agent_id == workspace.id)
+                .map(|p| p.pending)
+                .unwrap_or(0);
+            let held_claims =
+                coord.active_leases.iter().filter(|l| l.holder == workspace.id).map(|l| l.pattern.clone()).collect();
+            StatusWorkspaceRow { workspace, dirty, agent_alive, no_files_touched, pending_messages, held_claims }
+        })
+        .collect())
+}
+
+/// Pattern-matched "what next" hints over `pact status`'s own snapshot --
+/// static rules, no fuzzy logic, same shape as the existing error-message
+/// hint chain (issue #123).
+fn status_hints(rows: &[StatusWorkspaceRow], open_conflicts: &[pact_coord::PersistedConflict]) -> Vec<String> {
+    let mut hints = Vec::new();
+    let running = rows.iter().filter(|r| r.agent_alive == Some(true)).count();
+    let zero_files: Vec<&str> = rows.iter().filter(|r| r.no_files_touched).map(|r| r.workspace.id.as_str()).collect();
+
+    if running > 0 {
+        hints.push(format!("{running} workspace(s) still running -- wait, or `pact list` for details"));
+    }
+    if let Some(first) = zero_files.first() {
+        hints.push(format!("{} workspace(s) touched zero files -- inspect: pact inspect {first}", zero_files.len()));
+    }
+    if !open_conflicts.is_empty() {
+        hints.push(format!("{} open conflict(s) -- pact resolve --list", open_conflicts.len()));
+    }
+    if !rows.is_empty() && running == 0 && open_conflicts.is_empty() {
+        hints.push("all workspaces idle, no open conflicts -- consider `pact merge-all` when ready".to_string());
+    }
+    hints
+}
+
+/// `pact status` (issue #221) -- one screen aggregating `list`/
+/// `coord-status`/`resolve --list`/`doctor`'s data, computing nothing new.
+fn run_status(orchestrator: &Orchestrator, json: bool) -> Result<()> {
+    let coord = orchestrator.coord_status()?;
+    let open_conflicts = orchestrator.open_conflicts()?;
+    let rows = build_status_rows(orchestrator, &coord)?;
+    let hints = status_hints(&rows, &open_conflicts);
+    let agents: Vec<(&str, Option<String>)> =
+        AGENT_CHECKS.iter().map(|check| (check.label, doctor_check_version(check))).collect();
+
+    if json {
+        let workspaces_json: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id": row.workspace.id,
+                    "branch": row.workspace.branch,
+                    "path": row.workspace.path,
+                    "task": row.workspace.task,
+                    "dirty": row.dirty,
+                    "agent_pid": row.workspace.agent_pid,
+                    "agent_alive": row.agent_alive,
+                    "no_files_touched": row.no_files_touched,
+                    "pending_messages": row.pending_messages,
+                    "held_claims": row.held_claims,
+                    "run_metadata": orchestrator.run_metadata(&row.workspace.id),
+                })
+            })
+            .collect();
+        let report = serde_json::json!({
+            "agents_detected": agents.iter().map(|(name, version)| serde_json::json!({
+                "name": name, "found": version.is_some(), "version": version,
+            })).collect::<Vec<_>>(),
+            "active_leases": coord.active_leases,
+            "pending_messages": coord.pending_messages,
+            "open_conflicts": open_conflicts,
+            "workspaces": workspaces_json,
+            "hints": hints,
+        });
+        println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("error serializing result: {e}")));
+        return Ok(());
+    }
+
+    println!("agents detected:");
+    for (name, version) in &agents {
+        match version {
+            Some(v) => println!("  {name}: {v}"),
+            None => println!("  {name}: not found"),
+        }
+    }
+
+    println!();
+    println!(
+        "coordination: {} active lease(s), {} pending message(s) across {} agent(s)",
+        coord.active_leases.len(),
+        coord.pending_messages.iter().map(|p| p.pending).sum::<i64>(),
+        coord.pending_messages.iter().filter(|p| p.pending > 0).count()
+    );
+    println!("open conflicts: {}", open_conflicts.len());
+
+    println!();
+    if rows.is_empty() {
+        println!("no active workspaces");
+    } else {
+        println!("workspaces ({} active):", rows.len());
+        for row in &rows {
+            let dirty_label = match row.dirty {
+                Some(true) => "dirty",
+                Some(false) => "clean",
+                None => "unknown",
+            };
+            let suffix = if row.no_files_touched { ", no files touched" } else { "" };
+            let agent_label = match row.agent_alive {
+                Some(true) => "running",
+                Some(false) => "not running",
+                None => "no agent recorded",
+            };
+            print!("  {}  [{dirty_label}{suffix}]  {agent_label}", row.workspace.id);
+            if row.pending_messages > 0 {
+                print!("  {} unread", row.pending_messages);
+            }
+            if !row.held_claims.is_empty() {
+                print!("  claims: {}", row.held_claims.join(", "));
+            }
+            println!();
+        }
+    }
+
+    if !hints.is_empty() {
+        println!();
+        println!("what next:");
+        for hint in &hints {
+            println!("  {hint}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Implements every `pact store` verb (issue #160) -- see DESIGN.md
