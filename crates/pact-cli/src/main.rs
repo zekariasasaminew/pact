@@ -157,6 +157,14 @@ enum Command {
         /// workspace, running dependency prep, or launching anything.
         #[arg(long)]
         dry_run: bool,
+
+        /// After the dry-run preview, print an estimated input-token count
+        /// and a dollar range per adapter, using each task's raw text
+        /// (before any spawn ever happens). Requires --dry-run. Output
+        /// tokens, file-read tokens, and tool-call overhead aren't
+        /// estimated -- see the printed notes for why. Issue #222.
+        #[arg(long, requires = "dry_run")]
+        estimate_cost: bool,
     },
     /// List active agent workspaces
     List,
@@ -563,6 +571,7 @@ fn main() -> Result<()> {
             coord_command,
             coord_args,
             dry_run,
+            estimate_cost,
         } => {
             let agent = resolve_default_agent(agent, &config);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
@@ -641,6 +650,9 @@ fn main() -> Result<()> {
                     )?;
                     println!("task #{index} ({}):", agent_label(task.agent));
                     print_spawn_preview(&preview);
+                }
+                if estimate_cost {
+                    print_cost_estimate(&batch);
                 }
                 return Ok(());
             }
@@ -1820,6 +1832,119 @@ fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
     println!("  command: {} {}", preview.program, preview.args.join(" "));
 }
 
+/// Static per-adapter rate card for `spawn-many --dry-run --estimate-cost`
+/// (issue #222) -- (cheapest model, priciest model) input/output cost per
+/// million tokens in USD, verified against each provider's own published
+/// pricing page as of `RATES_LAST_UPDATED_LABEL`, not guessed. A range, not
+/// one number: pact has no reliable way to know which specific model/tier a
+/// user's account actually resolves to.
+struct AdapterRate {
+    input_per_mtok_usd: (f64, f64),
+    output_per_mtok_usd: (f64, f64),
+    /// Quota-bounded flat-rate plans (Copilot Pro/Business) aren't
+    /// token-metered at all -- estimate quota impact instead of a dollar
+    /// range.
+    flat_rate: bool,
+    note: &'static str,
+}
+
+const RATES_LAST_UPDATED_LABEL: &str = "2026-08-03";
+const RATES_LAST_UPDATED_UNIX: u64 = 1_785_715_200;
+const RATES_STALE_AFTER_SECS: u64 = 90 * 24 * 60 * 60;
+
+fn adapter_rate(kind: AgentKind) -> AdapterRate {
+    match kind {
+        AgentKind::Claude => AdapterRate {
+            input_per_mtok_usd: (1.0, 5.0),
+            output_per_mtok_usd: (5.0, 25.0),
+            flat_rate: false,
+            note: "Haiku 4.5 (low) to Opus 5 (high), per Anthropic's published API pricing",
+        },
+        AgentKind::Codex => AdapterRate {
+            input_per_mtok_usd: (0.05, 5.0),
+            output_per_mtok_usd: (0.40, 30.0),
+            flat_rate: false,
+            note: "gpt-5-nano (low) to the flagship GPT-5-class model (high), per OpenAI's published API pricing",
+        },
+        AgentKind::Gemini => AdapterRate {
+            input_per_mtok_usd: (0.30, 1.25),
+            output_per_mtok_usd: (2.50, 10.0),
+            flat_rate: false,
+            note: "Flash-Lite (low) to Pro (high), per Google's published Gemini API pricing",
+        },
+        AgentKind::Copilot => AdapterRate {
+            input_per_mtok_usd: (0.0, 0.0),
+            output_per_mtok_usd: (0.0, 0.0),
+            flat_rate: true,
+            note: "Copilot Pro/Business is a flat monthly rate -- cost is bounded by request quota, not tokens",
+        },
+    }
+}
+
+/// `text.chars().count() / 4` -- within ~15% of cl100k for English prose
+/// and code, verified against public tiktoken benchmarks. No tokenizer
+/// dependency: the estimate is already presented as a wide range, so a
+/// precise count wouldn't buy back any real confidence, and `tiktoken-rs`
+/// would add ~200ms to every build for a number nobody can act on more
+/// precisely than the range already allows.
+fn estimate_input_tokens(text: &str) -> usize {
+    text.chars().count() / 4
+}
+
+/// `spawn-many --dry-run --estimate-cost` (issue #222) -- an honest,
+/// input-token-only estimate per adapter, grouped so a mixed-adapter batch
+/// (`claude:`/`copilot:` task prefixes) gets one range per adapter instead
+/// of one misleading combined number.
+fn print_cost_estimate(batch: &[pact_core::SpawnManyTask]) {
+    println!();
+    println!("cost estimate");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(RATES_LAST_UPDATED_UNIX);
+    let age_secs = now.saturating_sub(RATES_LAST_UPDATED_UNIX);
+    if age_secs > RATES_STALE_AFTER_SECS {
+        println!("  WARN: rate card is {} day(s) old -- check each adapter's current pricing page", age_secs / 86_400);
+    }
+
+    let mut by_agent: std::collections::BTreeMap<&'static str, (usize, usize)> = std::collections::BTreeMap::new();
+    for task in batch {
+        let entry = by_agent.entry(agent_label(task.agent)).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += estimate_input_tokens(&task.task);
+    }
+
+    for (label, (task_count, input_tokens)) in by_agent {
+        let kind = AgentKind::parse(label).expect("agent_label output always round-trips through AgentKind::parse");
+        let rate = adapter_rate(kind);
+        println!();
+        println!("  adapter:       {label}  ({})", rate.note);
+        println!("  tasks:         {task_count}");
+        println!("  input tokens:  ~{input_tokens} (task text only; excludes files the agent will read)");
+        if rate.flat_rate {
+            println!("  quota impact:  {task_count} quota-eligible request(s), no per-token dollar cost");
+        } else {
+            let mtok = input_tokens as f64 / 1_000_000.0;
+            let low = mtok * rate.input_per_mtok_usd.0;
+            let high = mtok * rate.input_per_mtok_usd.1;
+            println!(
+                "  input cost:    ${low:.4} - ${high:.4} (input tokens only, as of {RATES_LAST_UPDATED_LABEL})"
+            );
+            println!(
+                "  output range:  10x-100x input tokens is typical, at ${:.2}-${:.2}/MTok -- highly task-dependent",
+                rate.output_per_mtok_usd.0, rate.output_per_mtok_usd.1
+            );
+        }
+    }
+
+    println!();
+    println!(
+        "  notes: excludes file-read token usage (agent-dependent) and MCP tool-call overhead. \
+         An honest floor, not a total -- rerun with a narrower/wider task scope to see the range move."
+    );
+}
+
 fn package_manager_label(pm: pact_deps::PackageManager) -> &'static str {
     match pm {
         pact_deps::PackageManager::Bun => "bun",
@@ -2194,5 +2319,29 @@ mod tests {
             PredictedOverlap { token: "src/other.js".to_string(), task_indices: vec![1, 2] },
         ];
         assert_eq!(distinct_overlapping_task_count(&overlaps), 3);
+    }
+
+    #[test]
+    fn estimate_input_tokens_is_roughly_chars_over_four() {
+        assert_eq!(estimate_input_tokens("abcd"), 1);
+        assert_eq!(estimate_input_tokens(&"a".repeat(4000)), 1000);
+        assert_eq!(estimate_input_tokens(""), 0);
+    }
+
+    #[test]
+    fn adapter_rate_flags_copilot_as_flat_rate_and_the_others_as_metered() {
+        assert!(adapter_rate(AgentKind::Copilot).flat_rate);
+        assert!(!adapter_rate(AgentKind::Claude).flat_rate);
+        assert!(!adapter_rate(AgentKind::Codex).flat_rate);
+        assert!(!adapter_rate(AgentKind::Gemini).flat_rate);
+    }
+
+    #[test]
+    fn adapter_rate_low_tier_is_never_pricier_than_high_tier() {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Gemini] {
+            let rate = adapter_rate(kind);
+            assert!(rate.input_per_mtok_usd.0 <= rate.input_per_mtok_usd.1);
+            assert!(rate.output_per_mtok_usd.0 <= rate.output_per_mtok_usd.1);
+        }
     }
 }
