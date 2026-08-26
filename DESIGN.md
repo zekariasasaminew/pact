@@ -405,6 +405,67 @@ cut -- `<cmd>` can already be an arbitrarily cheap command (`cargo check`
 instead of `cargo test`) if a caller wants that tradeoff, so a separate
 tier wasn't necessary to build.
 
+### Gate diagnosability, and the environment-vs-code distinction (issue #232)
+
+A real production run found `--require-passing-tests` reporting "merged
+cleanly but failed the required test command" for every workspace in a
+batch, in 27 seconds for a suite that normally takes 155s and passes.
+Root cause: the integration worktree the gate runs in has no dependencies
+installed (no `pact_deps::prepare()` call anywhere in that path -- issue
+#233 covers actually fixing that, coupled to this one), so the command
+couldn't run at all -- and `run_shell` returned a bare `Result<bool>`
+that collapsed "your code failed the gate" and "the environment couldn't
+even run the command" into the identical false signal, while also
+capturing and then discarding the one thing (stdout/stderr) that would
+have told a real user the truth in seconds.
+
+Two changes, deliberately independent of actually fixing #233's
+dependency-availability problem:
+
+**Pre-flight, before merging anything.** `merge_all` now runs the gate
+command once against the freshly-created integration worktree at the
+unmodified base commit (`head`, before any workspace's branch is
+touched), before entering the per-workspace merge loop. If it fails
+*there*, no workspace's changes are on trial -- the whole `merge_all`
+call aborts (`bail!`, integration worktree and scaffolding branch cleaned
+up first) with a diagnosis explaining the environment, not any code
+change, is the problem, and that no workspaces were merged. This is
+cheap, general, and language-agnostic: it doesn't know or care *why* the
+environment is broken (missing deps, wrong working directory, whatever),
+it just refuses to blame workspace code for a command that was never
+going to pass regardless of what any workspace did.
+
+**`run_shell` returns `GateOutcome`, not `Result<bool>`.** Carries
+`success`, `exit_code`, `duration`, and `output_tail` (last 20 lines of
+combined stdout+stderr -- deliberately combined rather than
+stderr-only, since most real test runners write failure detail to
+stdout). Both the pre-flight check and the existing per-workspace gate
+use `GateOutcome::diagnosis()` to put this in the abort message /
+`SkippedWorkspace.reason` respectively, instead of silently discarding
+the one artifact that explains the failure.
+
+**Test fixtures fixed alongside this, per issue #11's own critique:** the
+existing `require_passing_tests` tests used `always_fail_cmd()`
+(`exit 1`/`false`) to represent "your code broke the gate" -- but an
+unconditionally-failing command is now, correctly, indistinguishable
+from a broken environment (both fail on the unmodified base), so it
+would trip the new pre-flight abort instead of the per-workspace skip
+path the tests expected. Replaced with a content-based gate (fails only
+once a specific file the workspace under test introduces actually
+exists -- passes cleanly on the untouched base) that can genuinely tell
+the two cases apart, matching what a real gate command does. `PidLock`'s
+same pattern from issue #71: a fixture shaped to make the test pass isn't
+the same as a fixture shaped to catch the real bug.
+
+Deliberately not done in this pass: actually running `pact_deps::prepare`
+(or a hardlinked/shared equivalent) on the integration worktree before
+the gate, which would make `--require-passing-tests` genuinely usable
+for a dependency-needing project rather than just correctly diagnosing
+why it can't run yet. That's issue #233's shared-content-store fix --
+wiring dependency prep into `merge_all` before #233 lands risks
+reintroducing #233's own lock-contention stall directly into the merge
+path. Sequenced as its own follow-up once #233 ships.
+
 ### Semantic auto-resolution
 
 `merge_branch_into` tries a plain `git merge` first. On a real conflict, it

@@ -48,12 +48,49 @@ fn merge_all_exits_2_when_require_passing_tests_rejects_a_clean_merge() {
     let a = manager.create_workspace("add b.txt").unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
-    let fail_cmd = if cfg!(windows) { "exit 1" } else { "false" };
+    // Passes on the unmodified base (b.txt doesn't exist yet), fails once
+    // a's merge lands it -- a real content-caused gate failure, not an
+    // environment problem (see the preflight test below for that case).
+    let fail_cmd = if cfg!(windows) { "if exist b.txt (exit 1) else (exit 0)" } else { "! [ -f b.txt ]" };
     let output = run_pact(&repo, &["merge-all", "--require-passing-tests", fail_cmd]);
 
     assert_eq!(output.status.code(), Some(2), "expected exit 2, a rejected-but-clean merge is a skip, not a hard failure");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("failed the required test command"), "expected the test-gate reason in output, got: {stdout}");
+
+    cleanup(&repo);
+}
+
+/// Regression test for issue #232: a gate command that can't even pass on
+/// the unmodified base commit (simulating a missing-dependencies
+/// environment) must abort with exit 1 and a clear diagnosis on stderr --
+/// a fundamentally different, harder failure than "your code failed the
+/// gate" (exit 2, tested above).
+#[test]
+fn merge_all_exits_1_and_diagnoses_the_environment_when_the_gate_fails_on_base() {
+    let repo = init_repo("broken-environment");
+    let manager = WorkspaceManager::open(&repo).unwrap();
+    let a = manager.create_workspace("add b.txt").unwrap();
+    std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
+
+    // Never committed anywhere -- absent from every worktree, including
+    // the base commit, the same shape as a real "node_modules missing"
+    // environment problem.
+    let requires_missing_marker =
+        if cfg!(windows) { "if exist setup_marker.txt (exit 0) else (exit 1)" } else { "test -f setup_marker.txt" };
+    let output = run_pact(&repo, &["merge-all", "--require-passing-tests", requires_missing_marker]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected exit 1, a broken environment is a hard failure, not a per-workspace skip -- \
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unmodified base commit"), "expected an environment diagnosis on stderr, got: {stderr}");
+    assert!(stderr.contains("No workspaces were merged"), "got: {stderr}");
 
     cleanup(&repo);
 }
