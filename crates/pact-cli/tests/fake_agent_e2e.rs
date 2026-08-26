@@ -499,6 +499,38 @@ fn spawn_through_real_dependency_prep_then_list_does_not_crash() {
     cleanup(&shim);
 }
 
+/// Contrast case for the test above, and issue #233's other half: a task
+/// that doesn't touch dependencies at all shouldn't pay dependency prep's
+/// cost. `--no-deps` must skip prep entirely -- no `-deps.json` sidecar at
+/// all (not an empty one; "never attempted" is a different fact than "ran
+/// and found nothing to do"), and `list` must still work normally.
+#[test]
+fn spawn_with_no_deps_skips_dependency_prep_entirely() {
+    let repo = init_repo("no-deps-flag");
+    std::fs::write(repo.join("package.json"), "{\"name\":\"scratch\",\"version\":\"1.0.0\"}").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add package.json"]);
+    let shim = shim_dir();
+
+    let task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let spawn = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--no-deps"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+
+    let deps_dir = state_dir_for(&repo).join("meta");
+    let has_deps_sidecar = std::fs::read_dir(&deps_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with("-deps.json")))
+        .unwrap_or(false);
+    assert!(!has_deps_sidecar, "expected --no-deps to skip dependency prep entirely, found a -deps.json sidecar anyway");
+
+    let id = workspace_id_from_spawn_output(&spawn);
+    let list = pact(&repo, &shim, &["list"]);
+    assert!(list.status.success(), "stdout: {}\nstderr: {}", stdout(&list), String::from_utf8_lossy(&list.stderr));
+    assert!(stdout(&list).contains(&id), "expected the workspace to still appear in `list`, got: {}", stdout(&list));
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {

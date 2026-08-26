@@ -157,8 +157,12 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
         Ok(entry) => entry,
         Err(err) => {
             let note = format!(
-                "populating the shared npm store failed for key '{key}', falling back to a \
-                 normal (unshared) install for this workspace: {err:#}"
+                "shared npm store population failed for key '{key}' -- this is a last-resort \
+                 fallback, not expected in normal operation (the lock wait is now patient enough \
+                 that a real npm ci should always be reused rather than timed out on, issue #233), \
+                 so this likely means something is genuinely wrong (a hung npm process, disk \
+                 issue, etc.), not just contention. Falling back to a normal (unshared) install \
+                 for this workspace: {err:#}"
             );
             tracing::warn!("{note}");
             let mut warnings = vec![note];

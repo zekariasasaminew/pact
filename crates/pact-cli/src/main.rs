@@ -109,6 +109,15 @@ enum Command {
         /// anything.
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip dependency prep entirely for this task -- no package
+        /// manager detection, no shared content-store lookup, no install.
+        /// For tasks that don't need dependencies at all (e.g. editing a
+        /// version string in a manifest file) -- issue #233: prep used to
+        /// run unconditionally even when a task explicitly said not to
+        /// touch dependencies, paying its full cost for nothing.
+        #[arg(long)]
+        no_deps: bool,
     },
     /// Create N isolated agent workspaces and run N agent CLIs in them
     /// concurrently, streaming their combined output live with each line
@@ -167,6 +176,14 @@ enum Command {
         /// estimated -- see the printed notes for why. Issue #222.
         #[arg(long, requires = "dry_run")]
         estimate_cost: bool,
+
+        /// Same as `spawn --no-deps`, applied to every task in this
+        /// batch -- skips dependency prep entirely, for a batch whose
+        /// tasks don't touch dependencies at all. Issue #233: a batch of
+        /// pure manifest-text-edit tasks used to pay full dependency-prep
+        /// cost (content-store contention included) for zero benefit.
+        #[arg(long)]
+        no_deps: bool,
     },
     /// List active agent workspaces
     List,
@@ -516,6 +533,7 @@ fn main() -> Result<()> {
             coord_command,
             coord_args,
             dry_run,
+            no_deps,
         } => {
             let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
@@ -550,13 +568,13 @@ fn main() -> Result<()> {
                 ),
             }
 
-            let (workspace, outcome) = orchestrator.spawn(
-                kind,
-                &task,
-                safety.as_deref(),
-                coord_override.as_ref(),
-                |event| print_event(event, verbose),
-            )?;
+            let spawn_options = pact_core::SpawnOptions {
+                safety_override: safety.as_deref(),
+                coord_override: coord_override.as_ref(),
+                no_deps,
+            };
+            let (workspace, outcome) =
+                orchestrator.spawn(kind, &task, &spawn_options, |event| print_event(event, verbose))?;
 
             println!("workspace {} ({})", workspace.id, workspace.branch);
             println!("  path: {}", workspace.path.display());
@@ -574,6 +592,7 @@ fn main() -> Result<()> {
             coord_args,
             dry_run,
             estimate_cost,
+            no_deps,
         } => {
             let agent = resolve_default_agent(agent, &config);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
@@ -660,14 +679,14 @@ fn main() -> Result<()> {
             }
 
             let requested = batch.len();
-            let results = orchestrator.spawn_many(
-                batch,
-                safety.as_deref(),
-                coord_override.as_ref(),
-                |index, agent, event| {
-                    print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
-                },
-            );
+            let spawn_options = pact_core::SpawnOptions {
+                safety_override: safety.as_deref(),
+                coord_override: coord_override.as_ref(),
+                no_deps,
+            };
+            let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
+                print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
+            });
 
             let report = SpawnManyReport::new(requested, results);
             for outcome in &report.outcomes {

@@ -5,7 +5,19 @@ use pact_vcs::PidLock;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-const POPULATE_LOCK_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a waiter blocks for `populate_if_absent`'s per-key lock before
+/// giving up and falling back to its own unshared install -- see DESIGN.md
+/// ("pact-deps > Content store lock timeout, issue #233"). Deliberately
+/// generous, for the same reason issue #230 widened `pact-vcs`'s
+/// `LOCK_TIMEOUT`: the old 600s value was shorter than a real cold-cache
+/// `npm ci` on a large dependency tree, so N-1 waiters didn't wait their
+/// turn to reuse the winner's work -- they all timed out and ran their
+/// own full install anyway, making the store strictly worse than having
+/// no cache at all (dead waiting *plus* N redundant installs, instead of
+/// N installs starting immediately). `PidLock`'s stale-lock stealing
+/// already covers a populator that crashed; this timeout only needs to
+/// guard one that's alive but genuinely stuck.
+const POPULATE_LOCK_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// What one store entry actually is, for `pact store list`/`verify`/
 /// `clean` (issue #160) -- see DESIGN.md ("pact-deps > npm store
@@ -320,6 +332,50 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn populate_if_absent_reuses_a_slow_populate_instead_of_duplicating_it() {
+        // Regression test for issue #233: with the old 600s timeout, a
+        // waiter whose patience ran out before the winner's real `npm ci`
+        // finished would give up and run its own full install -- worse
+        // than no cache at all. This proves the fixed behavior directly at
+        // the lock level (no real npm involved): a waiter with a patient
+        // timeout must block until the winner's populate closure finishes,
+        // then reuse its result, never invoking its own populate closure.
+        let store = std::sync::Arc::new(scratch_store("reuse-slow-populate"));
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        const POPULATE_DELAY: Duration = Duration::from_millis(300);
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let store = std::sync::Arc::clone(&store);
+                let call_count = std::sync::Arc::clone(&call_count);
+                std::thread::spawn(move || {
+                    store
+                        .populate_if_absent("shared-key", |tmp| {
+                            call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(POPULATE_DELAY);
+                            std::fs::write(tmp.join("node_modules_marker"), "populated")?;
+                            Ok(())
+                        })
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the populate closure must run exactly once across all 4 concurrent callers -- \
+             every other caller must wait and reuse, not duplicate the work"
+        );
+
+        let _ = std::fs::remove_dir_all(store.root());
     }
 
     #[test]

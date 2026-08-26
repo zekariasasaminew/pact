@@ -106,6 +106,20 @@ pub struct CoordServerOverride {
     pub args: Vec<String>,
 }
 
+/// Per-invocation options shared by `spawn`/`spawn_many`, bundled into one
+/// struct rather than 3+ positional parameters on those functions (clippy's
+/// `too_many_arguments`, and every call site was already passing these as
+/// one logical group).
+#[derive(Default)]
+pub struct SpawnOptions<'a> {
+    pub safety_override: Option<&'a str>,
+    pub coord_override: Option<&'a CoordServerOverride>,
+    /// Skip dependency prep entirely -- issue #233: a task that never
+    /// touches dependencies shouldn't pay prep's full cost, content-store
+    /// contention included, for zero benefit.
+    pub no_deps: bool,
+}
+
 /// The outcome of one task within a `spawn_many` batch. `result` is `Err`
 /// if workspace creation, dependency prep wiring, or the agent process
 /// itself failed outright (including a panic inside that task's thread,
@@ -324,19 +338,11 @@ impl Orchestrator {
         &self,
         agent: AgentKind,
         task: &str,
-        safety_override: Option<&str>,
-        coord_override: Option<&CoordServerOverride>,
+        options: &SpawnOptions<'_>,
         on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let supervisor = Supervisor::new();
-        self.spawn_with_supervisor(
-            &supervisor,
-            agent,
-            task,
-            safety_override,
-            coord_override,
-            on_event,
-        )
+        self.spawn_with_supervisor(&supervisor, agent, task, options, on_event)
     }
 
     /// Runs every `(agent, task)` pair in `tasks` concurrently, one
@@ -350,8 +356,7 @@ impl Orchestrator {
     pub fn spawn_many(
         &self,
         tasks: Vec<SpawnManyTask>,
-        safety_override: Option<&str>,
-        coord_override: Option<&CoordServerOverride>,
+        options: &SpawnOptions<'_>,
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Vec<SpawnManyOutcome> {
         let supervisor = Supervisor::new();
@@ -371,8 +376,7 @@ impl Orchestrator {
                             supervisor,
                             spec.agent,
                             &spec.task,
-                            safety_override,
-                            coord_override,
+                            options,
                             |event| on_event(index, &spec.agent, event),
                         )
                     });
@@ -462,8 +466,7 @@ impl Orchestrator {
         supervisor: &Supervisor,
         agent: AgentKind,
         task: &str,
-        safety_override: Option<&str>,
-        coord_override: Option<&CoordServerOverride>,
+        options: &SpawnOptions<'_>,
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let workspace = self.workspaces.create_workspace(task)?;
@@ -474,24 +477,33 @@ impl Orchestrator {
         // without the head start. Persisted alongside the workspace's own
         // metadata (issue #12) so "what actually happened during prep" is
         // queryable later, not just a log line at spawn time.
-        let dep_reports = pact_deps::prepare(&workspace.path);
-        for report in &dep_reports {
-            if !report.success {
-                tracing::warn!(
-                    "dependency prepare step for {} failed in workspace {}: {:?}",
-                    report.manager,
-                    workspace.id,
-                    report.warnings
-                );
+        //
+        // Skipped entirely under --no-deps (issue #233): a task that
+        // doesn't touch dependencies at all shouldn't pay prep's full
+        // cost, content-store contention included, for zero benefit. No
+        // -deps.json sidecar is written either -- "prep was never
+        // attempted" is a different fact than "prep ran and found nothing
+        // to do", and the sidecar's absence says so honestly.
+        if !options.no_deps {
+            let dep_reports = pact_deps::prepare(&workspace.path);
+            for report in &dep_reports {
+                if !report.success {
+                    tracing::warn!(
+                        "dependency prepare step for {} failed in workspace {}: {:?}",
+                        report.manager,
+                        workspace.id,
+                        report.warnings
+                    );
+                }
             }
-        }
-        let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
-        if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
-            tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
+            let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
+            if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
+                tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
+            }
         }
 
         let coord_name = adapter.coord_server_name();
-        let coord = match self.coord_config(&workspace, coord_name, coord_override) {
+        let coord = match self.coord_config(&workspace, coord_name, options.coord_override) {
             Ok(c) => Some(c),
             Err(err) => {
                 tracing::warn!(
@@ -503,7 +515,7 @@ impl Orchestrator {
             }
         };
 
-        let safety = pact_agents::resolve_safety_profile(agent, safety_override);
+        let safety = pact_agents::resolve_safety_profile(agent, options.safety_override);
         let (program, args) =
             adapter.build_command(task, safety.as_deref(), coord.as_ref(), &workspace.path);
         let log_path = self
