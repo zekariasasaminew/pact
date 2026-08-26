@@ -331,6 +331,38 @@ fn merge_all_dry_run_sequences_a_central_file_touch_after_a_larger_plain_changes
     cleanup(&root);
 }
 
+/// Regression test for issue #236: two workspaces sharing an edited file
+/// with each other must be sequenced *after* an isolated workspace whose
+/// changes touch nothing anyone else does, even though a plain
+/// changed-file-count comparison alone wouldn't distinguish them.
+#[test]
+fn merge_all_dry_run_sequences_an_isolated_workspace_before_ones_sharing_a_file() {
+    let root = init_repo();
+    let manager = WorkspaceManager::open(&root).unwrap();
+
+    let isolated = manager.create_workspace("touch only my own file", None).unwrap();
+    std::fs::write(isolated.path.join("only_mine.ts"), "export const MINE = 1;\n").unwrap();
+
+    let shares_a = manager.create_workspace("edit shared.ts (a)", None).unwrap();
+    std::fs::write(shares_a.path.join("shared.ts"), "export const A = 1;\n").unwrap();
+
+    let shares_b = manager.create_workspace("edit shared.ts (b)", None).unwrap();
+    std::fs::write(shares_b.path.join("shared.ts"), "export const B = 1;\n").unwrap();
+
+    let report = manager.merge_all(None, None, &[], None, None, true).unwrap();
+    assert!(report.dry_run);
+    assert_eq!(report.planned.len(), 3);
+    assert_eq!(report.planned[0].id, isolated.id, "the isolated workspace must be sequenced first");
+    let shares_ids: std::collections::HashSet<&str> = [report.planned[1].id.as_str(), report.planned[2].id.as_str()].into();
+    assert!(shares_ids.contains(shares_a.id.as_str()) && shares_ids.contains(shares_b.id.as_str()));
+    assert!(
+        report.planned[1].risk_score > report.planned[0].risk_score,
+        "expected a workspace sharing a file with another to outrank the isolated one"
+    );
+
+    cleanup(&root);
+}
+
 #[test]
 fn merge_all_skips_workspace_whose_base_is_no_longer_an_ancestor() {
     let repo = init_repo();
