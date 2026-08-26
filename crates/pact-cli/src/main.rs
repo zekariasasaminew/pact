@@ -754,6 +754,18 @@ fn main() -> Result<()> {
                             if run.success { "done" } else { "failed" },
                             run.summary
                         );
+                        // Issue #241: an end-of-run summary must actually
+                        // say what happened, not just "done" -- how long
+                        // each workspace took and whether dependency prep
+                        // hit the shared cache, both already recorded via
+                        // RunMetadata/ManagerPrepReport but never
+                        // surfaced here before.
+                        if let Some(meta) = orchestrator.run_metadata(&workspace.id) {
+                            println!("  duration: {}s", meta.ended_at.saturating_sub(meta.started_at));
+                        }
+                        if let Some(reports) = orchestrator.dependency_prep_report(&workspace.id) {
+                            println!("  dependencies: {}", dependency_summary_line(&reports));
+                        }
                     }
                     Err(err) => {
                         println!(
@@ -2002,6 +2014,32 @@ fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
     println!("  command: {} {}", preview.program, preview.args.join(" "));
 }
 
+/// One-line dependency-prep summary for the spawn-many end-of-run
+/// listing (issue #241) -- e.g. "npm: shared cache hit", or "npm: had
+/// issues (see pact inspect)" for a manager that failed. Multiple
+/// managers (a repo with both npm and cargo, say) join with "; ".
+fn dependency_summary_line(reports: &[pact_deps::ManagerPrepReport]) -> String {
+    if reports.is_empty() {
+        return "none detected".to_string();
+    }
+    reports
+        .iter()
+        .map(|r| {
+            let detail = if !r.success {
+                "had issues (see pact inspect)".to_string()
+            } else {
+                match r.store_hit {
+                    Some(true) => "shared cache hit".to_string(),
+                    Some(false) => "installed, cached for next time".to_string(),
+                    None => "ready".to_string(),
+                }
+            };
+            format!("{}: {detail}", r.manager)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Static per-adapter rate card for `spawn-many --dry-run --estimate-cost`
 /// (issue #222) -- (cheapest model, priciest model) input/output cost per
 /// million tokens in USD, verified against each provider's own published
@@ -2227,6 +2265,11 @@ fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
             println!("[{label}] [other] {value}")
         }
         AgentEvent::Other(_) => {}
+        // Always printed, not gated behind should_print_other/verbose --
+        // issue #241: the whole point is a visible heartbeat during a
+        // long silent phase (e.g. dependency prep), so it can't be part
+        // of the same default-suppressed noise list as adapter chatter.
+        AgentEvent::Phase(text) => println!("[{label}] [phase] {text}"),
     }
 }
 
@@ -2243,6 +2286,7 @@ fn print_event(event: &AgentEvent, verbose: bool) {
         AgentEvent::Result { .. } => {} // surfaced by the caller as the final outcome instead
         AgentEvent::Other(value) if should_print_other(value, verbose) => println!("[other] {value}"),
         AgentEvent::Other(_) => {}
+        AgentEvent::Phase(text) => println!("[phase] {text}"),
     }
 }
 
@@ -2300,6 +2344,41 @@ fn unexpected_repo_root_warning(root: &Path, home: Option<&Path>, levels_up: u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_prep_report(manager: &str, success: bool, store_hit: Option<bool>) -> pact_deps::ManagerPrepReport {
+        pact_deps::ManagerPrepReport {
+            manager: manager.to_string(),
+            strategy: "content-store".to_string(),
+            store_key: None,
+            store_hit,
+            materialization: None,
+            success,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dependency_summary_line_reports_none_detected_for_an_empty_report() {
+        assert_eq!(dependency_summary_line(&[]), "none detected");
+    }
+
+    #[test]
+    fn dependency_summary_line_reports_a_cache_hit_by_manager_name() {
+        let reports = vec![fake_prep_report("npm", true, Some(true))];
+        assert_eq!(dependency_summary_line(&reports), "npm: shared cache hit");
+    }
+
+    #[test]
+    fn dependency_summary_line_joins_multiple_managers() {
+        let reports = vec![fake_prep_report("npm", true, Some(false)), fake_prep_report("cargo", true, None)];
+        assert_eq!(dependency_summary_line(&reports), "npm: installed, cached for next time; cargo: ready");
+    }
+
+    #[test]
+    fn dependency_summary_line_reports_a_failed_manager() {
+        let reports = vec![fake_prep_report("npm", false, None)];
+        assert_eq!(dependency_summary_line(&reports), "npm: had issues (see pact inspect)");
+    }
 
     #[test]
     fn validate_workspace_name_accepts_a_normal_name() {
