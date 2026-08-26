@@ -42,7 +42,7 @@ fn cleanup(root: &Path) {
 fn list_reports_a_live_agent_pid_as_running() {
     let repo = init_repo("live");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let ws = manager.create_workspace("some task").unwrap();
+    let ws = manager.create_workspace("some task", None).unwrap();
     // This test process's own pid is guaranteed to be alive for the
     // duration of the test -- a real, if borrowed, live pid.
     manager.set_agent_pid(&ws.id, Some(std::process::id())).unwrap();
@@ -65,7 +65,7 @@ fn list_reports_a_live_agent_pid_as_running() {
 fn list_reports_a_dead_agent_pid_as_not_running() {
     let repo = init_repo("dead");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let ws = manager.create_workspace("some task").unwrap();
+    let ws = manager.create_workspace("some task", None).unwrap();
     manager.set_agent_pid(&ws.id, Some(u32::MAX)).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_pact"))
@@ -86,7 +86,7 @@ fn list_reports_a_dead_agent_pid_as_not_running() {
 fn list_omits_the_agent_pid_line_when_none_is_recorded() {
     let repo = init_repo("none");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    manager.create_workspace("some task").unwrap();
+    manager.create_workspace("some task", None).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_pact"))
         .args(["--repo", repo.to_str().unwrap(), "list"])

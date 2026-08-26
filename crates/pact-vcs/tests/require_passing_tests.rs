@@ -61,7 +61,7 @@ fn a_clean_merge_is_skipped_when_the_test_command_fails() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     let report = manager.merge_all(None, None, &[], None, Some(fails_if_b_txt_exists()), false).unwrap();
@@ -102,9 +102,9 @@ fn a_gate_that_fails_on_the_unmodified_base_aborts_instead_of_skipping_every_wor
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
-    let b = manager.create_workspace("add c.txt").unwrap();
+    let b = manager.create_workspace("add c.txt", None).unwrap();
     std::fs::write(b.path.join("c.txt"), "new file\n").unwrap();
 
     // Never created/committed anywhere -- present in ZERO worktrees,
@@ -135,7 +135,7 @@ fn a_clean_merge_is_accepted_when_the_test_command_passes() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     let report = manager.merge_all(None, None, &[], None, Some(always_pass_cmd()), false).unwrap();
@@ -152,9 +152,9 @@ fn a_failed_gate_does_not_block_a_later_workspace_in_the_same_batch() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
-    let b = manager.create_workspace("add c.txt").unwrap();
+    let b = manager.create_workspace("add c.txt", None).unwrap();
     std::fs::write(b.path.join("c.txt"), "new file\n").unwrap();
 
     // fails_if_b_txt_exists fails for a's merge (introduces b.txt), passes
@@ -175,7 +175,7 @@ fn require_passing_tests_is_a_no_op_when_omitted() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     let report = manager.merge_all(None, None, &[], None, None, false).unwrap();

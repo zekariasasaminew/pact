@@ -52,10 +52,10 @@ fn merge_all_exits_2_when_a_workspace_is_skipped_for_a_real_conflict() {
     // Both edit the same line of the same single-line-context file --
     // reliably conflicts under git's plain 3-way merge (confirmed by hand,
     // same lesson as pact-vcs's own merge_all.rs tests).
-    let a = manager.create_workspace("conflict a").unwrap();
+    let a = manager.create_workspace("conflict a", None).unwrap();
     std::fs::write(a.path.join("a.txt"), "line1\nchange-a\n").unwrap();
 
-    let b = manager.create_workspace("conflict b").unwrap();
+    let b = manager.create_workspace("conflict b", None).unwrap();
     std::fs::write(b.path.join("a.txt"), "line1\nchange-b\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_pact"))
@@ -81,7 +81,7 @@ fn merge_all_exits_0_when_everything_merges_cleanly() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_pact"))

@@ -54,7 +54,7 @@ fn history_records_a_merge_all_invocation_and_a_teardown() {
     let repo = init_repo("merge-and-teardown");
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     let merge_output = run_pact(&repo, &["merge-all"]);
@@ -89,7 +89,7 @@ fn history_records_a_merge_all_invocation_and_a_teardown() {
 fn history_json_output_is_valid_json() {
     let repo = init_repo("json-output");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    manager.create_workspace("noop").unwrap();
+    manager.create_workspace("noop", None).unwrap();
 
     run_pact(&repo, &["merge-all", "--dry-run"]);
 

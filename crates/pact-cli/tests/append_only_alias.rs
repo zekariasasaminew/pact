@@ -51,9 +51,9 @@ fn append_only_flag_resolves_a_real_barrel_export_conflict() {
     let repo = init_repo_with_barrel("primary-flag");
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("export chunk").unwrap();
+    let a = manager.create_workspace("export chunk", None).unwrap();
     std::fs::write(a.path.join("src/barrel.ts"), "export {};\nexport * from './chunk';\n").unwrap();
-    let b = manager.create_workspace("export omit").unwrap();
+    let b = manager.create_workspace("export omit", None).unwrap();
     std::fs::write(b.path.join("src/barrel.ts"), "export {};\nexport * from './omit';\n").unwrap();
 
     let output = run_merge_all(&repo, "--append-only");
@@ -79,9 +79,9 @@ fn union_alias_resolves_the_same_real_conflict_identically() {
     let repo = init_repo_with_barrel("alias-flag");
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("export chunk").unwrap();
+    let a = manager.create_workspace("export chunk", None).unwrap();
     std::fs::write(a.path.join("src/barrel.ts"), "export {};\nexport * from './chunk';\n").unwrap();
-    let b = manager.create_workspace("export omit").unwrap();
+    let b = manager.create_workspace("export omit", None).unwrap();
     std::fs::write(b.path.join("src/barrel.ts"), "export {};\nexport * from './omit';\n").unwrap();
 
     let output = run_merge_all(&repo, "--union");

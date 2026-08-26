@@ -60,7 +60,7 @@ fn n_concurrent_create_workspace_calls_produce_n_workspaces() {
             .iter()
             .map(|task| {
                 let manager = &manager;
-                scope.spawn(move || manager.create_workspace(task))
+                scope.spawn(move || manager.create_workspace(task, None))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
