@@ -559,6 +559,7 @@ impl Orchestrator {
         options: &SpawnOptions<'_>,
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
+        on_event(&AgentEvent::Phase("creating workspace".to_string()));
         let workspace = self.workspaces.create_workspace(task, name)?;
         let adapter = pact_agents::adapter(agent);
 
@@ -575,6 +576,7 @@ impl Orchestrator {
         // attempted" is a different fact than "prep ran and found nothing
         // to do", and the sidecar's absence says so honestly.
         if !options.no_deps {
+            on_event(&AgentEvent::Phase("preparing dependencies".to_string()));
             let dep_reports = pact_deps::prepare(&workspace.path);
             for report in &dep_reports {
                 if !report.success {
@@ -586,6 +588,7 @@ impl Orchestrator {
                     );
                 }
             }
+            on_event(&AgentEvent::Phase(dependency_phase_summary(&dep_reports)));
             let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
             if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
                 tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
@@ -627,6 +630,7 @@ impl Orchestrator {
         // on by the time the process actually exited matters here.
         let mut coord_last_status: Option<String> = None;
         let started_at = unix_now();
+        on_event(&AgentEvent::Phase("running agent".to_string()));
         let run_result = pact_agents::run_and_stream(
             supervisor,
             &program,
@@ -1069,6 +1073,24 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The `Phase` event text printed right after dependency prep finishes --
+/// issue #241: a real run's ~22-minute dependency-prep stall produced
+/// zero output the whole time. Summarizes what actually happened
+/// (cache hit/miss, or a fallback/failure) instead of just "done".
+fn dependency_phase_summary(reports: &[pact_deps::ManagerPrepReport]) -> String {
+    if reports.is_empty() {
+        return "no dependencies detected".to_string();
+    }
+    if reports.iter().any(|r| !r.success) {
+        return "dependency prep had issues, continuing without it -- see pact inspect".to_string();
+    }
+    match reports.iter().find_map(|r| r.store_hit) {
+        Some(true) => "dependencies ready (shared cache hit)".to_string(),
+        Some(false) => "dependencies ready (installed, cached for next time)".to_string(),
+        None => "dependencies ready".to_string(),
+    }
+}
+
 /// Builds one Arbiter attempt's `decision.json` value (issue #148) --
 /// pure and separate from `run_arbiter_inner` specifically so the field
 /// mapping is testable without spawning a real agent.
@@ -1457,6 +1479,47 @@ mod tests {
 
     fn task(agent: AgentKind, text: &str) -> SpawnManyTask {
         SpawnManyTask { agent, task: text.to_string(), name: None }
+    }
+
+    fn fake_prep_report(manager: &str, success: bool, store_hit: Option<bool>) -> pact_deps::ManagerPrepReport {
+        pact_deps::ManagerPrepReport {
+            manager: manager.to_string(),
+            strategy: "content-store".to_string(),
+            store_key: None,
+            store_hit,
+            materialization: None,
+            success,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dependency_phase_summary_reports_no_dependencies_for_an_empty_report() {
+        assert_eq!(dependency_phase_summary(&[]), "no dependencies detected");
+    }
+
+    #[test]
+    fn dependency_phase_summary_reports_a_cache_hit() {
+        let reports = vec![fake_prep_report("npm", true, Some(true))];
+        assert_eq!(dependency_phase_summary(&reports), "dependencies ready (shared cache hit)");
+    }
+
+    #[test]
+    fn dependency_phase_summary_reports_a_cache_miss() {
+        let reports = vec![fake_prep_report("npm", true, Some(false))];
+        assert_eq!(dependency_phase_summary(&reports), "dependencies ready (installed, cached for next time)");
+    }
+
+    #[test]
+    fn dependency_phase_summary_reports_a_passthrough_manager_with_no_store_concept() {
+        let reports = vec![fake_prep_report("cargo", true, None)];
+        assert_eq!(dependency_phase_summary(&reports), "dependencies ready");
+    }
+
+    #[test]
+    fn dependency_phase_summary_reports_issues_when_any_manager_failed() {
+        let reports = vec![fake_prep_report("npm", true, Some(true)), fake_prep_report("cargo", false, None)];
+        assert!(dependency_phase_summary(&reports).contains("had issues"));
     }
 
     fn fake_workspace(id: &str) -> Workspace {
