@@ -393,6 +393,39 @@ fn spawn_many_runs_two_fake_agents_concurrently() {
     cleanup(&shim);
 }
 
+/// Regression test for issue #241: a real spawn-many run produced zero
+/// output for ~22 minutes during dependency prep, indistinguishable from
+/// a hang, and printed no summary of what actually happened once it
+/// finished. Confirms both halves of the fix through the real binary:
+/// phase markers stream live for each task, and the end-of-run listing
+/// includes duration and a dependency-prep outcome, not just "done".
+#[test]
+fn spawn_many_streams_phase_markers_and_summarizes_duration_and_dependencies() {
+    let repo = init_repo("spawn-many-observability");
+    std::fs::write(repo.join("package.json"), "{\"name\":\"scratch\",\"version\":\"1.0.0\"}").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add package.json"]);
+    let shim = shim_dir();
+
+    let task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let output = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--task", &task]);
+    assert!(output.status.success(), "stdout: {}\nstderr: {}", stdout(&output), String::from_utf8_lossy(&output.stderr));
+
+    let text = stdout(&output);
+    assert!(text.contains("[phase] creating workspace"), "got:\n{text}");
+    assert!(text.contains("[phase] preparing dependencies"), "got:\n{text}");
+    assert!(text.contains("[phase] running agent"), "got:\n{text}");
+    assert!(
+        text.contains("dependencies ready") || text.contains("dependency prep had issues"),
+        "expected a dependency-prep phase outcome, got:\n{text}"
+    );
+    assert!(text.contains("duration:"), "expected a per-workspace duration line, got:\n{text}");
+    assert!(text.contains("dependencies:"), "expected a per-workspace dependency summary line, got:\n{text}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 /// Regression test for issue #231: nothing previously guaranteed a failed
 /// agent run was counted anywhere beyond its own per-task line, or forced
 /// `spawn-many`'s exit code to reflect it. Scripts one fake agent to report
