@@ -747,6 +747,32 @@ fn spawn_many_estimate_cost_splits_a_mixed_adapter_batch() {
     cleanup(&shim);
 }
 
+/// Regression test for issue #236: when every planned workspace ties on
+/// risk score (here, both edit the same single file, so each scores
+/// identically), `merge-all --dry-run` must say so explicitly instead of
+/// presenting the resulting creation-order listing as a real ranking.
+#[test]
+fn merge_all_dry_run_admits_when_every_workspace_ties_on_risk_score() {
+    let repo = init_repo("merge-dry-run-tied-risk");
+    let shim = shim_dir();
+
+    let task_a = script(&[("shared.txt", "A")], "edited shared.txt (A)");
+    let task_b = script(&[("shared.txt", "B")], "edited shared.txt (B)");
+    let spawn = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--task", &task_a, "--task", &task_b]);
+    assert!(spawn.status.success(), "spawn-many failed: {}", String::from_utf8_lossy(&spawn.stderr));
+
+    let merge = pact(&repo, &shim, &["merge-all", "--dry-run"]);
+    assert!(merge.status.success(), "stdout: {}\nstderr: {}", stdout(&merge), String::from_utf8_lossy(&merge.stderr));
+    let merge_text = stdout(&merge);
+    assert!(
+        merge_text.contains("every workspace scored equally"),
+        "expected the tied-score honesty note, got: {merge_text}"
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 fn status_json(repo: &Path, shim: &Path) -> serde_json::Value {
     let status = pact(repo, shim, &["status", "--json"]);
     assert!(
