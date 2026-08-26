@@ -2580,6 +2580,40 @@ are user-facing product documentation, not internal narrative, so they're
 intentionally kept verbose and are not subject to the comment-reduction
 pass the rest of the codebase got.
 
+### Doc/CLI grammar drift check (issue #238)
+
+A real user following `SKILL.md` -- the file written specifically for an
+agent to read and act on literally -- hit `pact diff --id <id>`
+rejected: the real grammar is positional (`pact diff <id>`). Worse than
+a typo: `merge-all`/`commit-all` genuinely *do* take `--id`, so the
+error read as a bug in pact, not a bug in the doc. `SKILL.md` had the
+same wrong shape for `resolve --id`/`teardown --id` too; `README.md` and
+`GETTING_STARTED.md` already had the correct positional form in both
+cases -- only `SKILL.md` had drifted.
+
+Fixed the three wrong lines, then built the structural fix the issue
+actually asked for: `crates/pact-cli/tests/docs_cli_grammar.rs` extracts
+every fenced `pact`/`./pact` command from all three docs (joining `\`-
+continued lines, handling double-quoted task text) and runs each against
+a real scratch repo, asserting it isn't rejected as a clap usage error
+(exit code 2 -- clap's own convention, distinct from `main`'s runtime
+errors, which exit 1). `spawn`/`spawn-many` examples get `--dry-run`
+force-appended if the doc example doesn't already have it, so a real
+agent is never launched just to check argument parsing. This makes the
+exact class of bug that caused this issue structurally hard to reintroduce
+without noticing -- not proofread by a CI check that runs `--help` once,
+but every real example, run for real, on every push.
+
+**This check caught a second, previously-undiscovered real bug on its
+first run**, not just the three known ones: `README.md`'s own
+`--coord-command /path/to/alt-coord --coord-arg --some-flag` example
+failed to parse -- `--coord-arg` had no `allow_hyphen_values`, so clap
+rejected any flag-shaped value (`--some-flag`) as an unrecognized flag of
+pact's own, even though `--coord-arg`'s whole purpose is forwarding
+arbitrary arguments to an alternative coordination command that may
+itself take flags. Fixed on both `spawn`/`spawn-many`'s `coord_args`
+definitions, not just the doc.
+
 `mcp-serve` gets its own, self-contained tokio runtime rather than making
 the whole CLI async -- it's the only command that needs one (`rmcp`
 requires async), and every other command stays exactly as synchronous as

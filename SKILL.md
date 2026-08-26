@@ -47,14 +47,14 @@ pact spawn-many \
   --task copilot:"Add a GET /api/users/:id/preferences endpoint, with tests"
 
 pact list
-pact diff --id <workspace-id>
+pact diff <workspace-id>
 pact coord-status
 pact history --workspace <workspace-id>
 
 pact merge-all --require-passing-tests "npm test"
-pact resolve                       # list open conflicts merge-all skipped
-pact resolve --id <workspace-id>   # retry one
-pact teardown --id <workspace-id>
+pact resolve                    # list open conflicts merge-all skipped
+pact resolve <workspace-id>     # retry one
+pact teardown <workspace-id>
 ```
 
 Key things that surprise people:
