@@ -227,6 +227,7 @@ pub struct FileConflict {
 /// same `spawn_many` batch -- "Weaver", the prevention half of the
 /// conflict-avoidance story. See DESIGN.md ("pact-core > Weaver -- task
 /// overlap prediction").
+#[derive(Debug)]
 pub struct PredictedOverlap {
     pub token: String,
     /// Indices into the `spawn_many` task list (0-based) whose text
@@ -255,17 +256,97 @@ pub fn predict_task_overlap(tasks: &[SpawnManyTask]) -> Vec<PredictedOverlap> {
     overlaps
 }
 
-/// Splits `task` on whitespace and common surrounding punctuation, keeping
-/// whichever chunks look like a file path (see `looks_like_file_path`).
+/// Words that flip a clause's meaning from "touch this" to "don't touch
+/// this" -- issue #239: a real production run's prompts each said "do
+/// NOT modify any package-lock.json", and the heuristic flagged
+/// `package-lock.json` as a possible overlap across every task anyway,
+/// because it has no notion of polarity. Careful prompts name the files
+/// they're *avoiding*, so a heuristic blind to negation fires hardest on
+/// exactly the well-written prompts it should trust most.
+const NEGATION_CUES: &[&str] = &["not", "never", "avoid", "without", "except", "no"];
+
+fn clause_is_negated(clause: &str) -> bool {
+    let lower = clause.to_lowercase();
+    if lower.contains("n't") {
+        return true; // don't/doesn't/won't/shouldn't/...
+    }
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| NEGATION_CUES.contains(&word))
+}
+
+/// Splits `text` into clauses on `,`/`;` and a *sentence-final* `.`/`!`/`?`
+/// (one followed by whitespace or end-of-string) -- deliberately not a
+/// plain char-based split, which would also cut a filename's own dot
+/// (`package-lock.json` would otherwise split into `package-lock` and
+/// `json`). Each returned clause keeps its trailing delimiter.
+fn split_into_clauses(text: &str) -> Vec<&str> {
+    let mut clauses = Vec::new();
+    let mut start = 0;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (i, &(idx, c)) in chars.iter().enumerate() {
+        let is_delim = match c {
+            ',' | ';' => true,
+            '.' | '!' | '?' => chars.get(i + 1).is_none_or(|&(_, next)| next.is_whitespace()),
+            _ => false,
+        };
+        if is_delim {
+            let end = idx + c.len_utf8();
+            clauses.push(&text[start..end]);
+            start = end;
+        }
+    }
+    if start < text.len() {
+        clauses.push(&text[start..]);
+    }
+    clauses
+}
+
+/// Splits `task` into clauses, skips any clause containing a negation cue
+/// entirely (issue #239), and within the rest keeps whichever
+/// whitespace/punctuation-separated chunks look like a file path (see
+/// `looks_like_file_path`) and aren't a brand-name-shaped false positive
+/// (see `looks_like_brand_name` -- issue #239's other real finding:
+/// "Next.js", mentioned in every task's plain-English repo description,
+/// was flagged the same way "package.json" correctly was).
 fn extract_file_tokens(task: &str) -> std::collections::HashSet<String> {
     let mut tokens = std::collections::HashSet::new();
-    for word in task.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | ':' | '`')) {
-        let trimmed = word.trim_matches(|c: char| matches!(c, '.' | '!' | '?'));
-        if looks_like_file_path(trimmed) {
-            tokens.insert(trimmed.to_string());
+    for clause in split_into_clauses(task) {
+        if clause_is_negated(clause) {
+            continue;
+        }
+        for word in clause.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | ':' | '`')) {
+            let trimmed = word.trim_matches(|c: char| matches!(c, '.' | '!' | '?'));
+            if looks_like_file_path(trimmed) && !looks_like_brand_name(trimmed) {
+                tokens.insert(trimmed.to_string());
+            }
         }
     }
     tokens
+}
+
+/// Whether `stem` (the part of a candidate path before the last `.`) is
+/// shaped like a capitalized product/brand name rather than a real file
+/// path -- issue #239: "Next.js" (capital N, rest lowercase, no `/`)
+/// passes `looks_like_file_path` (a plausible-looking extension, an
+/// alphanumeric stem) but isn't a file anyone is about to edit. Real
+/// filenames mentioned in these prompts are either all-lowercase
+/// (`index.ts`, `package.json`) or fully uppercase by convention
+/// (`README.md`, `LICENSE.md` -- deliberately not caught by this check,
+/// since "all-caps" doesn't match the Title Case brand-name shape this
+/// looks for); a path with a `/` is never mistaken for a bare brand name
+/// either way.
+fn looks_like_brand_name(candidate: &str) -> bool {
+    if candidate.contains('/') {
+        return false;
+    }
+    let Some(dot) = candidate.rfind('.') else { return false };
+    let stem = &candidate[..dot];
+    let mut chars = stem.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => chars.all(|c| c.is_ascii_lowercase() || matches!(c, '-' | '_')),
+        _ => false,
+    }
 }
 
 /// A conservative, regex-free "does this look like a file path" check --
@@ -1490,6 +1571,22 @@ mod tests {
     }
 
     #[test]
+    fn predict_task_overlap_end_to_end_ignores_negation_and_brand_names() {
+        // Regression test for issue #239, the exact real-world shape: a
+        // shared repo-description preamble ("Next.js app") plus a shared
+        // prohibition ("do NOT modify package-lock.json") across every
+        // task -- neither should be reported as a possible overlap, but a
+        // real shared file (package.json) still must be.
+        let tasks = vec![
+            task(AgentKind::Claude, "This is a Next.js app. Bump a dep in package.json. Do NOT modify package-lock.json."),
+            task(AgentKind::Claude, "This is a Next.js app. Bump another dep in package.json. Do NOT modify package-lock.json."),
+        ];
+        let overlaps = predict_task_overlap(&tasks);
+        assert_eq!(overlaps.len(), 1, "expected only the real overlap, got: {overlaps:?}");
+        assert_eq!(overlaps[0].token, "package.json");
+    }
+
+    #[test]
     fn looks_like_file_path_accepts_plausible_paths() {
         assert!(looks_like_file_path("chunk.ts"));
         assert!(looks_like_file_path("src/index.ts"));
@@ -1508,6 +1605,66 @@ mod tests {
         let tokens = extract_file_tokens("please update src/index.ts.");
         assert!(tokens.contains("src/index.ts"));
         assert!(!tokens.contains("src/index.ts."));
+    }
+
+    #[test]
+    fn extract_file_tokens_ignores_a_file_named_in_a_negated_clause() {
+        // Regression test for issue #239's real finding: every task
+        // explicitly said not to touch package-lock.json, and the
+        // heuristic flagged it as a possible overlap anyway.
+        let tokens = extract_file_tokens("Update package.json. Do NOT modify any package-lock.json.");
+        assert!(tokens.contains("package.json"), "the real, affirmative mention must still be caught");
+        assert!(!tokens.contains("package-lock.json"), "a file named only in a negated clause must not be flagged");
+    }
+
+    #[test]
+    fn extract_file_tokens_recognizes_contracted_negation() {
+        let tokens = extract_file_tokens("don't touch config.yaml, but do update main.rs");
+        assert!(!tokens.contains("config.yaml"));
+        assert!(tokens.contains("main.rs"));
+    }
+
+    #[test]
+    fn extract_file_tokens_ignores_a_brand_name_shaped_like_a_path() {
+        // Regression test for issue #239: "Next.js" mentioned in a plain
+        // repo description was flagged the same way a real file would be.
+        let tokens = extract_file_tokens("This is a Next.js app -- add a new route in app/api/users/route.ts");
+        assert!(!tokens.contains("Next.js"), "a capitalized brand name must not be treated as a file path");
+        assert!(tokens.contains("app/api/users/route.ts"), "a real path must still be caught");
+    }
+
+    #[test]
+    fn extract_file_tokens_still_catches_an_all_caps_conventional_filename() {
+        // Contrast case: README.md/LICENSE.md are real, common filenames
+        // that happen to be fully uppercase -- must not be swept up by
+        // the brand-name filter, which only targets the Title Case shape.
+        let tokens = extract_file_tokens("update README.md with the new instructions");
+        assert!(tokens.contains("README.md"));
+    }
+
+    #[test]
+    fn split_into_clauses_does_not_split_on_a_filenames_internal_dot() {
+        let clauses = split_into_clauses("edit package-lock.json now");
+        assert_eq!(clauses, vec!["edit package-lock.json now"]);
+    }
+
+    #[test]
+    fn split_into_clauses_splits_on_a_sentence_final_period() {
+        let clauses = split_into_clauses("First sentence. Second sentence.");
+        assert_eq!(clauses, vec!["First sentence.", " Second sentence."]);
+    }
+
+    #[test]
+    fn looks_like_brand_name_accepts_title_case_no_slash() {
+        assert!(looks_like_brand_name("Next.js"));
+        assert!(looks_like_brand_name("Node.js"));
+    }
+
+    #[test]
+    fn looks_like_brand_name_rejects_lowercase_and_all_caps_and_paths() {
+        assert!(!looks_like_brand_name("index.ts"));
+        assert!(!looks_like_brand_name("README.md"));
+        assert!(!looks_like_brand_name("src/Index.ts"));
     }
 
     fn conflict_stages(path: &str, base: Option<&str>, ours: &str, theirs: &str) -> pact_vcs::ConflictStages {

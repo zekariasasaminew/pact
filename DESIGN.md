@@ -788,6 +788,52 @@ text-token match as something closer to `Orchestrator::detect_conflicts`'
 git-level analysis. The heuristic itself is unchanged; only the disclosure
 in the printed warning changed.
 
+### Weaver: negation and brand-name false positives (issue #239)
+
+The "an occasional false positive costs nothing worse than one harmless
+extra line" reasoning above turned out wrong in practice, confirmed by a
+real production run, not just a hypothetical: **every** task's prompt
+said "do NOT modify any `package-lock.json`" (careful, well-written
+prompts naming the files they're avoiding), and the heuristic -- blind to
+polarity -- flagged `package-lock.json` as a possible overlap across all
+five tasks anyway. Combined with every task's shared "this is a Next.js
+app" preamble also getting flagged (the exact `next.js`-as-a-file case
+this document already predicted), the one true positive
+(`package.json`) landed in the middle of two false ones. A heuristic
+that fires hardest on the best-written prompts, and buries its one real
+finding in noise, is worse than the "costs nothing" framing assumed.
+
+Two fixes, both in `extract_file_tokens`:
+
+- **Negation.** `split_into_clauses` splits task text on `,`/`;` and a
+  *sentence-final* `.`/`!`/`?` (one followed by whitespace or
+  end-of-string -- deliberately not a plain char split, which would also
+  cut a filename's own internal dot, turning `package-lock.json` into
+  `package-lock` and `json`). Any clause containing a negation cue
+  (`not`, `never`, `avoid`, `without`, `except`, `no`, or a `n't`
+  contraction) is skipped entirely for token extraction. Coarser than
+  "strip only the text after the cue within the clause" (the issue's
+  literal suggestion), but the negation cue is reliably near the start
+  of its own clause in practice ("do NOT modify X"), and skipping the
+  whole clause is simpler and can't under-strip.
+- **Brand names.** `looks_like_brand_name`: a candidate with no `/` whose
+  stem is Title Case (capital first letter, all-lowercase rest --
+  `Next`, `Node`, `React`) is treated as a product name, not a file.
+  Deliberately narrow: a path with a `/` is never mistaken for a bare
+  brand name regardless of case, and a fully-uppercase conventional
+  filename (`README.md`, `LICENSE.md`) doesn't match the Title Case
+  shape, so it still gets caught correctly.
+
+Both are still text heuristics with real, known blind spots --
+`clause_is_negated` triggers on the word "no" appearing anywhere in a
+clause for any reason, not just as syntactic negation of the file
+mention, and `looks_like_brand_name` would just as happily reject a
+real, deliberately Title-Case-named file if a repo used that
+convention. Accepted for the same reason the original heuristic's
+false-positive tolerance was accepted: `predict_task_overlap` is
+advisory only, never blocks anything, and `pact conflicts`' real
+git-diff-based detection remains the mechanism that actually matters.
+
 ### Arbiter — agent invocation
 
 `ArbiterConfig` is the "verified" half of pact's conflict story: a
