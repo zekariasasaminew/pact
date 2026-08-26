@@ -809,6 +809,33 @@ impl WorkspaceManager {
             }
         }
 
+        // Pre-flight the gate command against the unmodified base commit,
+        // before merging anything -- issue #232: a fresh worktree of HEAD
+        // has none of a workspace's dependencies installed either, so
+        // without this check a broken environment (missing node_modules,
+        // etc.) reads as "every workspace failed its tests" instead of
+        // what it actually is. If the command can't even pass here, no
+        // workspace's changes are on trial -- abort the whole run with
+        // that diagnosis rather than skipping every workspace one by one.
+        if let Some(test_cmd) = require_passing_tests {
+            let preflight = run_shell(&integration_path, test_cmd)?;
+            if !preflight.success {
+                let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
+                    .context("acquiring git worktree lock")?;
+                self.remove_worktree_retrying(&integration_path)?;
+                self.delete_branch(&branch_name);
+                bail!(
+                    "--require-passing-tests: '{test_cmd}' failed on the unmodified base commit, \
+                     before any workspace was merged -- this means the environment (missing \
+                     dependencies, a command that needs to run from a different directory, etc.), \
+                     not any workspace's changes, is the problem. No workspaces were merged. Fix \
+                     the environment (e.g. install dependencies in this repo first) or drop \
+                     --require-passing-tests, then retry.\n{}",
+                    preflight.diagnosis()
+                );
+            }
+        }
+
         let mut merged = Vec::new();
         let mut conflicted = Vec::new();
         for (_, workspace) in sized {
@@ -816,12 +843,16 @@ impl WorkspaceManager {
             match self.merge_branch_into(&integration_path, &workspace.branch, union_globs, arbiter, &workspace.task)? {
                 MergeOutcome::Merged { auto_resolved, arbiter_resolved } => {
                     if let Some(test_cmd) = require_passing_tests {
-                        if !run_shell(&integration_path, test_cmd)? {
+                        let gate = run_shell(&integration_path, test_cmd)?;
+                        if !gate.success {
                             self.reset_integration_worktree(&integration_path, &commit_before)?;
                             skipped.push(SkippedWorkspace {
                                 id: workspace.id,
                                 branch: workspace.branch,
-                                reason: format!("merged cleanly but failed the required test command ('{test_cmd}')"),
+                                reason: format!(
+                                    "merged cleanly but failed the required test command ('{test_cmd}'): {}",
+                                    gate.diagnosis()
+                                ),
                             });
                             continue;
                         }
@@ -1428,14 +1459,58 @@ fn kill_if_alive(workspace: &Workspace) {
 /// non-zero exit (e.g. `diff --stat` against a ref with no differences is
 /// still success, but callers here care about "no meaningful output" more
 /// than "git considered this an error").
+/// The last `MAX_TAIL_LINES` lines of a captured stream, joined back into
+/// one string -- issue #232: a gate command's output used to be captured
+/// (`.output()` collects it) and then thrown away without ever being
+/// looked at, which was the one artifact that would have told a real user
+/// in seconds that their environment, not their code, was the problem.
+const MAX_TAIL_LINES: usize = 20;
+
+fn tail_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(MAX_TAIL_LINES);
+    lines[start..].join("\n")
+}
+
+/// The result of running a `--require-passing-tests` gate command once,
+/// with enough detail to actually diagnose a failure -- see DESIGN.md
+/// ("pact-vcs > Test-gated merge (issue #65)", "Gate diagnosability (issue
+/// #232)"). Replaces a bare `Result<bool>` that collapsed "your code
+/// failed" and "the environment couldn't even run the command" into the
+/// same false signal.
+#[derive(Debug, Clone)]
+pub struct GateOutcome {
+    pub success: bool,
+    /// `None` only if the process was killed by a signal rather than
+    /// exiting -- rare, still reported honestly rather than guessed at.
+    pub exit_code: Option<i32>,
+    /// The last `MAX_TAIL_LINES` lines of stdout+stderr combined, in the
+    /// order captured -- most test runners write failures to stdout, not
+    /// stderr, so splitting the two and only keeping one would silently
+    /// drop the useful half for many real toolchains.
+    pub output_tail: String,
+    pub duration: Duration,
+}
+
+impl GateOutcome {
+    fn diagnosis(&self) -> String {
+        format!(
+            "exit code {}, {:.1}s, last {MAX_TAIL_LINES} lines of output:\n{}",
+            self.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "<killed by signal>".to_string()),
+            self.duration.as_secs_f64(),
+            self.output_tail
+        )
+    }
+}
+
 /// Runs `cmd` as a shell command in `dir` (`cmd /C` on Windows, `sh -c`
-/// elsewhere), returning whether it exited successfully -- see DESIGN.md
-/// ("pact-vcs > Test-gated merge (issue #65)"). A local copy of the same
-/// small helper `pact-core`'s Arbiter uses (`run_shell`), not shared: this
-/// crate has no dependency on `pact-core` and the alternative -- adding
-/// one just for a 15-line function -- would be backwards, `pact-core`
-/// depends on `pact-vcs`, not the other way around.
-fn run_shell(dir: &Path, cmd: &str) -> Result<bool> {
+/// elsewhere) and captures enough about the result to actually diagnose a
+/// failure -- see DESIGN.md ("pact-vcs > Test-gated merge (issue #65)"). A
+/// local copy of the same small helper `pact-core`'s Arbiter uses
+/// (`run_shell`), not shared: this crate has no dependency on `pact-core`
+/// and the alternative -- adding one just for a small function -- would be
+/// backwards, `pact-core` depends on `pact-vcs`, not the other way around.
+fn run_shell(dir: &Path, cmd: &str) -> Result<GateOutcome> {
     let mut command = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", cmd]);
@@ -1445,11 +1520,23 @@ fn run_shell(dir: &Path, cmd: &str) -> Result<bool> {
         c.args(["-c", cmd]);
         c
     };
+    let start = std::time::Instant::now();
     let output = command
         .current_dir(dir)
         .output()
         .with_context(|| format!("failed to spawn required test command '{cmd}'"))?;
-    Ok(output.status.success())
+    let duration = start.elapsed();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(GateOutcome {
+        success: output.status.success(),
+        exit_code: output.status.code(),
+        output_tail: tail_lines(&combined),
+        duration,
+    })
 }
 
 fn run_git_text(dir: &std::path::Path, args: &[&str]) -> Result<String> {
@@ -1569,6 +1656,38 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_lines_returns_everything_when_under_the_limit() {
+        let text = "line1\nline2\nline3";
+        assert_eq!(tail_lines(text), "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn tail_lines_keeps_only_the_last_max_lines() {
+        let text: String = (1..=(MAX_TAIL_LINES + 5))
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = tail_lines(&text);
+        assert_eq!(tail.lines().count(), MAX_TAIL_LINES);
+        assert!(tail.starts_with("line6"), "expected the first 5 lines dropped, got: {tail}");
+        assert!(tail.ends_with(&format!("line{}", MAX_TAIL_LINES + 5)));
+    }
+
+    #[test]
+    fn gate_outcome_diagnosis_includes_exit_code_duration_and_output() {
+        let outcome = GateOutcome {
+            success: false,
+            exit_code: Some(1),
+            output_tail: "AssertionError: expected 2 to equal 3".to_string(),
+            duration: Duration::from_millis(1500),
+        };
+        let diagnosis = outcome.diagnosis();
+        assert!(diagnosis.contains("exit code 1"), "got: {diagnosis}");
+        assert!(diagnosis.contains("1.5s"), "got: {diagnosis}");
+        assert!(diagnosis.contains("AssertionError"), "got: {diagnosis}");
+    }
 
     #[test]
     fn merge_risk_score_is_plain_file_count_with_no_central_files() {
