@@ -17,6 +17,19 @@ pub struct Operation {
     pub detail: Value,
 }
 
+/// Every workspace id whose coord server has ever completed an MCP
+/// `initialize` handshake (`op_type = 'coord_connect'`, logged from
+/// `ServerHandler::get_info`) -- issue #235: without this, `coord-status`
+/// printing "no active leases" was indistinguishable from the truthful
+/// but very different "no agent's MCP client ever connected to this
+/// workspace's coord server at all."
+pub fn connected_workspace_ids(conn: &Connection) -> anyhow::Result<std::collections::HashSet<String>> {
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT workspace_id FROM operations WHERE op_type = 'coord_connect' AND workspace_id IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
 pub fn log_operation(
     conn: &Connection,
     op_type: &str,
@@ -92,6 +105,24 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn connected_workspace_ids_returns_distinct_workspaces_that_logged_a_connect() {
+        let conn = test_conn();
+        log_operation(&conn, "coord_connect", Some("ws-a"), &serde_json::json!({})).unwrap();
+        log_operation(&conn, "coord_connect", Some("ws-a"), &serde_json::json!({})).unwrap();
+        log_operation(&conn, "coord_connect", Some("ws-b"), &serde_json::json!({})).unwrap();
+        log_operation(&conn, "claim", Some("ws-c"), &serde_json::json!({})).unwrap();
+
+        let connected = connected_workspace_ids(&conn).unwrap();
+        assert_eq!(connected, std::collections::HashSet::from(["ws-a".to_string(), "ws-b".to_string()]));
+    }
+
+    #[test]
+    fn connected_workspace_ids_is_empty_when_nothing_ever_connected() {
+        let conn = test_conn();
+        assert!(connected_workspace_ids(&conn).unwrap().is_empty());
     }
 
     #[test]

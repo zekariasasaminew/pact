@@ -79,6 +79,33 @@ pub fn list_active_leases(conn: &Connection) -> Result<Vec<ActiveLease>> {
 /// both to concrete file sets and intersecting them -- plain
 /// pattern-string comparison would miss the common case of two patterns
 /// that aren't equal but still overlap (`src/**/*.rs` vs `src/foo.rs`).
+/// Whether `pattern` contains any real glob metacharacter -- if not, it's
+/// a literal path, not a search over the tree.
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+/// A literal pattern, normalized the same way a matched filesystem entry
+/// would be (forward slashes, no leading `./`) -- so a literal claim
+/// compares equal to the same path once it's actually a real file on
+/// disk, without needing a second normalization path.
+fn normalize_literal(pattern: &str) -> String {
+    pattern.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+/// Expands `pattern` against every file that actually exists under
+/// `root` -- plus, for a literal (non-glob) pattern that matched nothing
+/// on disk, the pattern itself, normalized. That fallback is issue #235's
+/// fix: `expand_glob` used to resolve to the empty set for a path that
+/// doesn't exist *yet*, which is precisely the "I am about to create this
+/// file" case -- the single most important one for conflict avoidance,
+/// and the one the pre-fix behavior was blindest to (two agents both
+/// claiming a not-yet-created `src/new.ts` never saw each other). A
+/// pattern *with* real glob metacharacters that matches nothing on disk
+/// (e.g. `src/generated/*.ts` before that directory exists) still can't
+/// be resolved this way -- there's no way to know what a wildcard would
+/// match against files that don't exist -- so that narrower case is left
+/// as a known limitation, not attempted here.
 fn expand_glob(root: &Path, pattern: &str) -> Result<HashSet<String>> {
     let matcher = globset::GlobBuilder::new(pattern)
         .literal_separator(false)
@@ -97,6 +124,9 @@ fn expand_glob(root: &Path, pattern: &str) -> Result<HashSet<String>> {
         if matcher.is_match(&rel_str) {
             matched.insert(rel_str);
         }
+    }
+    if matched.is_empty() && !is_glob_pattern(pattern) {
+        matched.insert(normalize_literal(pattern));
     }
     Ok(matched)
 }
@@ -272,6 +302,50 @@ mod tests {
             std::fs::write(&path, "").unwrap();
         }
         root
+    }
+
+    #[test]
+    fn expand_glob_resolves_a_literal_path_that_does_not_exist_yet() {
+        let root = temp_workspace_with_files(&[]);
+        let matched = expand_glob(&root, "src/new.ts").unwrap();
+        assert_eq!(matched, HashSet::from(["src/new.ts".to_string()]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expand_glob_still_finds_a_literal_path_that_does_exist() {
+        let root = temp_workspace_with_files(&["src/real.ts"]);
+        let matched = expand_glob(&root, "src/real.ts").unwrap();
+        assert_eq!(matched, HashSet::from(["src/real.ts".to_string()]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expand_glob_does_not_invent_a_match_for_an_unmatched_wildcard_pattern() {
+        // A real glob (has metacharacters) that matches nothing on disk
+        // yet stays empty -- there's no way to know what it would match
+        // without the files existing, unlike a literal path.
+        let root = temp_workspace_with_files(&[]);
+        let matched = expand_glob(&root, "src/generated/*.ts").unwrap();
+        assert!(matched.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_claims_on_the_same_not_yet_created_literal_path_conflict() {
+        // Regression test for issue #235's headline finding: two agents
+        // both about to create the same file (neither has written it yet)
+        // must see the overlap, not silently both succeed with
+        // has_conflicts: false because expand_glob found nothing on disk.
+        let conn = test_conn();
+        let root = temp_workspace_with_files(&[]);
+
+        claim_files(&conn, &root, "agent-a", &["src/new.ts".to_string()], None, false).unwrap();
+        let second = claim_files(&conn, &root, "agent-b", &["src/new.ts".to_string()], None, false).unwrap();
+
+        assert!(second.has_conflicts, "expected a conflict on the shared not-yet-created path");
+        assert_eq!(second.conflicts[0].holder, "agent-a");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

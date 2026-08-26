@@ -875,7 +875,8 @@ fn main() -> Result<()> {
         }
         Command::CoordStatus => {
             let status = orchestrator.coord_status()?;
-            print_coord_status(&status);
+            let active_workspace_ids: Vec<String> = orchestrator.list()?.into_iter().map(|w| w.id).collect();
+            print_coord_status(&status, &active_workspace_ids);
         }
         Command::Store(store_command) => {
             let store = orchestrator.npm_store()?;
@@ -1302,14 +1303,27 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_coord_status(status: &pact_coord::CoordStatus) {
+fn print_coord_status(status: &pact_coord::CoordStatus, active_workspace_ids: &[String]) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    // Issue #235: "no active leases" alone is indistinguishable from "no
+    // agent's MCP client ever connected to the coord server at all" --
+    // both look identical, and only one of them means the coordination
+    // layer is actually working. never_connected is computed from real
+    // active workspaces (pact list), not just the coord DB, so an
+    // already-torn-down workspace's silence doesn't get flagged here.
+    let never_connected: Vec<&String> =
+        active_workspace_ids.iter().filter(|id| !status.connected_agent_ids.contains(*id)).collect();
+
     if status.active_leases.is_empty() {
-        println!("no active leases");
+        if never_connected.is_empty() {
+            println!("no active leases");
+        } else {
+            println!("no active leases (and no leases are possible -- see below)");
+        }
     } else {
         println!("active leases:");
         for lease in &status.active_leases {
@@ -1327,6 +1341,18 @@ fn print_coord_status(status: &pact_coord::CoordStatus) {
             println!("  {}: {} unread", agent.agent_id, agent.pending);
         }
     }
+
+    if !never_connected.is_empty() {
+        println!(
+            "warning: {} active workspace(s) never connected to the coordination server -- \
+             claim_files/release_files/send_message/check_messages were never reachable for \
+             them, not just unused:",
+            never_connected.len()
+        );
+        for id in &never_connected {
+            println!("  {id}");
+        }
+    }
 }
 
 /// One workspace's row in `pact status` -- combines `Workspace`, dirty
@@ -1340,6 +1366,9 @@ struct StatusWorkspaceRow {
     no_files_touched: bool,
     pending_messages: i64,
     held_claims: Vec<String>,
+    /// Whether this workspace's coord server ever completed an MCP
+    /// `initialize` handshake -- issue #235.
+    coord_connected: bool,
 }
 
 fn build_status_rows(orchestrator: &Orchestrator, coord: &pact_coord::CoordStatus) -> Result<Vec<StatusWorkspaceRow>> {
@@ -1361,7 +1390,16 @@ fn build_status_rows(orchestrator: &Orchestrator, coord: &pact_coord::CoordStatu
                 .unwrap_or(0);
             let held_claims =
                 coord.active_leases.iter().filter(|l| l.holder == workspace.id).map(|l| l.pattern.clone()).collect();
-            StatusWorkspaceRow { workspace, dirty, agent_alive, no_files_touched, pending_messages, held_claims }
+            let coord_connected = coord.connected_agent_ids.contains(&workspace.id);
+            StatusWorkspaceRow {
+                workspace,
+                dirty,
+                agent_alive,
+                no_files_touched,
+                pending_messages,
+                held_claims,
+                coord_connected,
+            }
         })
         .collect())
 }
@@ -1373,12 +1411,27 @@ fn status_hints(rows: &[StatusWorkspaceRow], open_conflicts: &[pact_coord::Persi
     let mut hints = Vec::new();
     let running = rows.iter().filter(|r| r.agent_alive == Some(true)).count();
     let zero_files: Vec<&str> = rows.iter().filter(|r| r.no_files_touched).map(|r| r.workspace.id.as_str()).collect();
+    // Only a *finished* agent that never connected is worth flagging --
+    // a still-running one may just not have launched mcp-serve yet.
+    let never_connected: Vec<&str> = rows
+        .iter()
+        .filter(|r| !r.coord_connected && r.agent_alive != Some(true))
+        .map(|r| r.workspace.id.as_str())
+        .collect();
 
     if running > 0 {
         hints.push(format!("{running} workspace(s) still running -- wait, or `pact list` for details"));
     }
     if let Some(first) = zero_files.first() {
         hints.push(format!("{} workspace(s) touched zero files -- inspect: pact inspect {first}", zero_files.len()));
+    }
+    if !never_connected.is_empty() {
+        hints.push(format!(
+            "{} workspace(s) finished without ever connecting to the coordination server -- \
+             file leases/messages were never reachable for them: {}",
+            never_connected.len(),
+            never_connected.join(", ")
+        ));
     }
     if !open_conflicts.is_empty() {
         hints.push(format!("{} open conflict(s) -- pact resolve --list", open_conflicts.len()));
@@ -1414,6 +1467,7 @@ fn run_status(orchestrator: &Orchestrator, json: bool) -> Result<()> {
                     "no_files_touched": row.no_files_touched,
                     "pending_messages": row.pending_messages,
                     "held_claims": row.held_claims,
+                    "coord_connected": row.coord_connected,
                     "run_metadata": orchestrator.run_metadata(&row.workspace.id),
                 })
             })
@@ -2247,6 +2301,52 @@ mod tests {
     fn first_duplicate_returns_none_for_all_distinct_names() {
         let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         assert_eq!(first_duplicate(&names), None);
+    }
+
+    fn fake_status_row(id: &str, agent_alive: Option<bool>, coord_connected: bool) -> StatusWorkspaceRow {
+        StatusWorkspaceRow {
+            workspace: pact_vcs::Workspace {
+                id: id.to_string(),
+                path: std::path::PathBuf::from(id),
+                branch: format!("pact/{id}"),
+                task: "fake task".to_string(),
+                created_at: 0,
+                agent_pid: None,
+                base_commit: "deadbeef".to_string(),
+            },
+            dirty: Some(false),
+            agent_alive,
+            no_files_touched: false,
+            pending_messages: 0,
+            held_claims: Vec::new(),
+            coord_connected,
+        }
+    }
+
+    #[test]
+    fn status_hints_flags_a_finished_workspace_that_never_connected() {
+        let rows = vec![fake_status_row("ws-a", Some(false), false)];
+        let hints = status_hints(&rows, &[]);
+        assert!(
+            hints.iter().any(|h| h.contains("without ever connecting") && h.contains("ws-a")),
+            "expected a never-connected hint naming ws-a, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn status_hints_does_not_flag_a_still_running_workspace_that_has_not_connected_yet() {
+        // A running agent may just not have launched mcp-serve yet -- not
+        // worth flagging until it's actually finished.
+        let rows = vec![fake_status_row("ws-a", Some(true), false)];
+        let hints = status_hints(&rows, &[]);
+        assert!(!hints.iter().any(|h| h.contains("without ever connecting")), "got: {hints:?}");
+    }
+
+    #[test]
+    fn status_hints_does_not_flag_a_workspace_that_did_connect() {
+        let rows = vec![fake_status_row("ws-a", Some(false), true)];
+        let hints = status_hints(&rows, &[]);
+        assert!(!hints.iter().any(|h| h.contains("without ever connecting")), "got: {hints:?}");
     }
 
     #[test]

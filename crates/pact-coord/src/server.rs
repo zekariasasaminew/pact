@@ -200,7 +200,17 @@ impl CoordServer {
 
 #[tool_handler]
 impl ServerHandler for CoordServer {
+    /// Called by rmcp while answering the client's `initialize` request --
+    /// the one point in this protocol every real MCP client reaches
+    /// before any tool call, regardless of whether it ever calls one.
+    /// Logging a `coord_connect` operation here (issue #235) is what lets
+    /// `pact coord-status` tell "no leases because nobody's claimed
+    /// anything yet" apart from "no leases because this agent's MCP
+    /// client never connected at all" -- previously indistinguishable, and
+    /// a real production run hit exactly the second case silently.
     fn get_info(&self) -> ServerInfo {
+        let conn = self.conn.lock().unwrap();
+        log_op(&conn, "coord_connect", &self.agent_id, serde_json::json!({}));
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
@@ -241,10 +251,27 @@ mod tests {
             CREATE TABLE read_cursors (
                 agent_id TEXT PRIMARY KEY,
                 last_seen_message_id INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE operations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                op_type TEXT NOT NULL,
+                workspace_id TEXT,
+                detail TEXT NOT NULL
             );",
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn get_info_logs_a_coord_connect_operation_for_this_agent() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let _ = ServerHandler::get_info(&server);
+
+        let conn = server.conn.lock().unwrap();
+        let connected = crate::operations::connected_workspace_ids(&conn).unwrap();
+        assert!(connected.contains("agent-a"), "expected get_info to log a coord_connect for agent-a, got: {connected:?}");
     }
 
     #[test]

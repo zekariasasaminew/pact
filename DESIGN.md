@@ -1921,6 +1921,59 @@ Two things worth knowing:
   recipient-matching query `check_messages` does, but only counts, never
   writes to `read_cursors`.
 
+### Coordination reachability: "no leases" vs. "no server" (issue #235)
+
+A real production run with GitHub Copilot CLI found `coord-status`
+reporting "no active leases" / "no pending messages" for an entire
+session where every task's prompt explicitly instructed the agent to
+call `claim_files`. Root cause of the *ambiguity* (not necessarily of why
+the agent didn't call the tool, which is a separate, larger question --
+see the "strategic criticism" discussion on issue #227): pact writes an
+MCP config and hands it to the agent CLI, which is responsible for
+launching `pact mcp-serve` and connecting to it as an MCP client. If
+that never happens -- wrong config, the agent CLI not invoking it, the
+agent choosing not to call any coordination tool for the whole run --
+`coord-status` reads an empty `leases`/`messages` state and prints
+exactly what it prints when everything is working correctly and nobody
+has claimed anything yet. Those two states were indistinguishable, and
+only one of them means the coordination layer is functioning.
+
+Fixed with a real connection signal, not a guess: `CoordServer::get_info`
+(the `ServerHandler` method rmcp calls while answering the client's
+`initialize` request -- the one point in the MCP protocol every real
+client reaches before any tool call, whether or not it ever calls one)
+now logs a `coord_connect` operation for its `agent_id`, reusing the
+existing operation log (issue #84) rather than a new table.
+`CoordStatus` gained `connected_agent_ids`, and both `pact coord-status`
+and `pact status` cross-reference it against `pact list`'s actual active
+workspaces: a workspace that's *finished* and never connected gets an
+explicit warning/hint naming it, distinct from ordinary "nothing claimed
+yet" silence. A still-*running* workspace is deliberately not flagged --
+it may simply not have launched `mcp-serve` yet, and flagging every
+in-progress run would be noise, not signal.
+
+**Separately, `expand_glob`'s blindest spot.** `leases::expand_glob`
+only ever walked the real filesystem, so a claim on a path that doesn't
+exist yet -- the "I am about to create this file" case, the single most
+important one for conflict avoidance between two agents -- expanded to
+the empty set and could never show an overlap. Fixed narrowly: a
+*literal* pattern (no glob metacharacters) that matches nothing on disk
+now resolves to itself, normalized, so two agents both claiming the same
+not-yet-created path see the conflict. A pattern *with* real
+metacharacters (e.g. `src/generated/*.ts`) that matches nothing on disk
+still can't be resolved this way -- there's no way to know what a
+wildcard would match against files that don't exist -- left as a known,
+narrower limitation, not attempted here.
+
+**Explicitly not decided here:** whether the advisory-lease model's
+future is worth continued investment at all, versus leaning primarily on
+`pact conflicts`' mechanical, no-cooperation-required filesystem diffing
+(which worked correctly on the same real run that found leases doing
+nothing). That's a real strategic fork, not a bug -- see issue #227's
+tracking comment for the two options as posed to the user; this pass
+only fixes what makes the *current* mechanism honest and correctly
+functioning, without deciding whether to keep betting on it.
+
 ### Operation log / `pact history` (issue #84)
 
 From an outside strategic-notes review surveying jj (Jujutsu)'s data

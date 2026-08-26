@@ -41,6 +41,12 @@ pub struct AgentPending {
 pub struct CoordStatus {
     pub active_leases: Vec<ActiveLease>,
     pub pending_messages: Vec<AgentPending>,
+    /// Workspace ids whose coord server has ever completed an MCP
+    /// `initialize` handshake -- issue #235. A workspace missing from
+    /// here (and from `pact list`'s active workspaces) never connected at
+    /// all, which "no active leases" alone can't distinguish from "connected,
+    /// nothing claimed yet."
+    pub connected_agent_ids: std::collections::HashSet<String>,
 }
 
 /// Computes a `CoordStatus` snapshot. Read-only: unlike `check_messages`,
@@ -55,7 +61,8 @@ pub fn status(repo_root: &Path) -> Result<CoordStatus> {
             Ok(AgentPending { agent_id, pending })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(CoordStatus { active_leases, pending_messages })
+    let connected_agent_ids = operations::connected_workspace_ids(&conn)?;
+    Ok(CoordStatus { active_leases, pending_messages, connected_agent_ids })
 }
 
 /// Opens the shared coordination database and serves the MCP protocol over
@@ -221,6 +228,24 @@ mod tests {
         let snapshot = status(&repo_root).unwrap();
         assert!(snapshot.active_leases.is_empty());
         assert!(snapshot.pending_messages.is_empty());
+        assert!(snapshot.connected_agent_ids.is_empty());
+
+        let _ = std::fs::remove_dir_all(db::db_path(&repo_root).unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn status_reports_which_agents_ever_connected() {
+        let repo_root = std::env::temp_dir().join(format!("pact-coord-status-connected-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        {
+            let conn = db::open(&repo_root).unwrap();
+            operations::log_operation(&conn, "coord_connect", Some("agent-a"), &serde_json::json!({})).unwrap();
+        }
+
+        let snapshot = status(&repo_root).unwrap();
+        assert_eq!(snapshot.connected_agent_ids, std::collections::HashSet::from(["agent-a".to_string()]));
 
         let _ = std::fs::remove_dir_all(db::db_path(&repo_root).unwrap().parent().unwrap());
         let _ = std::fs::remove_dir_all(&repo_root);
