@@ -126,9 +126,55 @@ whether the slug is empty, short, or long.
 
 `preview_workspace_location` (used by both `create_workspace` and
 `spawn_preview`/`--dry-run`) takes `task: &str` now instead of nothing, so
-`--dry-run`'s preview uses the exact same id a real spawn would generate --
-confirmed by construction, not just by convention, since both call the
-same function.
+`--dry-run`'s preview calls the exact same `workspace_id` function a real
+spawn does. **This claim turned out to be misleading, not false but not
+sufficient either** -- see issue #234 directly below: calling the *same*
+function twice is not the same as it returning the *same value* twice,
+and `workspace_id`'s random suffix meant it never did.
+
+### Workspace names: `--name` (issue #234)
+
+A real production report found the #122 scheme above unusable in
+practice for two compounding reasons, both traced to the random suffix:
+(1) `--dry-run`'s preview id and the real run's id could never agree,
+since `short_id()` returns a fresh `Uuid::new_v4()` on every call -- the
+same function, called twice, is not the same as it returning the same
+value twice; (2) a batch of tasks sharing a long common preamble (a house
+style, a templated instruction block) slugify to an identical 32-char
+prefix, so every workspace in the batch looked the same except for its
+opaque suffix -- exactly the scenario `slugify` was already known not to
+solve on its own (see above), now confirmed in the wild, not just reasoned
+about.
+
+`workspace_id(task, name: Option<&str>)` takes an explicit name now.
+When given, it drives the id **directly**: `slugify(name)`, no random
+suffix at all. This is deliberately not "slug from name plus a random
+suffix" -- an explicit name is exactly what the caller asked for, and a
+suffix would reintroduce the same dry-run/real-run mismatch #234 exists
+to fix. The tradeoff: two tasks given the same `--name` within one batch
+collide on id/branch, which fails loudly at `git worktree add -b`
+("branch already exists"), not silently -- accepted deliberately, and the
+CLI additionally checks for a duplicate `--name` up front (before ever
+spawning a thread) so the failure is immediate and clear rather than a
+git error surfacing from inside a background task.
+
+`spawn --name <name>` (one task) and `spawn-many --name <name>`
+(repeatable, positionally matched to `--task` in the same order) both
+require *no* name or *exactly one name per task* -- a partial count is
+rejected rather than guessed at. `--name` must contain at least one ASCII
+alphanumeric character (validated before `slugify` ever runs), so a
+caller can't accidentally end up with the confusing empty/opaque id
+`slugify` would otherwise produce.
+
+**Deliberately not implemented**, per the original report's own
+prioritization ("(c) ... I would not bother if (a) lands"): a
+deterministic hash-derived suffix for the *default*, no-`--name` path.
+That would only partially fix the parity problem (two separate process
+invocations -- a `--dry-run` now, a real run later -- still can't
+coordinate without a shared run id neither one currently has reason to
+generate), and an explicit name is the actual fix for the case where
+parity or readability actually matters. The default scheme (task-slug
+plus random suffix) is unchanged for every caller not using `--name`.
 
 ### Workspace teardown
 

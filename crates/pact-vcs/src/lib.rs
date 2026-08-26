@@ -320,15 +320,15 @@ impl WorkspaceManager {
     /// without touching git or disk -- lets a caller preview what a real
     /// spawn would create (see issue #16's `--dry-run`) using the exact
     /// same id-generation path `create_workspace` itself uses.
-    pub fn preview_workspace_location(&self, task: &str) -> (String, String, PathBuf) {
-        let id = workspace_id(task);
+    pub fn preview_workspace_location(&self, task: &str, name: Option<&str>) -> (String, String, PathBuf) {
+        let id = workspace_id(task, name);
         let branch = format!("pact/{id}");
         let path = self.state_dir.join("workspaces").join(&id);
         (id, branch, path)
     }
 
-    pub fn create_workspace(&self, task: &str) -> Result<Workspace> {
-        let (id, branch, path) = self.preview_workspace_location(task);
+    pub fn create_workspace(&self, task: &str, name: Option<&str>) -> Result<Workspace> {
+        let (id, branch, path) = self.preview_workspace_location(task, name);
 
         let base_commit = {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT).with_context(|| {
@@ -1601,7 +1601,22 @@ fn short_id() -> String {
 /// guarantee the old pure-random id had, unchanged.
 const MAX_SLUG_LEN: usize = 32;
 
-fn workspace_id(task: &str) -> String {
+/// `name`, if given (`spawn`/`spawn-many --name`, issue #234), is used
+/// verbatim as the id -- slugified, no random suffix. This is the actual
+/// fix for #234's core complaint: a task-text-derived slug plus a fresh
+/// random suffix on every call means `--dry-run`'s preview id and the
+/// real run's id can never agree, and a shared prompt preamble collapses
+/// every workspace in a batch to the same unreadable prefix. An explicit
+/// name has neither problem -- it's exactly what the caller asked for,
+/// deterministically, every time. The caller is responsible for picking
+/// distinct names within a batch (a collision fails loudly at `git
+/// worktree add -b` -- "branch already exists" -- not silently). Falls
+/// back to the task-text-slug-plus-random-suffix scheme when no name is
+/// given, unchanged.
+fn workspace_id(task: &str, name: Option<&str>) -> String {
+    if let Some(name) = name {
+        return slugify(name);
+    }
     let suffix = short_id();
     match slugify(task) {
         slug if slug.is_empty() => suffix,
@@ -1765,7 +1780,7 @@ mod tests {
 
     #[test]
     fn workspace_id_combines_slug_and_a_random_suffix() {
-        let id = workspace_id("Add pagination to the users endpoint");
+        let id = workspace_id("Add pagination to the users endpoint", None);
         assert!(id.starts_with("add-pagination-to-the-users-"), "got: {id}");
         let suffix = id.rsplit('-').next().unwrap();
         assert_eq!(suffix.len(), 8, "expected an 8-char random suffix, got: {suffix}");
@@ -1773,15 +1788,30 @@ mod tests {
 
     #[test]
     fn workspace_id_falls_back_to_suffix_only_for_non_ascii_task_text() {
-        let id = workspace_id("日本語のタスク");
+        let id = workspace_id("日本語のタスク", None);
         assert_eq!(id.len(), 8, "expected the bare 8-char random suffix with no slug prefix, got: {id}");
     }
 
     #[test]
     fn workspace_id_is_unique_for_identical_task_text() {
-        let a = workspace_id("do the same thing");
-        let b = workspace_id("do the same thing");
+        let a = workspace_id("do the same thing", None);
+        let b = workspace_id("do the same thing", None);
         assert_ne!(a, b, "two workspaces with identical task text must still get distinct ids");
+    }
+
+    #[test]
+    fn workspace_id_uses_the_given_name_verbatim_slugified_with_no_random_suffix() {
+        let id = workspace_id("this task text is ignored entirely", Some("Add Pagination"));
+        assert_eq!(id, "add-pagination", "expected the name, not the task text, to drive the id, with no random suffix");
+    }
+
+    #[test]
+    fn workspace_id_with_a_name_is_deterministic_across_calls() {
+        // The actual fix for issue #234: --dry-run and the real run must
+        // agree on the id, which requires no randomness in this path at all.
+        let a = workspace_id("task text", Some("stable-name"));
+        let b = workspace_id("task text", Some("stable-name"));
+        assert_eq!(a, b, "a named workspace's id must be identical every time, not just similar");
     }
 
     #[test]
