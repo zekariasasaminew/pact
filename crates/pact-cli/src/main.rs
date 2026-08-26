@@ -98,8 +98,14 @@ enum Command {
         coord_command: Option<String>,
 
         /// Argument for --coord-command, repeatable. Ignored if
-        /// --coord-command isn't given.
-        #[arg(long = "coord-arg")]
+        /// --coord-command isn't given. `allow_hyphen_values`: the
+        /// alternative coordination command this forwards to may itself
+        /// take flag-shaped arguments (e.g. --verbose) -- without it,
+        /// clap rejects any value starting with `-` as an unrecognized
+        /// flag of pact's own (issue #238, found by the doc/CLI grammar
+        /// check: README's own example, --coord-arg --some-flag, didn't
+        /// parse).
+        #[arg(long = "coord-arg", allow_hyphen_values = true)]
         coord_args: Vec<String>,
 
         /// Print what this spawn would do -- the workspace id/branch/path
@@ -170,8 +176,9 @@ enum Command {
         #[arg(long)]
         coord_command: Option<String>,
 
-        /// Argument for --coord-command, repeatable.
-        #[arg(long = "coord-arg")]
+        /// Argument for --coord-command, repeatable. `allow_hyphen_values`:
+        /// see `spawn --coord-arg`'s help for why (issue #238).
+        #[arg(long = "coord-arg", allow_hyphen_values = true)]
         coord_args: Vec<String>,
 
         /// Same as `spawn --dry-run`, applied to every task in this batch --
