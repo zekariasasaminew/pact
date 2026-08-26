@@ -291,6 +291,50 @@ fn spawn_many_runs_two_fake_agents_concurrently() {
         }
     }
     assert!(found_alpha && found_beta, "expected both scripted edits to land in their own workspace");
+    assert!(
+        text.contains("spawn-many: 2 tasks requested, 2 workspaces created, 0 failed"),
+        "expected an unconditional reconciliation summary line, got:\n{text}"
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// Regression test for issue #231: nothing previously guaranteed a failed
+/// agent run was counted anywhere beyond its own per-task line, or forced
+/// `spawn-many`'s exit code to reflect it. Scripts one fake agent to report
+/// failure alongside one that succeeds -- both still become real
+/// workspaces (this is a run failure, not a launch failure), but the
+/// unconditional summary line and the process exit code must both reflect
+/// the failure.
+#[test]
+fn spawn_many_reconciliation_summary_counts_a_failed_agent_run() {
+    let repo = init_repo("spawn-many-run-failure");
+    let shim = shim_dir();
+
+    let task_ok = script(&[("alpha.txt", "ALPHA")], "created alpha.txt");
+    let task_fail = serde_json::json!({
+        "writes": {"beta.txt": "BETA"},
+        "summary": "hit an error partway through",
+        "success": false,
+        "exit_code": 1,
+    })
+    .to_string();
+    let output = pact(
+        &repo,
+        &shim,
+        &["spawn-many", "--agent", "claude", "--task", &task_ok, "--task", &task_fail],
+    );
+    assert_eq!(output.status.code(), Some(1), "expected exit 1 since one agent run failed");
+
+    let text = stdout(&output);
+    let workspace_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("workspace ")).collect();
+    assert_eq!(workspace_lines.len(), 2, "both tasks became real workspaces, got:\n{text}");
+    assert!(
+        text.contains("spawn-many: 2 tasks requested, 2 workspaces created, 0 failed"),
+        "workspace creation itself fully succeeded (0 launch failures), got:\n{text}"
+    );
+    assert!(text.contains("  failed: hit an error partway through"), "expected the failed run's own summary line, got:\n{text}");
 
     cleanup(&repo);
     cleanup(&shim);
