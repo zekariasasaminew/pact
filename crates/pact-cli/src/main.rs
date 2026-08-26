@@ -4,7 +4,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use pact_agents::{AgentEvent, AgentKind};
-use pact_core::{CoordServerOverride, FileConflict, MergeReport, Orchestrator, PredictedOverlap, SpawnManyTask};
+use pact_core::{
+    CoordServerOverride, FileConflict, MergeReport, Orchestrator, PredictedOverlap, SpawnManyReport, SpawnManyTask,
+};
 
 mod config;
 mod demo;
@@ -657,6 +659,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let requested = batch.len();
             let results = orchestrator.spawn_many(
                 batch,
                 safety.as_deref(),
@@ -666,8 +669,8 @@ fn main() -> Result<()> {
                 },
             );
 
-            let mut any_failed = false;
-            for outcome in &results {
+            let report = SpawnManyReport::new(requested, results);
+            for outcome in &report.outcomes {
                 match &outcome.result {
                     Ok((workspace, run)) => {
                         println!("workspace {} ({})", workspace.id, workspace.branch);
@@ -677,16 +680,25 @@ fn main() -> Result<()> {
                             if run.success { "done" } else { "failed" },
                             run.summary
                         );
-                        any_failed |= !run.success;
                     }
                     Err(err) => {
-                        println!("task #{}: failed before/during launch: {err:#}", outcome.index);
-                        any_failed = true;
+                        println!(
+                            "task #{} ({}): FAILED before/during launch -- {err:#}",
+                            outcome.index,
+                            agent_label(outcome.agent)
+                        );
                     }
                 }
             }
-            if any_failed {
-                std::process::exit(1);
+            // Printed unconditionally -- issue #231: "everything worked"
+            // must be as visible and greppable as "something failed", and
+            // exiting via this report's own exit_code() (not an ad hoc
+            // bool tracked alongside the loop above) makes it structurally
+            // impossible to report 0 while requested != created.
+            println!("{}", report.summary_line());
+            let exit_code = report.exit_code();
+            if exit_code != 0 {
+                std::process::exit(exit_code);
             }
         }
         Command::List => {
