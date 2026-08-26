@@ -118,6 +118,17 @@ enum Command {
         /// touch dependencies, paying its full cost for nothing.
         #[arg(long)]
         no_deps: bool,
+
+        /// Explicit workspace name -- drives the workspace id/branch
+        /// directly (slugified, e.g. "Add Pagination" -> "add-pagination")
+        /// instead of the default task-text-slug-plus-random-suffix
+        /// scheme. Issue #234: without this, `--dry-run`'s previewed id
+        /// and the real run's id can never agree (the random suffix is
+        /// regenerated on every call), and a shared task preamble across
+        /// a batch collapses every workspace to the same unreadable
+        /// prefix. Must contain at least one ASCII alphanumeric character.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Create N isolated agent workspaces and run N agent CLIs in them
     /// concurrently, streaming their combined output live with each line
@@ -184,6 +195,15 @@ enum Command {
         /// cost (content-store contention included) for zero benefit.
         #[arg(long)]
         no_deps: bool,
+
+        /// Explicit workspace name for the Nth --task, repeatable in the
+        /// same order as --task -- same fix as `spawn --name` (issue
+        /// #234), applied per task. Either give one --name per --task, or
+        /// omit entirely for the default naming scheme on every task;
+        /// partial naming (fewer --name than --task) is rejected rather
+        /// than guessing which task each name belongs to.
+        #[arg(long = "name")]
+        names: Vec<String>,
     },
     /// List active agent workspaces
     List,
@@ -534,7 +554,11 @@ fn main() -> Result<()> {
             coord_args,
             dry_run,
             no_deps,
+            name,
         } => {
+            if let Some(n) = &name {
+                validate_workspace_name(n)?;
+            }
             let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
@@ -550,7 +574,8 @@ fn main() -> Result<()> {
             });
 
             if dry_run {
-                let preview = orchestrator.spawn_preview(kind, &task, safety.as_deref(), coord_override.as_ref())?;
+                let preview =
+                    orchestrator.spawn_preview(kind, &task, name.as_deref(), safety.as_deref(), coord_override.as_ref())?;
                 print_spawn_preview(&preview);
                 return Ok(());
             }
@@ -573,8 +598,9 @@ fn main() -> Result<()> {
                 coord_override: coord_override.as_ref(),
                 no_deps,
             };
-            let (workspace, outcome) =
-                orchestrator.spawn(kind, &task, &spawn_options, |event| print_event(event, verbose))?;
+            let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
+                print_event(event, verbose)
+            })?;
 
             println!("workspace {} ({})", workspace.id, workspace.branch);
             println!("  path: {}", workspace.path.display());
@@ -593,7 +619,23 @@ fn main() -> Result<()> {
             dry_run,
             estimate_cost,
             no_deps,
+            names,
         } => {
+            if !names.is_empty() && names.len() != tasks.len() {
+                bail!(
+                    "--name given {} time(s) but --task given {} time(s) -- give exactly one \
+                     --name per --task (in the same order), or omit --name entirely for the \
+                     default naming scheme on every task",
+                    names.len(),
+                    tasks.len()
+                );
+            }
+            for n in &names {
+                validate_workspace_name(n)?;
+            }
+            if let Some(dup) = first_duplicate(&names) {
+                bail!("--name '{dup}' was given more than once -- workspace names must be unique within one spawn-many batch");
+            }
             let agent = resolve_default_agent(agent, &config);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let default_agent = agent
@@ -638,7 +680,12 @@ fn main() -> Result<()> {
 
             let batch: Vec<SpawnManyTask> = specs
                 .into_iter()
-                .map(|(agent, task, _)| SpawnManyTask { agent, task })
+                .enumerate()
+                .map(|(index, (agent, task, _))| SpawnManyTask {
+                    agent,
+                    task,
+                    name: names.get(index).cloned(),
+                })
                 .collect();
 
             let overlaps = pact_core::predict_task_overlap(&batch);
@@ -666,6 +713,7 @@ fn main() -> Result<()> {
                     let preview = orchestrator.spawn_preview(
                         task.agent,
                         &task.task,
+                        task.name.as_deref(),
                         safety.as_deref(),
                         coord_override.as_ref(),
                     )?;
@@ -1563,6 +1611,22 @@ fn format_age(seconds: u64) -> String {
 /// Parses one `--task` value into `(agent, task text, agent display name)`
 /// -- see DESIGN.md ("pact-cli") for the prefix-vs-`--agent`-default
 /// precedence rules.
+/// Issue #234: `--name` drives the workspace id directly (slugified, no
+/// random suffix), so it needs at least one character that survives
+/// slugifying -- otherwise the caller would get a confusing empty/opaque
+/// id despite explicitly asking for a readable one.
+fn validate_workspace_name(name: &str) -> Result<()> {
+    if !name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        bail!("--name '{name}' must contain at least one ASCII alphanumeric character");
+    }
+    Ok(())
+}
+
+fn first_duplicate(items: &[String]) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+    items.iter().find(|item| !seen.insert(item.as_str())).map(String::as_str)
+}
+
 fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(AgentKind, String, String)> {
     if let Some((agent_name, task)) = raw.split_once(':') {
         if let Some(kind) = AgentKind::parse(agent_name) {
@@ -2161,6 +2225,29 @@ fn unexpected_repo_root_warning(root: &Path, home: Option<&Path>, levels_up: u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_workspace_name_accepts_a_normal_name() {
+        assert!(validate_workspace_name("add-pagination").is_ok());
+    }
+
+    #[test]
+    fn validate_workspace_name_rejects_a_name_with_no_alphanumeric_characters() {
+        let err = validate_workspace_name("---").unwrap_err();
+        assert!(err.to_string().contains("alphanumeric"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn first_duplicate_finds_a_repeated_name() {
+        let names = vec!["a".to_string(), "b".to_string(), "a".to_string()];
+        assert_eq!(first_duplicate(&names), Some("a"));
+    }
+
+    #[test]
+    fn first_duplicate_returns_none_for_all_distinct_names() {
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(first_duplicate(&names), None);
+    }
 
     #[test]
     fn git_version_supports_worktree_true_for_a_recent_version() {

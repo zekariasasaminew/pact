@@ -74,7 +74,7 @@ fn run_inner(repo_root: &Path) -> Result<()> {
     let workspaces = WorkspaceManager::open(repo_root)?;
     let mut created = Vec::new();
     for demo_task in DEMO_TASKS {
-        let workspace = workspaces.create_workspace(demo_task.task)?;
+        let workspace = workspaces.create_workspace(demo_task.task, None)?;
         std::fs::write(workspace.path.join(demo_task.file_name), demo_task.file_contents).with_context(|| {
             format!("failed to write {} into workspace {}", demo_task.file_name, workspace.id)
         })?;
