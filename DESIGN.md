@@ -1345,6 +1345,84 @@ make every other live child unkillable on Ctrl-C. A failure to install the
 handler at all (e.g. an outer caller already installed one) is logged, not
 fatal -- the agent process(es) just won't be killed on Ctrl-C in that case.
 
+### Orphaned grandchild cleanup, and a deeper pipe-inheritance root cause (issue #237)
+
+A real production `spawn-many` run found 7 `copilot` processes still
+alive after `spawn-many` itself finished and `pact`'s own process had
+already exited -- holding the terminal's stdout pipe open, so the
+caller's shell never got its prompt back. `Supervisor` covered the
+Ctrl-C path (above); there was no equivalent cleanup on the *normal*
+exit path at all.
+
+**What shipped:** `run_and_stream` now calls `kill()` on the tracked
+`GroupChild` again immediately after `wait()` returns for the direct
+agent process -- a no-op in the common case (nothing left to kill), and
+a real sweep of any surviving group member when there is. On Windows,
+the spawn also opts into `command_group`'s `kill_on_drop(true)` (a Job
+Object flag, only exposed on Windows without the crate's `with-tokio`
+feature, which pact doesn't enable): the OS itself kills every process
+still in the job when the job handle closes, which happens automatically
+even if pact's own process exits abruptly (crash, `SIGKILL`) rather than
+normally -- a stronger guarantee than anything a userspace `Drop` could
+give. Verified fast and real:
+`crates/pact-agents/tests/orphan_cleanup.rs`'s
+`killing_a_process_group_after_its_primary_already_exited_still_reaches_a_grandchild`
+proves the exact call `run_and_stream` makes (`kill()` on a group whose
+tracked primary has already exited) still reaches a real grandchild
+process, reusing `group_kill.rs`'s proven parent/grandchild command
+construction.
+
+**What this does *not* fix, found and verified while building the test
+above.** An adversarial test (`fake_parent_with_grandchild`, this
+package's second `[[bin]]`) spawns a grandchild with its own stdio
+explicitly set to `Stdio::null()`, then exits almost immediately --
+modeling a real agent CLI's MCP-server sidecar. On Windows, that
+grandchild still inherited pact's own piped stdout **write handle**: 
+`std::process::Command`'s Windows implementation sets
+`bInheritHandles=true` and duplicates *every* currently-inheritable
+handle in the spawning process' table into the child, not just the three
+explicitly configured stdio handles -- so the pipe's write end stayed
+open in the grandchild's process table even though the grandchild's own
+configured stdout was `Stdio::null()`. `run_and_stream`'s read loop
+cannot see EOF on that pipe until *every* handle to its write end is
+closed, so it blocked for the grandchild's entire remaining lifetime
+(confirmed: `run_and_stream` took 120.57s to return against a 119s-
+remaining `ping -n 120` grandchild -- not an approximation, the measured
+number). By the time the post-wait `kill()` above runs, the grandchild
+is already gone on its own; there is nothing left to sweep. This is
+**worse** than "an orphan survives after pact exits" (the fix above
+targets that) -- it's "pact's own process cannot finish running at all
+until the grandchild does," which matches the original report's exact
+symptom (the shell never returned a prompt) more precisely than the
+orphan-survival framing the issue was originally filed under.
+
+This is a real, previously-undocumented root cause, not a narrow edge
+case: it reproduces with the *simplest possible* grandchild (a single
+`ping`/`sleep` invocation via plain `std::process::Command`, no shell
+tricks), meaning it's the **default** Windows behavior for any
+subprocess an agent CLI spawns normally, not something specific to
+Copilot's own implementation. `command_group`'s job-object wrapping
+isn't the cause -- it spawns via ordinary `std::process::Command::spawn`
+(confirmed by reading `command-group`'s own source) and assigns the
+result to a job afterward; the handle leak happens one level up, in how
+Rust's std itself creates the piped `Stdio` and hands its write end to
+the direct child.
+
+**A real fix needs a different mechanism for capturing agent stdout on
+Windows** -- one immune to default handle inheritance (e.g. a named pipe
+opened with an explicitly non-inheritable handle, or overlapped I/O with
+manual duplication) -- not a small patch to the current anonymous-pipe
+approach. That's a real architectural change to how every agent adapter's
+output is captured, not a bug fix, and is being left for a real
+conversation rather than attempted unilaterally in this pass. A
+deliberately slow, `#[ignore]`d test
+(`run_and_stream_is_blocked_by_a_windows_grandchild_that_inherits_the_
+stdout_pipe`) reproduces and asserts the current, honest behavior (blocks
+for close to the grandchild's full lifetime) so this finding has a real,
+runnable anchor rather than only living in this paragraph -- run
+explicitly with `cargo test --ignored` (~2 minutes), not part of the
+default suite.
+
 ### run_and_stream
 
 Every raw stdout line is appended to `log_path` as-is (not the

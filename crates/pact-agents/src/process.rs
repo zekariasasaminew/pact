@@ -85,14 +85,23 @@ pub fn run_and_stream(
     // by hand, a real Claude Code invocation once printed "no stdin data
     // received in 3s, proceeding without it" and appeared to have received
     // an empty task despite a real, non-empty `-p` value (issue #184).
-    let mut child = command
+    command
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .group_spawn()
-        .with_context(|| format!("failed to spawn `{program}`"))?;
+        .stderr(Stdio::piped());
+    let mut group_builder = command.group();
+    // Windows-only OS-level hardening (issue #237): closing the job
+    // handle -- which happens automatically when pact's own process
+    // exits, cleanly or not -- kills every process still in the job.
+    // `command_group`'s std-`Command` integration only exposes this on
+    // Windows without the crate's `with-tokio` feature (which pact
+    // doesn't enable); the explicit post-wait kill below is the portable
+    // half of the fix and covers Unix too.
+    #[cfg(windows)]
+    group_builder.kill_on_drop(true);
+    let mut child = group_builder.spawn().with_context(|| format!("failed to spawn `{program}`"))?;
 
     let pid = child.id();
     on_pid(pid);
@@ -138,7 +147,25 @@ pub fn run_and_stream(
     let _ = stderr_thread.join();
 
     let status = match supervisor.take(slot) {
-        Some(mut c) => Some(c.wait().context("waiting for agent process to exit")?),
+        Some(mut c) => {
+            let status = c.wait().context("waiting for agent process to exit")?;
+            // Issue #237: waiting only for the direct agent process to
+            // exit is not the same as the whole process *group* being
+            // gone -- a real production run found agent-CLI grandchildren
+            // (the agent's own MCP-server sidecar, spawned by the agent
+            // CLI itself, not by pact) still alive after `spawn-many`
+            // finished and pact's own process had already exited, holding
+            // the terminal's stdout pipe open. Sweeping the group here,
+            // right after the direct child exits, is a no-op if nothing
+            // is left (the common case) and catches exactly this
+            // survivor case when something is. Best-effort: a failure to
+            // kill an already-gone group is expected, not worth failing
+            // this run over.
+            if let Err(err) = c.kill() {
+                tracing::debug!("post-exit group sweep for pid {pid} found nothing to kill (expected in the common case): {err}");
+            }
+            Some(status)
+        }
         None => None, // already reaped by the ctrlc handler
     };
 
