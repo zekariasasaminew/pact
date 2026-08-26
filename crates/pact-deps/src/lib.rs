@@ -135,11 +135,6 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
         }
     };
 
-    // Checked *before* `populate_if_absent`, which would otherwise
-    // populate it -- this is the only way to tell a cache hit from a
-    // cache miss after the fact.
-    let store_hit = store.entry_exists(&key);
-
     let populated = store.populate_if_absent(&key, |tmp| {
         std::fs::copy(workspace_path.join("package.json"), tmp.join("package.json"))
             .context("copying package.json into store staging dir")?;
@@ -153,8 +148,16 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
         Ok(())
     });
 
-    let entry = match populated {
-        Ok(entry) => entry,
+    // issue #240 (found via the slow-integration tier): `store_hit` must
+    // come from `populate_if_absent`'s own return value, computed inside
+    // its lock, not a separate unlocked `entry_exists` check made before
+    // calling it -- under real concurrency, every waiting caller could
+    // observe "doesn't exist yet" at that unlocked snapshot even though
+    // only one of them actually populates once the lock serializes them,
+    // reporting a false store_hit: false storm despite the underlying
+    // populate-once behavior already being correct.
+    let (entry, store_hit) = match populated {
+        Ok((entry, populated_now)) => (entry, !populated_now),
         Err(err) => {
             let note = format!(
                 "shared npm store population failed for key '{key}' -- this is a last-resort \
@@ -166,6 +169,10 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
             );
             tracing::warn!("{note}");
             let mut warnings = vec![note];
+            // Best-effort, unlocked -- this is diagnostic info on a
+            // failure path only, not the success-path hit/miss
+            // classification the race above was about.
+            let store_hit_snapshot = store.entry_exists(&key);
             // A real lockfile exists here (this is the store-population
             // failure branch, past the no-lockfile early return above), so
             // this workspace's install should behave exactly as if pact
@@ -182,7 +189,7 @@ fn prepare_npm(workspace_path: &Path) -> ManagerPrepReport {
                 manager: "npm".to_string(),
                 strategy: "plain-install-store-failed".to_string(),
                 store_key: Some(key),
-                store_hit: Some(store_hit),
+                store_hit: Some(store_hit_snapshot),
                 materialization: None,
                 success,
                 warnings,

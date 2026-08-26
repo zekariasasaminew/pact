@@ -78,9 +78,10 @@ impl ContentStore {
         self.root.join(key)
     }
 
-    /// Whether `key` is already populated -- checked *before*
-    /// `populate_if_absent`, which would otherwise populate it, to tell a
-    /// structured prep report (issue #12) a cache hit from a cache miss.
+    /// A cheap, unlocked existence check -- fine for read-only informational
+    /// use (e.g. `pact store list`), but see `populate_if_absent`'s doc
+    /// comment for why this must never be used to decide "hit or miss" for
+    /// a caller that's about to call `populate_if_absent` itself.
     pub fn entry_exists(&self, key: &str) -> bool {
         self.entry_dir(key).exists()
     }
@@ -95,16 +96,31 @@ impl ContentStore {
     /// populates, the other waits and then reuses what the first produced,
     /// rather than both running a full install into the same directory or
     /// one reading a partially-written entry.
+    ///
+    /// Returns whether *this call* performed a fresh populate (`true`) or
+    /// found the entry already there once it acquired the lock (`false`)
+    /// -- issue #240's slow-integration tier caught a real bug here: the
+    /// original caller (`prepare_npm`) computed "hit or miss" via a
+    /// separate `entry_exists` check *before* calling this function, with
+    /// no lock held for that check. Under real concurrency, every
+    /// waiting caller could see "doesn't exist yet" at that unlocked
+    /// snapshot, even though only one of them actually populates once the
+    /// lock serializes them -- reporting a store_hit: false storm instead
+    /// of the true 1-miss-N-hits shape, even though the underlying
+    /// populate-once behavior was already correct. Computing this flag
+    /// *inside* the lock, at the exact point `entry.exists()` is
+    /// authoritative, is what fixes it.
     pub fn populate_if_absent(
         &self,
         key: &str,
         populate: impl FnOnce(&Path) -> Result<()>,
-    ) -> Result<PathBuf> {
+    ) -> Result<(PathBuf, bool)> {
         let entry = self.entry_dir(key);
         let _lock = PidLock::acquire(&self.lock_path(key), POPULATE_LOCK_TIMEOUT)
             .context("acquiring content-store population lock")?;
 
-        if !entry.exists() {
+        let populated_now = !entry.exists();
+        if populated_now {
             let tmp = self.root.join(format!("{key}.tmp"));
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::create_dir_all(&tmp)?;
@@ -112,7 +128,7 @@ impl ContentStore {
             std::fs::rename(&tmp, &entry).context("promoting populated store entry")?;
         }
 
-        Ok(entry)
+        Ok((entry, populated_now))
     }
 
     fn manifest_path(&self, key: &str) -> PathBuf {
@@ -347,32 +363,40 @@ mod tests {
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         const POPULATE_DELAY: Duration = Duration::from_millis(300);
 
-        let handles: Vec<_> = (0..4)
+        let results: Vec<bool> = (0..4)
             .map(|_| {
                 let store = std::sync::Arc::clone(&store);
                 let call_count = std::sync::Arc::clone(&call_count);
                 std::thread::spawn(move || {
-                    store
+                    let (_, populated_now) = store
                         .populate_if_absent("shared-key", |tmp| {
                             call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             std::thread::sleep(POPULATE_DELAY);
                             std::fs::write(tmp.join("node_modules_marker"), "populated")?;
                             Ok(())
                         })
-                        .unwrap()
+                        .unwrap();
+                    populated_now
                 })
             })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
             .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
 
         assert_eq!(
             call_count.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the populate closure must run exactly once across all 4 concurrent callers -- \
              every other caller must wait and reuse, not duplicate the work"
+        );
+        assert_eq!(
+            results.iter().filter(|&&p| p).count(),
+            1,
+            "exactly one caller's populate_if_absent must report populated_now: true -- issue \
+             #240's regression: reporting this via a separate unlocked entry_exists() check let \
+             every concurrent caller see a false 'miss', even though only one of them actually \
+             populated"
         );
 
         let _ = std::fs::remove_dir_all(store.root());
