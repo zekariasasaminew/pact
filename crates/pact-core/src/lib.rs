@@ -82,6 +82,11 @@ pub struct Orchestrator {
 pub struct SpawnManyTask {
     pub agent: AgentKind,
     pub task: String,
+    /// Explicit workspace name (`--name`, issue #234) -- when given, drives
+    /// the workspace id/branch directly instead of a task-text slug plus a
+    /// random suffix, so `--dry-run`'s preview id and the real run's id
+    /// actually agree.
+    pub name: Option<String>,
 }
 
 /// What `spawn`/`spawn-many` would do for one task, without doing any of
@@ -338,11 +343,12 @@ impl Orchestrator {
         &self,
         agent: AgentKind,
         task: &str,
+        name: Option<&str>,
         options: &SpawnOptions<'_>,
         on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let supervisor = Supervisor::new();
-        self.spawn_with_supervisor(&supervisor, agent, task, options, on_event)
+        self.spawn_with_supervisor(&supervisor, agent, task, name, options, on_event)
     }
 
     /// Runs every `(agent, task)` pair in `tasks` concurrently, one
@@ -376,6 +382,7 @@ impl Orchestrator {
                             supervisor,
                             spec.agent,
                             &spec.task,
+                            spec.name.as_deref(),
                             options,
                             |event| on_event(index, &spec.agent, event),
                         )
@@ -424,10 +431,11 @@ impl Orchestrator {
         &self,
         agent: AgentKind,
         task: &str,
+        name: Option<&str>,
         safety_override: Option<&str>,
         coord_override: Option<&CoordServerOverride>,
     ) -> Result<SpawnPreview> {
-        let (workspace_id, branch, path) = self.workspaces.preview_workspace_location(task);
+        let (workspace_id, branch, path) = self.workspaces.preview_workspace_location(task, name);
         let package_managers = pact_deps::detect(&self.repo_root);
         let adapter = pact_agents::adapter(agent);
 
@@ -466,10 +474,11 @@ impl Orchestrator {
         supervisor: &Supervisor,
         agent: AgentKind,
         task: &str,
+        name: Option<&str>,
         options: &SpawnOptions<'_>,
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
-        let workspace = self.workspaces.create_workspace(task)?;
+        let workspace = self.workspaces.create_workspace(task, name)?;
         let adapter = pact_agents::adapter(agent);
 
         // A dependency-prepare failure shouldn't destroy an otherwise
@@ -1366,7 +1375,7 @@ mod tests {
     use super::*;
 
     fn task(agent: AgentKind, text: &str) -> SpawnManyTask {
-        SpawnManyTask { agent, task: text.to_string() }
+        SpawnManyTask { agent, task: text.to_string(), name: None }
     }
 
     fn fake_workspace(id: &str) -> Workspace {
