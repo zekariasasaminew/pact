@@ -129,6 +129,99 @@ fn spawn_runs_a_fake_agent_and_lands_its_scripted_edit() {
     cleanup(&shim);
 }
 
+/// Regression test for issue #234's actual fix: `--name` must make
+/// `--dry-run`'s previewed workspace id and the real run's id identical --
+/// the whole complaint was that they never agreed, since the default
+/// scheme regenerates a random suffix on every call.
+#[test]
+fn spawn_with_name_makes_dry_run_and_real_run_ids_agree() {
+    let repo = init_repo("spawn-name-parity");
+    let shim = shim_dir();
+
+    let task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let dry_run = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--name", "My Feature", "--dry-run"]);
+    assert!(dry_run.status.success(), "stdout: {}\nstderr: {}", stdout(&dry_run), String::from_utf8_lossy(&dry_run.stderr));
+    let dry_run_text = stdout(&dry_run);
+    let previewed_id = dry_run_text
+        .lines()
+        .find(|l| l.starts_with("would create workspace "))
+        .and_then(|l| l.split_whitespace().nth(3))
+        .unwrap_or_else(|| panic!("no 'would create workspace <id> (...)' line in dry-run output:\n{dry_run_text}"))
+        .to_string();
+    assert_eq!(previewed_id, "my-feature", "expected the name to drive the id directly, got: {previewed_id}");
+
+    let real = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--name", "My Feature"]);
+    assert!(real.status.success(), "stdout: {}\nstderr: {}", stdout(&real), String::from_utf8_lossy(&real.stderr));
+    let real_id = workspace_id_from_spawn_output(&real);
+    assert_eq!(real_id, previewed_id, "the real run's id must match the dry-run preview exactly");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// `--name` given more than once for the same value must be rejected --
+/// two workspaces silently colliding on the same id/branch is a confusing
+/// failure to debug, and it's cheaply preventable up front.
+#[test]
+fn spawn_many_rejects_duplicate_names() {
+    let repo = init_repo("spawn-many-duplicate-names");
+    let shim = shim_dir();
+
+    let task_a = script(&[("a.txt", "A")], "created a.txt");
+    let task_b = script(&[("b.txt", "B")], "created b.txt");
+    let output = pact(
+        &repo,
+        &shim,
+        &[
+            "spawn-many",
+            "--agent",
+            "claude",
+            "--task",
+            &task_a,
+            "--task",
+            &task_b,
+            "--name",
+            "same-name",
+            "--name",
+            "same-name",
+        ],
+    );
+    assert!(!output.status.success(), "expected duplicate --name values to be rejected");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("more than once"),
+        "expected a duplicate-name error, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// `--name` given fewer times than `--task` must be rejected rather than
+/// silently guessing which task each name belongs to.
+#[test]
+fn spawn_many_rejects_a_partial_name_count() {
+    let repo = init_repo("spawn-many-partial-names");
+    let shim = shim_dir();
+
+    let task_a = script(&[("a.txt", "A")], "created a.txt");
+    let task_b = script(&[("b.txt", "B")], "created b.txt");
+    let output = pact(
+        &repo,
+        &shim,
+        &["spawn-many", "--agent", "claude", "--task", &task_a, "--task", &task_b, "--name", "only-one"],
+    );
+    assert!(!output.status.success(), "expected a partial --name count to be rejected");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--name given"),
+        "expected a count-mismatch error, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 /// Regression test for issue #212, outside Windows Copilot report: a task
 /// that reports success but touches zero files (a real shape -- an agent
 /// that was told a target file must already exist, found it missing, and

@@ -45,7 +45,7 @@ fn run_pact(repo: &Path, args: &[&str]) -> std::process::Output {
 fn merge_all_exits_2_when_require_passing_tests_rejects_a_clean_merge() {
     let repo = init_repo("fails");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     // Passes on the unmodified base (b.txt doesn't exist yet), fails once
@@ -70,7 +70,7 @@ fn merge_all_exits_2_when_require_passing_tests_rejects_a_clean_merge() {
 fn merge_all_exits_1_and_diagnoses_the_environment_when_the_gate_fails_on_base() {
     let repo = init_repo("broken-environment");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     // Never committed anywhere -- absent from every worktree, including
@@ -99,7 +99,7 @@ fn merge_all_exits_1_and_diagnoses_the_environment_when_the_gate_fails_on_base()
 fn merge_all_exits_0_when_require_passing_tests_accepts_every_merge() {
     let repo = init_repo("passes");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let a = manager.create_workspace("add b.txt").unwrap();
+    let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
     let pass_cmd = if cfg!(windows) { "exit 0" } else { "true" };

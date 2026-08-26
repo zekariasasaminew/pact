@@ -60,7 +60,7 @@ fn resolve_conflict_succeeds_once_the_workspace_branch_no_longer_conflicts() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("bump L1 to 100").unwrap();
+    let a = manager.create_workspace("bump L1 to 100", None).unwrap();
     std::fs::write(
         a.path.join("src/index.ts"),
         "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -68,7 +68,7 @@ fn resolve_conflict_succeeds_once_the_workspace_branch_no_longer_conflicts() {
     )
     .unwrap();
 
-    let b = manager.create_workspace("bump L1 to 200").unwrap();
+    let b = manager.create_workspace("bump L1 to 200", None).unwrap();
     std::fs::write(
         b.path.join("src/index.ts"),
         "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -114,7 +114,7 @@ fn resolve_conflict_reports_still_conflicted_when_nothing_changed() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("bump L1 to 100").unwrap();
+    let a = manager.create_workspace("bump L1 to 100", None).unwrap();
     std::fs::write(
         a.path.join("src/index.ts"),
         "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -122,7 +122,7 @@ fn resolve_conflict_reports_still_conflicted_when_nothing_changed() {
     )
     .unwrap();
 
-    let b = manager.create_workspace("bump L1 to 200").unwrap();
+    let b = manager.create_workspace("bump L1 to 200", None).unwrap();
     std::fs::write(
         b.path.join("src/index.ts"),
         "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\

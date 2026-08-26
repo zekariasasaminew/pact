@@ -50,7 +50,7 @@ fn run_inspect(repo: &Path, id: &str) -> std::process::Output {
 fn inspect_shows_basic_metadata_for_a_freshly_created_workspace() {
     let repo = init_repo("basic");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let ws = manager.create_workspace("add a feature").unwrap();
+    let ws = manager.create_workspace("add a feature", None).unwrap();
 
     let output = run_inspect(&repo, &ws.id);
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
@@ -72,7 +72,7 @@ fn inspect_shows_basic_metadata_for_a_freshly_created_workspace() {
 fn inspect_shows_persisted_dependency_prep_and_run_metadata() {
     let repo = init_repo("with-records");
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let ws = manager.create_workspace("add a feature").unwrap();
+    let ws = manager.create_workspace("add a feature", None).unwrap();
 
     let meta_dir = manager.state_dir().join("meta");
     std::fs::write(

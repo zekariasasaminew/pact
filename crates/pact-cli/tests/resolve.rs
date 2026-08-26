@@ -61,7 +61,7 @@ fn show_file(repo: &Path, rev: &str, path: &str) -> String {
 fn create_conflicting_pair(repo: &Path) -> (pact_vcs::Workspace, pact_vcs::Workspace) {
     let manager = WorkspaceManager::open(repo).unwrap();
 
-    let a = manager.create_workspace("bump L1 to 100").unwrap();
+    let a = manager.create_workspace("bump L1 to 100", None).unwrap();
     std::fs::write(
         a.path.join("src/index.ts"),
         "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -69,7 +69,7 @@ fn create_conflicting_pair(repo: &Path) -> (pact_vcs::Workspace, pact_vcs::Works
     )
     .unwrap();
 
-    let b = manager.create_workspace("bump L1 to 200").unwrap();
+    let b = manager.create_workspace("bump L1 to 200", None).unwrap();
     std::fs::write(
         b.path.join("src/index.ts"),
         "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\

@@ -97,7 +97,7 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
 
     // See DESIGN.md ("pact-vcs > merge_all") for why this scenario is
     // shaped the way it is (confirmed by hand against real git first).
-    let a = manager.create_workspace("append L6").unwrap();
+    let a = manager.create_workspace("append L6", None).unwrap();
     std::fs::write(
         a.path.join("src/index.ts"),
         "export const L1 = 1;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -105,10 +105,10 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     )
     .unwrap();
 
-    let b = manager.create_workspace("bump OTHER").unwrap();
+    let b = manager.create_workspace("bump OTHER", None).unwrap();
     std::fs::write(b.path.join("src/other.ts"), "export const OTHER = 99;\n").unwrap();
 
-    let c = manager.create_workspace("bump L1 to 100").unwrap();
+    let c = manager.create_workspace("bump L1 to 100", None).unwrap();
     std::fs::write(
         c.path.join("src/index.ts"),
         "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -116,7 +116,7 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     )
     .unwrap();
 
-    let d = manager.create_workspace("bump L1 to 200").unwrap();
+    let d = manager.create_workspace("bump L1 to 200", None).unwrap();
     std::fs::write(
         d.path.join("src/index.ts"),
         "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -192,7 +192,7 @@ fn merge_all_dry_run_touches_no_git_state() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add chunk export").unwrap();
+    let a = manager.create_workspace("add chunk export", None).unwrap();
     std::fs::write(
         a.path.join("src/index.ts"),
         "export {};\nexport * from './chunk';\n",
@@ -239,7 +239,7 @@ fn merge_all_reports_skipped_not_merged_when_auto_commit_fails() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add a change").unwrap();
+    let a = manager.create_workspace("add a change", None).unwrap();
     std::fs::write(a.path.join("src/other.ts"), "export const OTHER = 999;\n").unwrap();
 
     // Hooks are shared across every worktree of this repo (there's only
@@ -304,14 +304,14 @@ fn merge_all_dry_run_sequences_a_central_file_touch_after_a_larger_plain_changes
     let root = init_repo_with_package_json();
     let manager = WorkspaceManager::open(&root).unwrap();
 
-    let central = manager.create_workspace("bump a dependency").unwrap();
+    let central = manager.create_workspace("bump a dependency", None).unwrap();
     std::fs::write(
         central.path.join("package.json"),
         "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"a\": \"2.0.0\"\n  }\n}\n",
     )
     .unwrap();
 
-    let plain = manager.create_workspace("add three new files").unwrap();
+    let plain = manager.create_workspace("add three new files", None).unwrap();
     std::fs::write(plain.path.join("a.ts"), "export const A = 1;\n").unwrap();
     std::fs::write(plain.path.join("b.ts"), "export const B = 1;\n").unwrap();
     std::fs::write(plain.path.join("c.ts"), "export const C = 1;\n").unwrap();
@@ -336,7 +336,7 @@ fn merge_all_skips_workspace_whose_base_is_no_longer_an_ancestor() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("some change").unwrap();
+    let a = manager.create_workspace("some change", None).unwrap();
     std::fs::write(a.path.join("src/index.ts"), "export const X = 1;\n").unwrap();
 
     // Rewrite the repo's own init commit so the SHA `a.base_commit` recorded
@@ -366,14 +366,14 @@ fn merge_all_auto_resolves_package_json_dependency_conflict() {
 
     // Confirmed by hand against real git first -- see DESIGN.md
     // ("pact-vcs > Semantic auto-resolution").
-    let a = manager.create_workspace("add dep b").unwrap();
+    let a = manager.create_workspace("add dep b", None).unwrap();
     std::fs::write(
         a.path.join("package.json"),
         "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"a\": \"1.0.0\",\n    \"b\": \"2.0.0\"\n  }\n}\n",
     )
     .unwrap();
 
-    let b = manager.create_workspace("add dep c").unwrap();
+    let b = manager.create_workspace("add dep c", None).unwrap();
     std::fs::write(
         b.path.join("package.json"),
         "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"a\": \"1.0.0\",\n    \"c\": \"3.0.0\"\n  }\n}\n",
@@ -425,14 +425,14 @@ fn merge_all_package_json_merge_preserves_key_order_and_indent() {
 
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add dep b").unwrap();
+    let a = manager.create_workspace("add dep b", None).unwrap();
     std::fs::write(
         a.path.join("package.json"),
         base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n        \"b\": \"2.0.0\"\n"),
     )
     .unwrap();
 
-    let b = manager.create_workspace("add dep c").unwrap();
+    let b = manager.create_workspace("add dep c", None).unwrap();
     std::fs::write(
         b.path.join("package.json"),
         base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n        \"c\": \"3.0.0\"\n"),
@@ -480,14 +480,14 @@ fn merge_all_package_json_merge_handles_utf8_bom() {
 
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add dep b").unwrap();
+    let a = manager.create_workspace("add dep b", None).unwrap();
     std::fs::write(
         a.path.join("package.json"),
         format!("{BOM}{}", base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n    \"b\": \"2.0.0\"\n")),
     )
     .unwrap();
 
-    let b = manager.create_workspace("add dep c").unwrap();
+    let b = manager.create_workspace("add dep c", None).unwrap();
     std::fs::write(
         b.path.join("package.json"),
         format!("{BOM}{}", base.replace("\"a\": \"1.0.0\"\n", "\"a\": \"1.0.0\",\n    \"c\": \"3.0.0\"\n")),
@@ -522,10 +522,10 @@ fn merge_all_union_resolves_matched_file_conflict() {
     let repo = init_repo_with_barrel();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("export chunk").unwrap();
+    let a = manager.create_workspace("export chunk", None).unwrap();
     std::fs::write(a.path.join("src/barrel.ts"), "export {};\nexport * from './chunk';\n").unwrap();
 
-    let b = manager.create_workspace("export omit").unwrap();
+    let b = manager.create_workspace("export omit", None).unwrap();
     std::fs::write(b.path.join("src/barrel.ts"), "export {};\nexport * from './omit';\n").unwrap();
 
     let report = manager
@@ -554,14 +554,14 @@ fn merge_all_never_auto_resolves_lockfiles_even_with_matching_union_glob() {
     let repo = init_repo_with_package_json();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("touch lockfile a").unwrap();
+    let a = manager.create_workspace("touch lockfile a", None).unwrap();
     std::fs::write(
         a.path.join("package-lock.json"),
         "{\n  \"lockfileVersion\": 1,\n  \"a\": true\n}\n",
     )
     .unwrap();
 
-    let b = manager.create_workspace("touch lockfile b").unwrap();
+    let b = manager.create_workspace("touch lockfile b", None).unwrap();
     std::fs::write(
         b.path.join("package-lock.json"),
         "{\n  \"lockfileVersion\": 1,\n  \"b\": true\n}\n",
@@ -602,7 +602,7 @@ fn merge_all_union_rejects_conflicting_module_exports() {
 
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let a = manager.create_workspace("add mul").unwrap();
+    let a = manager.create_workspace("add mul", None).unwrap();
     std::fs::write(
         a.path.join("src/barrel.js"),
         "const { add } = require('./add');\nconst { sub } = require('./sub');\n\
@@ -610,7 +610,7 @@ fn merge_all_union_rejects_conflicting_module_exports() {
     )
     .unwrap();
 
-    let b = manager.create_workspace("add div").unwrap();
+    let b = manager.create_workspace("add div", None).unwrap();
     std::fs::write(
         b.path.join("src/barrel.js"),
         "const { add } = require('./add');\nconst { sub } = require('./sub');\n\
@@ -640,14 +640,14 @@ fn merge_all_accepts_a_stub_arbiter_resolution() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let c = manager.create_workspace("bump L1 to 100").unwrap();
+    let c = manager.create_workspace("bump L1 to 100", None).unwrap();
     std::fs::write(
         c.path.join("src/index.ts"),
         "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
          export const L4 = 4;\nexport const L5 = 5;\n",
     )
     .unwrap();
-    let d = manager.create_workspace("bump L1 to 200").unwrap();
+    let d = manager.create_workspace("bump L1 to 200", None).unwrap();
     std::fs::write(
         d.path.join("src/index.ts"),
         "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -696,14 +696,14 @@ fn merge_all_still_aborts_when_arbiter_declines() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    let c = manager.create_workspace("bump L1 to 100").unwrap();
+    let c = manager.create_workspace("bump L1 to 100", None).unwrap();
     std::fs::write(
         c.path.join("src/index.ts"),
         "export const L1 = 100;\nexport const L2 = 2;\nexport const L3 = 3;\n\
          export const L4 = 4;\nexport const L5 = 5;\n",
     )
     .unwrap();
-    let d = manager.create_workspace("bump L1 to 200").unwrap();
+    let d = manager.create_workspace("bump L1 to 200", None).unwrap();
     std::fs::write(
         d.path.join("src/index.ts"),
         "export const L1 = 200;\nexport const L2 = 2;\nexport const L3 = 3;\n\
@@ -735,7 +735,7 @@ fn merge_all_still_aborts_when_arbiter_declines() {
 fn list_workspaces_and_get_workspace_tolerate_a_bom_in_meta_json() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
-    let ws = manager.create_workspace("some task").unwrap();
+    let ws = manager.create_workspace("some task", None).unwrap();
 
     let meta_path = manager.state_dir().join("meta").join(format!("{}.json", ws.id));
     let original = std::fs::read_to_string(&meta_path).unwrap();
