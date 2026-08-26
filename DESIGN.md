@@ -3177,6 +3177,52 @@ real-subprocess round trip, which is lower-value for Arbiter
 specifically since its prompt construction (not its process-spawning) is
 where most of its bugs have actually been.
 
+### Slow integration tier (issue #240)
+
+A real production report's method-level critique, not a single bug:
+`require_passing_tests` was covered only by `true`/`false` fixtures that
+never needed a dependency (couldn't have caught #232's "gate can't even
+run" bug by construction); `store.rs` had no test exercising real
+concurrent population; nothing asserted N `spawn-many` tasks produce N
+workspaces under *real* contention rather than a fast/synthetic
+approximation of it. "If a test's fixture command is `true` or `false`,
+it's testing the plumbing, not the feature" -- verified true of this
+project's suite before this section existed.
+
+`crates/pact-cli/tests/slow_integration.rs` is the first entry in a
+deliberately separate, `#[ignore]`d tier -- not part of default `cargo
+test --workspace`, run explicitly (`cargo test --ignored` or `--
+--include-ignored`) or on a schedule, since a real `npm ci` and 5-way
+real concurrency cost real wall time CI shouldn't pay on every push.
+Its one test exercises the exact combination the original report hit:
+5 concurrent `spawn-many` tasks against a repo with a real (zero-dependency,
+no-network) npm lockfile, then a dependency-requiring `--require-passing-
+tests` gate -- covering #230 (count fidelity under real `git worktree
+add` contention), #233 (content-store sharing under real concurrent
+`npm ci`), and #232 (the gate's environment-vs-code diagnosis) together,
+not simulated separately.
+
+**This tier caught a real bug on its first run, which is the whole
+point of it existing.** `prepare_npm` computed `store_hit` via a
+separate `ContentStore::entry_exists` check made *before* calling
+`populate_if_absent`, with no lock held for that check. Under the fake-agent
+harness's fast synthetic concurrency this never showed up (threads never
+raced tightly enough), but real concurrent processes hitting a real,
+slower `npm ci` did: all 5 concurrent tasks observed the unlocked
+pre-check as "doesn't exist yet" before any of them finished populating,
+so all 5 reported `store_hit: false` -- even though `populate_if_absent`'s
+own locking was already correct and only one `npm ci` actually ran.
+Fixed by moving the hit/miss determination *inside* `populate_if_absent`'s
+lock, at the exact point `entry.exists()` is authoritative: it now
+returns `(PathBuf, bool)`, the `bool` meaning "this call performed a
+fresh populate." `prepare_npm` derives `store_hit` from that instead of
+a separate racy check. The fast, synthetic `populate_if_absent_reuses_a_
+slow_populate_instead_of_duplicating_it` unit test (issue #233) was
+strengthened to assert exactly one of 4 concurrent callers reports
+`populated_now: true`, so this specific race has fast, deterministic
+regression coverage too -- the slow tier found it, a fast test now
+guards it.
+
 ### `spawn-many --dry-run --estimate-cost` (issue #222)
 
 Outside feature notes observed that first-time users on API-metered
