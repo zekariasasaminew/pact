@@ -13,7 +13,21 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a caller waits for `locks/git.lock` (guards `git worktree
+/// add`/`remove`, see DESIGN.md ("pact-vcs > PidLock origin")) before giving
+/// up. Deliberately generous, not tuned to "how long one worktree checkout
+/// takes" -- a legitimately busy queue (N concurrent `spawn-many` tasks each
+/// waiting their turn for a slow checkout) is not a deadlock and must not
+/// time out just because it's still working. A genuine deadlock (holder
+/// process hung, not crashed) is the only real reason to ever hit this: a
+/// holder that crashed is already caught by `PidLock`'s liveness-based
+/// stale-lock stealing before this timeout matters, so this constant only
+/// guards the case liveness can't -- a live-but-stuck holder. See issue
+/// #230: at the old 30s value, N-1 waiters queued behind an N-second-per-
+/// worktree checkout blew through the timeout on nothing but ordinary
+/// contention, and `spawn-many` silently produced fewer workspaces than
+/// tasks requested with no loud signal.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Workspace {
@@ -317,8 +331,15 @@ impl WorkspaceManager {
         let (id, branch, path) = self.preview_workspace_location(task);
 
         let base_commit = {
-            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
-                .context("acquiring git worktree lock")?;
+            let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT).with_context(|| {
+                format!(
+                    "acquiring git worktree lock for workspace {id} -- this workspace was NOT \
+                     created. If this fired under `spawn-many`, it means the lock was held by \
+                     another workspace's `git worktree add` for the full {LOCK_TIMEOUT:?} (a \
+                     genuinely stuck holder), not ordinary queueing; a caller must treat this as \
+                     a real per-task failure, not assume every requested task produced a workspace"
+                )
+            })?;
 
             let base_commit = run_git_text(&self.repo_root, &["rev-parse", "HEAD"])?;
 

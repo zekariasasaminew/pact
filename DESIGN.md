@@ -22,6 +22,46 @@ it's just "serialize access to a resource, and don't leave it stuck locked
 forever if the holder died." `pact-deps` reuses it verbatim to guard
 concurrent population of a shared dependency store entry.
 
+### Lock timeout: 30s -> 30min (issue #230)
+
+The 30s `LOCK_TIMEOUT` used to guard `git worktree add`/`remove` was tuned
+as an arbitrary "don't hang forever" ceiling, not derived from anything
+real. A real production `spawn-many` run (497-file repo, 5 concurrent
+tasks) hit it: `git worktree add` took ~9s per checkout on that repo, so
+the 5th task's wait for its turn (~4 waiters * 9s = 36s) exceeded 30s, the
+lock acquisition failed, and the task silently never became a workspace --
+no error text reached the report's captured output (see issue #8, the
+same run's orphaned-process terminal wedge, for why). The failure
+condition is `(N-1) * checkout_seconds > 30`, which is a cliff that gets
+easier to hit as either N or repo size grows, on a codebase where nothing
+was actually stuck.
+
+Re-verified empirically before changing anything: 60 concurrent, unlocked
+`git worktree add -b` calls across 3 rounds (12-20 way) against a 3000-file
+repo on git 2.46/Windows produced zero failures and `git fsck` came back
+clean -- modern git does not appear to need this serialization for
+distinct paths/branches on this platform. Removing the lock entirely
+(rather than just fixing the timeout) was considered and rejected for this
+pass: the original anthropics/claude-code#34645 citation above predates
+this verification, was not re-checked against current git on macOS/Linux
+(unavailable in this environment, same standing limitation as issue #6),
+and the actual reported harm was the timeout misfiring on ordinary
+contention, not that the lock itself was slow or wrong. Widening the
+timeout fixes the reported bug without reversing a documented safety
+decision on unverified ground.
+
+`LOCK_TIMEOUT` is now 30 minutes. The reasoning: `PidLock`'s stale-lock
+stealing (liveness + start-time check, see below) already handles the
+"holder crashed" case before this timeout is ever consulted -- the only
+scenario left for this timeout to guard is a holder that is alive but
+genuinely stuck, which is rare and deserves a generous window, not a
+budget sized to one worktree checkout. When it does fire, the error is
+still a hard, attributed, non-swallowable failure (`create_workspace`
+returns `Err`, `spawn_many` surfaces it per-task, the CLI prints `task #N:
+failed before/during launch: ...` and exits 1) -- see issue #231 for
+making that reconciliation a structural invariant instead of relying on
+this loop being correct.
+
 ### PID reuse (issue #70)
 
 A PID-only liveness check has a real gap: if the original holder died and

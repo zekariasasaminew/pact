@@ -241,6 +241,46 @@ mod tests {
     }
 
     #[test]
+    fn acquire_waits_out_contention_instead_of_giving_up_early() {
+        // Regression test for issue #230: N threads each hold the lock
+        // briefly in turn. The total wait for the last thread in line
+        // (`N * HOLD`) comfortably exceeds a short timeout like the old
+        // 30s-relative-to-checkout-cost cliff would represent -- proving a
+        // generous timeout lets legitimate queueing resolve instead of
+        // manufacturing a failure out of ordinary contention.
+        const HOLD: Duration = Duration::from_millis(120);
+        const WORKERS: usize = 8;
+        // Comfortably larger than WORKERS * HOLD, but tiny in test-suite
+        // terms -- this is what "generous, not tuned to the workload"
+        // means in practice.
+        const PATIENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let dir = std::env::temp_dir().join(format!("pact-pidlock-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock_path = dir.join("test.lock");
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..WORKERS)
+                .map(|_| {
+                    let lock_path = &lock_path;
+                    scope.spawn(move || {
+                        let lock = PidLock::acquire(lock_path, PATIENT_TIMEOUT)
+                            .expect("every worker must eventually acquire the lock");
+                        std::thread::sleep(HOLD);
+                        drop(lock);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("worker thread must not panic");
+            }
+        });
+
+        assert!(!lock_path.exists(), "the last holder must release the lock");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn steal_if_stale_still_honors_the_old_bare_pid_format() {
         let dir = std::env::temp_dir().join(format!("pact-pidlock-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
