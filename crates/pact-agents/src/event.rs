@@ -28,4 +28,12 @@ pub enum AgentEvent {
         success: bool,
         summary: String,
     },
+    /// A synthetic, pact-generated (not adapter-parsed) progress marker --
+    /// issue #241: a real `spawn-many` run produced zero output for ~22
+    /// minutes during dependency prep, indistinguishable from a hang.
+    /// Emitted by `pact-core` around each phase of a single spawn
+    /// (workspace creation, dependency prep, the agent run itself), not
+    /// by any adapter's `parse_line` -- unlike every other variant here,
+    /// this doesn't come from the agent CLI's own output at all.
+    Phase(String),
 }

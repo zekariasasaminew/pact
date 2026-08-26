@@ -1242,6 +1242,61 @@ more `CoordStatus` events per line as its own schema demands; the
 connectivity check that consumes them (`pact-core`) doesn't need to know
 which shape produced them.
 
+### `Phase` events and the end-of-run summary (issue #241)
+
+A real production `spawn-many` run produced **zero output for ~22
+minutes** during dependency prep -- indistinguishable, from the
+outside, from a hang. On top of that, the run's final output was just
+each workspace's raw "done: <summary>" line, no indication of how long
+anything took or whether the shared npm content store had actually
+helped.
+
+**`AgentEvent::Phase(String)`** is the one variant in this enum that
+doesn't come from an agent CLI's own output at all -- it's synthetic,
+emitted directly by `pact-core`'s `spawn_with_supervisor` around each
+phase of a single spawn: right before `create_workspace` ("creating
+workspace"), right before and after `pact_deps::prepare` ("preparing
+dependencies", then a summary of what happened), and right before
+`run_and_stream` launches the agent ("running agent"). Printed
+unconditionally by the CLI (`[phase] <text>`, or `[label:index] [phase]
+<text>` under `spawn-many`) -- deliberately not gated behind
+`--verbose`/`should_print_other` the way adapter chatter is, since the
+entire point is a visible heartbeat during a phase that would otherwise
+produce nothing at all.
+
+This doesn't turn the 22-minute stall itself into fast progress -- that
+was issue #233's job (the content-store lock timeout, fixed separately)
+-- it turns 22 minutes of silence into "preparing dependencies" staying
+on screen the whole time, which is enough to tell a stall from a hang.
+A finer-grained live progress bar (bytes downloaded, percent complete)
+was considered and left out: `pact_deps::prepare` has no natural
+sub-phase hooks to report through without a much larger refactor of
+`prepare_npm`'s own internals, and a static "still working on this"
+marker already answers the actual complaint (no signal at all) without
+that cost.
+
+**The end-of-run summary** (`spawn-many`'s per-workspace listing) now
+prints two more lines per successful workspace, both from data that
+already existed but was never surfaced here: `duration: Ns` (from
+`RunMetadata.started_at`/`ended_at`, issue #12) and `dependencies:
+<manager>: <outcome>` (from `ManagerPrepReport`, issue #12/#160's
+`store_hit`, via the new `dependency_summary_line` -- distinct from
+`dependency_phase_summary` in `pact-core`, which renders the same data
+for the *live* phase marker instead of the final listing, slightly
+different wording for each context). Both come from data files that
+already existed (`pact inspect <id>` could always show this) -- the
+fix is presenting them by default at the point a real user is actually
+looking, not requiring a second command per workspace after the fact.
+
+**Deliberately not done, per the issue's own proposed direction (d)**:
+writing the summary to `meta/` as JSON so it survives a wedged
+terminal. `RunMetadata`/`ManagerPrepReport` already persist per-workspace
+(exactly this data, just not aggregated into one file) and survive a
+wedged terminal today via `pact inspect`/`pact status --json` after the
+fact -- a *separate* aggregate summary file would duplicate that
+persistence for marginal benefit over querying the existing sidecars,
+not attempted here.
+
 ### Process group kill
 
 `Supervisor` (below) covers the Ctrl-C path; `kill_if_alive` in `pact-vcs`
