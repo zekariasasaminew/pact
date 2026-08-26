@@ -399,6 +399,50 @@ via a `--dry-run` preview showing a workspace touching three plain
 files sequenced *before* one touching only `package.json`, despite the
 `package.json` workspace changing fewer files overall.
 
+### Overlap-aware risk scoring (issue #236)
+
+A real production run's own `--dry-run` output showed the same limitation
+this document's "deliberately deferred" note above already anticipated,
+confirmed in practice: four workspaces each touching one key of the same
+`package.json` all scored `4` (`1` file `+3` central-file penalty),
+identically -- "least risky first" had degenerated to plain creation
+order, and the `--dry-run` output presented that as if it were a real
+decision.
+
+**The prior deferral reasoning turns out to have been more conservative
+than necessary.** The note above assumed `overlap_with_other_workspaces`
+would need `pact-vcs` to depend on `pact-core`'s Weaver prediction and/or
+`pact-coord`'s live lease state -- a real cross-crate change. It doesn't:
+`merge_all` already computes every selected workspace's own
+`workspace_changes` locally, within `pact-vcs`, before sequencing them.
+Computing each workspace's overlap against the *union of every other
+selected workspace's changed files in the same batch* needs nothing
+beyond data `merge_all` was already gathering, just gathered once up
+front instead of one workspace at a time.
+
+`merge_risk_score(files, other_files: &HashSet<String>)` gained a third
+term: `+10` (`OVERLAP_PENALTY`) per file `files` shares with
+`other_files` -- deliberately dominant over the existing `+3`/`+5`
+central-file/lockfile penalties and any realistic plain file count, so a
+workspace sharing anything with the rest of the batch reliably outranks
+one that doesn't, matching the report's own proposed model ("merge the
+workspace with fewest overlapping files against all others first").
+
+**Still file-level, not hunk-level** (the report's proposed direction
+(b), not attempted here): four workspaces editing disjoint regions of
+one file (genuinely low risk) and two editing the same function
+(genuinely high risk) both score as "shares this file with N others"
+identically -- overlap-aware scoring narrows the gap `merge_risk_score`
+can't close (four *different* files scoring identically is now fixed;
+four edits to the *same* file needing hunk-level analysis to
+differentiate is not, and would need real diff/hunk data this heuristic
+deliberately doesn't compute). Because ties are therefore still possible
+for a realistic batch (several workspaces genuinely sharing the exact
+same one file), `merge-all --dry-run` now detects the all-scores-equal
+case explicitly and says the order shown is creation order, not a risk
+ranking -- honest about the heuristic's limits instead of presenting a
+meaningless order as a decision.
+
 ### Test-gated merge (issue #65)
 
 Batty (a nearby competitor) has test gating without N-way merge; pact had
