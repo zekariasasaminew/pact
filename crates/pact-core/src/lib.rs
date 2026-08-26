@@ -118,6 +118,76 @@ pub struct SpawnManyOutcome {
     pub result: Result<(Workspace, RunOutcome)>,
 }
 
+/// Reconciles a `spawn_many` batch's outcomes against how many tasks were
+/// actually requested -- issue #231: nothing previously guaranteed N tasks
+/// in produced N workspaces out, or forced a caller to check. A caller
+/// builds this once from `spawn_many`'s return value and drives all
+/// success/failure reporting through it, rather than re-deriving the same
+/// "did everything work" logic ad hoc (the exact thing issue #230 slipped
+/// through: a failed task with no caller-side check for it).
+pub struct SpawnManyReport {
+    pub requested: usize,
+    pub outcomes: Vec<SpawnManyOutcome>,
+}
+
+impl SpawnManyReport {
+    pub fn new(requested: usize, outcomes: Vec<SpawnManyOutcome>) -> Self {
+        Self { requested, outcomes }
+    }
+
+    /// Workspaces that actually got created, regardless of whether the
+    /// agent run inside them then succeeded -- the count issue #231 cares
+    /// about is workspace creation, not agent success.
+    pub fn created_count(&self) -> usize {
+        self.outcomes.iter().filter(|o| o.result.is_ok()).count()
+    }
+
+    /// Tasks that never became a workspace at all (failed before/during
+    /// launch -- e.g. issue #230's lock timeout), in task order.
+    pub fn launch_failures(&self) -> impl Iterator<Item = (usize, AgentKind, &anyhow::Error)> {
+        self.outcomes
+            .iter()
+            .filter_map(|o| o.result.as_ref().err().map(|e| (o.index, o.agent, e)))
+    }
+
+    /// True if any task failed to launch at all, or launched but the agent
+    /// run itself reported failure -- the CLI's exit-code signal.
+    pub fn any_run_failed(&self) -> bool {
+        self.outcomes.iter().any(|o| match &o.result {
+            Err(_) => true,
+            Ok((_, run)) => !run.success,
+        })
+    }
+
+    /// The process exit code this batch earns -- `0` only when every task
+    /// both launched and reported success. Exposed as a method (not left
+    /// for each caller to re-derive from `any_run_failed`) so the CLI has
+    /// no separate ad hoc bool to keep in sync with this report.
+    pub fn exit_code(&self) -> i32 {
+        if self.any_run_failed() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// A single, unconditional, machine-greppable line summarizing the
+    /// batch -- printed regardless of outcome, so "everything worked" is as
+    /// visible and checkable as "something failed" (issue #231, issue #1's
+    /// report: nothing said "5 requested, 4 created" even in the failure
+    /// case, let alone the success case).
+    pub fn summary_line(&self) -> String {
+        let created = self.created_count();
+        format!(
+            "spawn-many: {} task{} requested, {created} workspace{} created, {} failed",
+            self.requested,
+            if self.requested == 1 { "" } else { "s" },
+            if created == 1 { "" } else { "s" },
+            self.requested - created,
+        )
+    }
+}
+
 /// One file touched by more than one active workspace sharing a common
 /// merge-base -- see `Orchestrator::detect_conflicts` (issue #8).
 #[derive(Debug, Clone)]
@@ -1285,6 +1355,86 @@ mod tests {
 
     fn task(agent: AgentKind, text: &str) -> SpawnManyTask {
         SpawnManyTask { agent, task: text.to_string() }
+    }
+
+    fn fake_workspace(id: &str) -> Workspace {
+        Workspace {
+            id: id.to_string(),
+            path: std::path::PathBuf::from(id),
+            branch: format!("pact/{id}"),
+            task: "fake task".to_string(),
+            created_at: 0,
+            agent_pid: None,
+            base_commit: "deadbeef".to_string(),
+        }
+    }
+
+    fn ok_outcome(index: usize, id: &str, success: bool) -> SpawnManyOutcome {
+        SpawnManyOutcome {
+            index,
+            agent: AgentKind::Claude,
+            result: Ok((
+                fake_workspace(id),
+                RunOutcome { success, summary: "ran".to_string() },
+            )),
+        }
+    }
+
+    fn failed_launch_outcome(index: usize) -> SpawnManyOutcome {
+        SpawnManyOutcome {
+            index,
+            agent: AgentKind::Claude,
+            result: Err(anyhow::anyhow!("acquiring git worktree lock: timed out after 30s")),
+        }
+    }
+
+    #[test]
+    fn spawn_many_report_counts_created_and_failed_launches() {
+        let outcomes = vec![
+            ok_outcome(0, "ws-0", true),
+            ok_outcome(1, "ws-1", true),
+            ok_outcome(2, "ws-2", true),
+            failed_launch_outcome(3),
+        ];
+        let report = SpawnManyReport::new(4, outcomes);
+
+        assert_eq!(report.created_count(), 3);
+        assert!(report.any_run_failed());
+        let failures: Vec<usize> = report.launch_failures().map(|(i, _, _)| i).collect();
+        assert_eq!(failures, vec![3]);
+        assert_eq!(
+            report.summary_line(),
+            "spawn-many: 4 tasks requested, 3 workspaces created, 1 failed"
+        );
+        assert_eq!(report.exit_code(), 1);
+    }
+
+    #[test]
+    fn spawn_many_report_all_succeeded_has_no_failures_and_singular_wording() {
+        let report = SpawnManyReport::new(1, vec![ok_outcome(0, "ws-0", true)]);
+
+        assert_eq!(report.created_count(), 1);
+        assert!(!report.any_run_failed());
+        assert_eq!(report.launch_failures().count(), 0);
+        assert_eq!(
+            report.summary_line(),
+            "spawn-many: 1 task requested, 1 workspace created, 0 failed"
+        );
+        assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn spawn_many_report_flags_a_launched_task_whose_agent_run_failed() {
+        // A workspace was created (count fidelity is fine) but the agent
+        // run inside it reported failure -- a different case from issue
+        // #231's "never became a workspace at all", must still fail the
+        // batch.
+        let report = SpawnManyReport::new(1, vec![ok_outcome(0, "ws-0", false)]);
+
+        assert_eq!(report.created_count(), 1, "the workspace WAS created");
+        assert!(report.any_run_failed(), "but the agent run inside it failed");
+        assert_eq!(report.launch_failures().count(), 0, "not a launch failure");
+        assert_eq!(report.exit_code(), 1);
     }
 
     #[test]
