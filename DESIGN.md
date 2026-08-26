@@ -2189,6 +2189,59 @@ preview-only path that predicts what `prepare` would do without doing
 it (a real, separate feature, not implied by this finding). Scoped down
 from the original issue's broader ask for exactly this reason.
 
+### Content store lock timeout, and --no-deps (issue #233)
+
+A real production `spawn-many` run (5 tasks, cold npm content store) hit
+~22 minutes of dead time before any agent touched a file. Root cause:
+`POPULATE_LOCK_TIMEOUT` was 600s, held for the *entire* population --
+one workspace won the lock and ran a real `npm ci`; the other N-1 waited,
+but the install took longer than 600s, so every waiter timed out and
+fell back to `run_plain_npm_install` -- a full, independent, redundant
+install each. The store's own fast path (a waiter that acquires *after*
+the winner finishes sees `entry.exists()` and reuses it for free) never
+executed, because the timeout was shorter than the thing it was waiting
+for. Net effect: the cache made this run strictly *worse* than having no
+cache at all (dead waiting, plus N installs instead of N starting
+immediately).
+
+Same root cause and same fix shape as issue #230's `pact-vcs::LOCK_TIMEOUT`:
+`PidLock`'s stale-lock stealing (liveness + start-time check) already
+handles a populator that crashed, so a fixed short timeout was only ever
+guarding against a populator that's alive but stuck -- a rare case that
+deserves a generous window, not a budget shorter than a real cold-cache
+install. `POPULATE_LOCK_TIMEOUT`: 600s -> 1 hour. Verified directly at
+the lock level (not via a real slow `npm ci`, which would make the test
+suite itself slow and flaky): `populate_if_absent_reuses_a_slow_populate_
+instead_of_duplicating_it` races 4 threads against one key with an
+artificially slow populate closure and asserts the closure runs exactly
+once -- proving reuse, not duplication, without needing a real install.
+
+**Separately, `--no-deps` (`spawn`/`spawn-many`).** The same report noted
+every task paid dependency prep's full cost even for tasks that
+explicitly said not to touch dependencies (pure version-string edits in
+a manifest file) -- prep ran unconditionally, with no way to opt out.
+`--no-deps` skips `pact_deps::prepare` entirely for that invocation; no
+`-deps.json` sidecar is written either (its absence now means "never
+attempted", distinct from an empty array meaning "ran, detected zero
+package managers").
+
+**Deliberately not done in this pass (the issue's own "deep research"
+item, left for a real conversation rather than decided here):** whether
+the content-store subsystem should exist at all, versus delegating
+entirely to npm's own local cache (`npm ci` against a warm `~/.npm` is
+already reasonably fast) plus a lighter hardlink layer, or adopting
+`pnpm`'s/`cacache`'s content-addressable design wholesale. The two fixes
+above remove the "worse than no cache" failure mode and the unconditional
+cost, which was the concrete, reported harm -- but they don't settle
+whether this ~250-line subsystem is worth its own maintenance cost
+relative to deleting it and leaning on the package manager's own
+tooling. Real tradeoffs on both sides (a from-scratch reimplementation
+carries real bugs, like issue #7's MAX_PATH failure below and #57's BOM
+handling, that a mature tool like pnpm has already hardened against; but
+a from-scratch store is also the only way to get reflink/hardlink
+materialization across arbitrary npm projects that never opted into
+pnpm themselves) -- not a default to pick silently.
+
 ### The Windows MAX_PATH failure (issue #7)
 
 A real failure mode found while verifying issue #7's fallback path, not a
