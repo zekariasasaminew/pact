@@ -1011,9 +1011,23 @@ fn main() -> Result<()> {
 fn print_merge_report(report: &MergeReport) {
     if report.dry_run {
         println!("dry run: would merge onto '{}' from {}", report.target_branch, short(&report.base_commit));
-        println!("  planned order (risk score -- changed-file count plus a penalty for central files/lockfiles, see DESIGN.md):");
+        println!(
+            "  planned order (risk score -- changed-file count plus a penalty for central \
+             files/lockfiles/files shared with another workspace in this batch, see DESIGN.md):"
+        );
         for workspace in &report.planned {
             println!("    {} (risk: {})", workspace.id, workspace.risk_score);
+        }
+        // Issue #236: don't present a tied score as if it were a real
+        // decision -- with 2+ workspaces this heuristic can still tie
+        // (e.g. every workspace shares the same one file with all the
+        // others), in which case "least risky first" has degenerated to
+        // creation order and the honest thing is to say so.
+        if report.planned.len() > 1 && report.planned.iter().all(|w| w.risk_score == report.planned[0].risk_score) {
+            println!(
+                "  note: every workspace scored equally -- this heuristic found no signal to \
+                 order by, so the order above is just creation order, not a real risk ranking"
+            );
         }
     } else {
         println!("merged onto '{}' from {}", report.target_branch, short(&report.base_commit));

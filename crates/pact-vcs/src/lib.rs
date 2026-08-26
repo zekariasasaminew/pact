@@ -4,6 +4,7 @@ mod semantic_resolvers;
 pub use lock::{agent_process_alive, PidLock};
 pub use semantic_resolvers::ConflictStages;
 
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -234,19 +235,39 @@ const CENTRAL_FILE_BASENAMES: &[&str] = &[
 
 const CENTRAL_FILE_PENALTY: usize = 3;
 const LOCKFILE_PENALTY: usize = 5;
+/// Dominant on purpose -- issue #236: per-workspace size/central-file
+/// penalties alone made every workspace touching the same single file
+/// (e.g. four disjoint version bumps in one `package.json`) score
+/// identically, degenerating "least risky first" into creation order.
+/// Sharing a file with *another workspace in this same batch* is the
+/// actual thing that predicts merge pain (an earlier merge can invalidate
+/// a later one only if they touch something in common), so it outweighs
+/// file count and the central-file/lockfile penalties combined for any
+/// realistic batch size.
+const OVERLAP_PENALTY: usize = 10;
 
 /// Weights a workspace's changed-file set for `merge_all`'s sequencing
-/// (issue #159) -- a one-file change to `package.json` can be much
-/// riskier than a ten-file isolated feature, but plain changed-file count
-/// treats them identically. Base score is still the changed-file count
-/// (smallest-changeset-first was already a reasonable default); each
-/// lockfile or central file touched adds a flat penalty on top so a
-/// workspace touching one gets sequenced later, when more of the
-/// integration branch's real state already exists to conflict against
-/// sooner rather than later. Not a precise science -- a first-cut
-/// heuristic, deliberately simple and tunable, not an attempt to model
-/// real conflict probability.
-fn merge_risk_score(files: &[String]) -> usize {
+/// (issue #159, extended by #236) -- a one-file change to `package.json`
+/// can be much riskier than a ten-file isolated feature, but plain
+/// changed-file count treats them identically, and neither says anything
+/// about whether this workspace's change could be invalidated by another
+/// workspace's merge landing first. `other_files` is the union of every
+/// *other* workspace's changed files in this same `merge_all` batch --
+/// each file `files` shares with it adds `OVERLAP_PENALTY`, so a
+/// workspace sharing nothing with anyone else in the batch (genuinely
+/// isolated, genuinely low risk) sequences first, and one sharing files
+/// with others sequences later, when more of the integration branch's
+/// real state already exists to conflict against. Not a precise science
+/// -- a first-cut heuristic, deliberately simple and tunable, not an
+/// attempt to model real conflict probability. Deliberately file-level,
+/// not hunk-level (issue #236's proposed direction (b), not attempted
+/// here): this still can't distinguish four workspaces editing disjoint
+/// regions of one file (genuinely low risk) from two editing the same
+/// function (genuinely high risk) -- both score as "shares this file
+/// with N others" identically. `merge_all`'s dry-run output says so
+/// explicitly when every planned workspace ties, rather than presenting
+/// a meaningless order as a real decision.
+fn merge_risk_score(files: &[String], other_files: &HashSet<String>) -> usize {
     let mut score = files.len();
     for file in files {
         let basename = Path::new(file).file_name().and_then(|n| n.to_str()).unwrap_or(file.as_str());
@@ -254,6 +275,9 @@ fn merge_risk_score(files: &[String]) -> usize {
             score += LOCKFILE_PENALTY;
         } else if CENTRAL_FILE_BASENAMES.contains(&basename) {
             score += CENTRAL_FILE_PENALTY;
+        }
+        if other_files.contains(file) {
+            score += OVERLAP_PENALTY;
         }
     }
     score
@@ -755,14 +779,34 @@ impl WorkspaceManager {
             }
         });
 
-        let mut sized: Vec<(usize, Workspace)> = selected
+        // Each workspace's own changed files, gathered once so overlap
+        // against every *other* workspace in this batch can be computed
+        // below -- issue #236: risk needs to know about the rest of the
+        // batch, not just one workspace in isolation.
+        let changes: Vec<(Workspace, Option<Vec<String>>)> = selected
             .into_iter()
             .map(|w| {
-                let n = self
-                    .workspace_changes(&w.id)
-                    .map(|c| merge_risk_score(&c.files))
-                    .unwrap_or(usize::MAX);
-                (n, w)
+                let files = self.workspace_changes(&w.id).ok().map(|c| c.files);
+                (w, files)
+            })
+            .collect();
+
+        let mut sized: Vec<(usize, Workspace)> = changes
+            .iter()
+            .enumerate()
+            .map(|(i, (w, files))| {
+                let Some(files) = files else {
+                    return (usize::MAX, w.clone());
+                };
+                let other_files: HashSet<String> = changes
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .filter_map(|(_, (_, f))| f.as_ref())
+                    .flatten()
+                    .cloned()
+                    .collect();
+                (merge_risk_score(files, &other_files), w.clone())
             })
             .collect();
         sized.sort_by_key(|(n, _)| *n);
@@ -1704,28 +1748,32 @@ mod tests {
         assert!(diagnosis.contains("AssertionError"), "got: {diagnosis}");
     }
 
+    fn no_overlap() -> HashSet<String> {
+        HashSet::new()
+    }
+
     #[test]
     fn merge_risk_score_is_plain_file_count_with_no_central_files() {
         let files = vec!["src/a.ts".to_string(), "src/b.ts".to_string()];
-        assert_eq!(merge_risk_score(&files), 2);
+        assert_eq!(merge_risk_score(&files, &no_overlap()), 2);
     }
 
     #[test]
     fn merge_risk_score_adds_a_penalty_for_a_central_file() {
         let files = vec!["package.json".to_string()];
-        assert_eq!(merge_risk_score(&files), 1 + CENTRAL_FILE_PENALTY);
+        assert_eq!(merge_risk_score(&files, &no_overlap()), 1 + CENTRAL_FILE_PENALTY);
     }
 
     #[test]
     fn merge_risk_score_adds_a_larger_penalty_for_a_lockfile() {
         let files = vec!["package-lock.json".to_string()];
-        assert_eq!(merge_risk_score(&files), 1 + LOCKFILE_PENALTY);
+        assert_eq!(merge_risk_score(&files, &no_overlap()), 1 + LOCKFILE_PENALTY);
     }
 
     #[test]
     fn merge_risk_score_finds_central_files_regardless_of_directory() {
         let files = vec!["nested/deep/package.json".to_string()];
-        assert_eq!(merge_risk_score(&files), 1 + CENTRAL_FILE_PENALTY);
+        assert_eq!(merge_risk_score(&files, &no_overlap()), 1 + CENTRAL_FILE_PENALTY);
     }
 
     #[test]
@@ -1733,9 +1781,44 @@ mod tests {
         let central_only = vec!["package.json".to_string()];
         let many_plain_files = vec!["a.ts".to_string(), "b.ts".to_string(), "c.ts".to_string()];
         assert!(
-            merge_risk_score(&central_only) > merge_risk_score(&many_plain_files),
+            merge_risk_score(&central_only, &no_overlap()) > merge_risk_score(&many_plain_files, &no_overlap()),
             "a single central-file change should outweigh several plain-file changes"
         );
+    }
+
+    #[test]
+    fn merge_risk_score_adds_the_overlap_penalty_per_file_shared_with_another_workspace() {
+        let files = vec!["src/shared.ts".to_string()];
+        let other_files = HashSet::from(["src/shared.ts".to_string()]);
+        assert_eq!(merge_risk_score(&files, &other_files), 1 + OVERLAP_PENALTY);
+    }
+
+    #[test]
+    fn merge_risk_score_overlap_outranks_file_count_and_central_file_penalties_combined() {
+        // Issue #236's actual complaint: a workspace sharing a file with
+        // another workspace in the same batch must be treated as riskier
+        // than a workspace with a larger plain changeset or even a
+        // central-file touch that shares nothing with anyone else.
+        let shares_one_file = vec!["src/shared.ts".to_string()];
+        let other_files = HashSet::from(["src/shared.ts".to_string()]);
+        let isolated_central_and_plain_files = vec![
+            "package.json".to_string(),
+            "a.ts".to_string(),
+            "b.ts".to_string(),
+            "c.ts".to_string(),
+        ];
+        assert!(
+            merge_risk_score(&shares_one_file, &other_files)
+                > merge_risk_score(&isolated_central_and_plain_files, &no_overlap()),
+            "sharing one file with another workspace must outweigh a larger, fully isolated changeset"
+        );
+    }
+
+    #[test]
+    fn merge_risk_score_no_overlap_penalty_when_nothing_is_shared() {
+        let files = vec!["src/only_mine.ts".to_string()];
+        let other_files = HashSet::from(["src/someone_elses.ts".to_string()]);
+        assert_eq!(merge_risk_score(&files, &other_files), 1, "no penalty for a file nobody else touches");
     }
 
     #[test]
