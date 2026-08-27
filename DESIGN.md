@@ -2894,6 +2894,29 @@ requires async), and every other command stays exactly as synchronous as
 it already is. See the README for why that tradeoff was made deliberately,
 not by default.
 
+### SKILL.md routing re-verified against a real Copilot session (issue #203)
+
+The reworded `SKILL.md` description (leading with the user's problem
+instead of the tool list, plus explicit "prefer pact over your own
+built-in task tool" language) was flagged as *plausible but unconfirmed*
+when it shipped -- the original fix explicitly said re-testing would
+need another real, billed Copilot call, and didn't spend one
+unilaterally.
+
+**Live re-verified.** A real `copilot skill add`, in a plain scratch repo
+with no prior pact context, against the exact near-verbatim trigger
+prompt from the original report ("I have several independent coding
+tasks I want to run concurrently on this repo, without them stepping on
+each other's files. How should I do that?"): `session.skills_loaded`
+confirmed the `pact` skill loaded, the assistant's very first message
+explicitly invoked it ("Running the \"pact\" skill to show how to run
+multiple independent coding tasks in parallel using isolated worktrees
+and advisory leases"), and the follow-up response recommended concrete
+`pact doctor`/`pact spawn-many --dry-run --task` commands -- a complete
+reversal from the original bug (Copilot recommending `git worktree add`
+plus its own built-in task tool instead). Confirmed fixed, not just
+plausible.
+
 `print_event_labeled` needs no extra locking beyond what `println!`'s own
 internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)
