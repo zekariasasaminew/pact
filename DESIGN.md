@@ -2917,6 +2917,56 @@ reversal from the original bug (Copilot recommending `git worktree add`
 plus its own built-in task tool instead). Confirmed fixed, not just
 plausible.
 
+### pact init auto-registers SKILL.md with detected agent CLIs (issue #219)
+
+Follow-up to #203: registering `SKILL.md` used to require a manual step
+per agent CLI (`copilot skill add <pact-repo>`). `pact init` now does
+this automatically for every agent CLI it detects installed, reusing the
+same detection `--agent` auto-default (#121) already built.
+
+**Per-adapter mechanism, confirmed by hand, not assumed:**
+- **Copilot**: shells out to `copilot skill add <repo-root>` (confirmed
+  the real registration mechanism while re-verifying #203 above) --
+  Copilot owns its own skills directory and registration bookkeeping, so
+  pact defers to the CLI's own command rather than writing into
+  `~/.copilot/skills/` directly and risking format drift from whatever
+  internal manifest Copilot itself maintains alongside the raw files.
+- **Claude Code, Codex, Gemini**: no confirmed, real skill-directory
+  convention for any of the three as of this pass (unlike Copilot's
+  `copilot skill add`, none has a discovered equivalent CLI subcommand or
+  documented fixed skills path verified by hand) -- rather than guess at
+  an undocumented path and silently write into the wrong place, these
+  three are a no-op for now, each logged as a single `tracing::debug!`
+  line naming the adapter and "no confirmed skill-registration mechanism"
+  rather than failing or pretending success.
+
+**Opt-in, not default-on**: `pact init --register-skill` -- the safer
+default for a command that writes into a directory *outside* the repo it
+was invoked in (a real CLI's own global config), matching this project's
+general bias toward additive, no-surprise-behavior-change defaults (how
+`--name`/`--no-deps` shipped, both opt-in flags rather than changed
+defaults). Absence of the flag is a silent no-op, not a warning --
+running `pact init` shouldn't get noisier for users who don't want this.
+
+Failure handling: a `copilot skill add` that fails (Copilot CLI not
+actually on `PATH` despite being detected via a different check, a
+permissions error) is logged as a warning and does not fail `pact init`
+itself -- the same "best-effort, never block the primary operation"
+posture dependency prep and passthrough installs already use.
+
+**Caught a real bug live-verifying this against the actual pact repo**:
+the first implementation spawned `copilot` via a direct
+`std::process::Command::new("copilot")`, which failed with "program not
+found" despite `copilot` working fine typed interactively and being
+correctly detected as installed moments earlier -- the same Windows
+`.cmd`-shim gap `cmdutil::run` already exists to work around
+(`std::process::Command` doesn't consult `PATHEXT` the way a real shell
+does). Fixed by routing through `pact_deps::run_shimmed` instead of a
+raw spawn, confirmed by re-running `pact init --register-skill` against
+this repo's own real Copilot installation afterward (`registered
+SKILL.md with copilot (copilot skill add)`, and `copilot skill list`
+showed it).
+
 `print_event_labeled` needs no extra locking beyond what `println!`'s own
 internal `Stdout` lock already gives per call: each event becomes one
 complete line written in one call, so concurrent threads' (`spawn-many`)

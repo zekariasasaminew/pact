@@ -41,6 +41,16 @@ enum Command {
         /// Overwrite an existing pact.toml instead of refusing.
         #[arg(long)]
         force: bool,
+        /// Also register this repo's SKILL.md with every detected agent
+        /// CLI that has a confirmed registration mechanism (issue #219,
+        /// follow-up to #203) -- e.g. `copilot skill add`. Opt-in: this
+        /// writes into a CLI's own global config, outside this repo,
+        /// which warrants a deliberate choice rather than a changed
+        /// default. A CLI with no confirmed mechanism (today: Claude
+        /// Code, Codex, Gemini) is silently skipped, not treated as a
+        /// failure.
+        #[arg(long)]
+        register_skill: bool,
     },
     /// A zero-decision, zero-cost walkthrough of the core loop: creates a
     /// disposable temp repo, runs two simulated agents on independent
@@ -495,8 +505,8 @@ fn main() -> Result<()> {
         None => find_repo_root(&std::env::current_dir()?)?,
     };
 
-    if let Command::Init { force } = cli.command {
-        return run_init(&repo_root, force);
+    if let Command::Init { force, register_skill } = cli.command {
+        return run_init(&repo_root, force, register_skill);
     }
 
     let config = PactConfig::load(&repo_root)?;
@@ -1789,7 +1799,7 @@ fn resolve_default_agent(explicit: Option<String>, config: &PactConfig) -> Optio
     }
 }
 
-fn run_init(repo_root: &Path, force: bool) -> Result<()> {
+fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
     let config_path = repo_root.join(PactConfig::FILE_NAME);
     if config_path.exists() && !force {
         bail!(
@@ -1799,6 +1809,10 @@ fn run_init(repo_root: &Path, force: bool) -> Result<()> {
     }
 
     let installed = detect_installed_agents();
+
+    if register_skill {
+        register_skill_with_detected_agents(repo_root, &installed);
+    }
     let agent_line = match installed.as_slice() {
         [only] => format!("agent = \"{only}\"       # detected: only agent CLI found installed"),
         [] => "# agent = \"claude\"    # no agent CLI detected installed -- run `pact doctor`".to_string(),
@@ -1832,6 +1846,51 @@ fn run_init(repo_root: &Path, force: bool) -> Result<()> {
     }
     println!("next: pact spawn \"<task>\"");
     Ok(())
+}
+
+/// `pact init --register-skill` (issue #219, follow-up to #203): registers
+/// this repo's `SKILL.md` with every detected agent CLI that has a
+/// confirmed registration mechanism. Per-adapter, not generic -- each CLI
+/// owns its own skills directory/manifest, so this shells out to the
+/// CLI's own registration command rather than writing into a guessed
+/// path and risking format drift from whatever internal bookkeeping that
+/// CLI keeps alongside the raw files.
+fn register_skill_with_detected_agents(repo_root: &Path, installed: &[&'static str]) {
+    for &agent in installed {
+        match agent {
+            "copilot" => register_skill_with_copilot(repo_root),
+            // Claude Code, Codex, Gemini: no confirmed, real
+            // skill-registration mechanism as of this pass -- rather
+            // than guess at an undocumented path, this is a deliberate
+            // no-op per adapter, not a silent gap.
+            other => tracing::debug!("pact init --register-skill: no confirmed skill-registration mechanism for {other}, skipping"),
+        }
+    }
+}
+
+fn register_skill_with_copilot(repo_root: &Path) {
+    // `copilot` ships as a `.cmd` shim on Windows -- `std::process::
+    // Command` doesn't consult PATHEXT the way a real shell does, so a
+    // direct spawn fails with "program not found" even though `copilot`
+    // works fine typed interactively (confirmed by hand; same class of
+    // bug DESIGN.md documents for `cmdutil::run`). `run_shimmed` routes
+    // through `cmd /C` on Windows for exactly this reason.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.to_path_buf());
+    match pact_deps::run_shimmed("copilot", &["skill", "add", &repo_root.to_string_lossy()], &cwd) {
+        Ok(output) if output.status.success() => {
+            println!("registered SKILL.md with copilot (copilot skill add)");
+        }
+        Ok(output) => {
+            tracing::warn!(
+                "`copilot skill add` exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Err(err) => {
+            tracing::warn!("failed to run `copilot skill add`: {err:#}");
+        }
+    }
 }
 
 fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
