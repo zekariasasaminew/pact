@@ -69,7 +69,7 @@ enum Command {
         /// Task/prompt to give the agent
         task: String,
 
-        /// Which agent CLI to launch (claude, copilot, codex, gemini).
+        /// Which agent CLI to launch (claude, copilot, codex, gemini, agy).
         /// Falls back to `pact.toml`'s `defaults.agent` if omitted, then to
         /// the sole detected installed agent CLI if exactly one is found,
         /// then to `claude` as a last resort.
@@ -164,7 +164,7 @@ enum Command {
         tasks: Vec<String>,
 
         /// Default agent CLI for any --task without an explicit
-        /// `<agent>:` prefix (claude, copilot, codex, gemini). A task with
+        /// `<agent>:` prefix (claude, copilot, codex, gemini, agy). A task with
         /// a prefix always uses that agent instead, even when --agent is
         /// also given. Falls back to `pact.toml`'s `defaults.agent`, then
         /// to the sole detected installed agent CLI if exactly one is
@@ -473,7 +473,7 @@ enum Command {
     },
     /// Check whether your environment is actually ready for `pact`: is
     /// `git` new enough for `worktree`, which agent CLIs (claude, copilot,
-    /// codex, gemini) are installed, and which package-manager CLIs
+    /// codex, gemini, agy) are installed, and which package-manager CLIs
     /// `pact-deps` already knows how to prep. Read-only -- doesn't install
     /// or fix anything. A missing agent CLI or package manager is
     /// informational, not a failure, since not everyone needs all of them;
@@ -553,7 +553,7 @@ fn main() -> Result<()> {
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown --agent '{agent}' (expected claude, copilot, codex, or gemini) -- \
+                    "unknown --agent '{agent}' (expected claude, copilot, codex, gemini, or agy) -- \
                      try: pact doctor"
                 )
             })?;
@@ -635,7 +635,7 @@ fn main() -> Result<()> {
                         .map(|kind| (kind, name))
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "unknown --agent '{name}' (expected claude, copilot, codex, or gemini) -- \
+                                "unknown --agent '{name}' (expected claude, copilot, codex, gemini, or agy) -- \
                                  try: pact doctor"
                             )
                         })
@@ -1091,7 +1091,7 @@ fn build_arbiter_config(
     let Some(test_cmd) = test_cmd else { return Ok(None) };
     let agent = AgentKind::parse(arbiter_agent).ok_or_else(|| {
         anyhow::anyhow!(
-            "unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, or gemini) -- \
+            "unknown --arbiter-agent '{arbiter_agent}' (expected claude, copilot, codex, gemini, or agy) -- \
              try: pact doctor"
         )
     })?;
@@ -1580,7 +1580,7 @@ fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(Age
         }
         if default.is_none() {
             bail!(
-                "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, codex, or gemini) -- \
+                "unknown agent '{agent_name}' in --task '{raw}' (expected claude, copilot, codex, gemini, or agy) -- \
                  try: pact doctor"
             );
         }
@@ -1622,6 +1622,7 @@ const AGENT_CHECKS: &[DoctorCheck] = &[
     DoctorCheck { label: "copilot", program: "copilot", args: &["--version"] },
     DoctorCheck { label: "codex", program: "codex", args: &["--version"] },
     DoctorCheck { label: "gemini", program: "gemini", args: &["--version"] },
+    DoctorCheck { label: "agy", program: "agy", args: &["--version"] },
 ];
 
 // `go`'s version flag is a subcommand (`go version`), not `--version` --
@@ -1983,6 +1984,13 @@ fn adapter_rate(kind: AgentKind) -> AdapterRate {
             flat_rate: true,
             note: "Copilot Pro/Business is a flat monthly rate -- cost is bounded by request quota, not tokens",
         },
+        AgentKind::Antigravity => AdapterRate {
+            input_per_mtok_usd: (0.0, 0.0),
+            output_per_mtok_usd: (0.0, 0.0),
+            flat_rate: true,
+            note: "Antigravity's own account banner reads \"Starter Quota\" -- treated as quota-bounded like \
+                   Copilot, not confirmed against a published per-token price the way Claude/Codex/Gemini are",
+        },
     }
 }
 
@@ -2073,6 +2081,7 @@ fn agent_label(kind: AgentKind) -> &'static str {
         AgentKind::Copilot => "copilot",
         AgentKind::Codex => "codex",
         AgentKind::Gemini => "gemini",
+        AgentKind::Antigravity => "agy",
     }
 }
 

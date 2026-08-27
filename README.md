@@ -434,12 +434,67 @@ dropped, precisely because this guess *will* need correcting once run for
 real) and whether a safer approval mode denies cleanly rather than
 hanging. Default safety is `--approval-mode yolo --skip-trust` -- not
 claimed as a verified safer option, the same honest category Copilot CLI
-and Codex are already in. This adapter stays open as issue #9 rather
-than closed, blocked specifically on Gemini API credentials (a
-`GEMINI_API_KEY` or completed Google OAuth login) becoming available in
-this environment -- not on effort, and not something to complete on the
-user's behalf without being asked, since it's an identity/credential
-decision.
+and Codex are already in. No `GEMINI_API_KEY` is configured in this
+environment either, re-confirmed while building the Antigravity adapter
+below (a real headless `-p` call hangs indefinitely with zero output,
+consistent with no credential being present) -- the individual-auth
+OAuth path's discontinuation (see "Partial live verification" under
+Design decisions) is a separate, already-documented fact, not something
+this pass re-tested or re-confirmed.
+
+### Antigravity adapter: the real, live-verified path to Gemini-model access (issue #9)
+
+A fifth adapter, `--agent agy`, targeting Antigravity's own CLI (`agy`) --
+not a patch to the `gemini` adapter above, a genuinely different tool:
+`agy` is a multi-model CLI (Gemini, Claude, and GPT-OSS backends all
+selectable via `--model`), confirmed by running `agy models`, not
+assumed. **Live-verified end-to-end**, not just built from `--help` text:
+a real `pact spawn --agent agy` run against a scratch repo completed a
+real tool-using task (writing a file with specific content) and the
+written file's contents were confirmed correct by hand.
+
+Two real bugs found and fixed while building this, both the kind this
+project's "confirm by hand" discipline exists to catch:
+
+- **`agy`'s own `write_to_file` tool defaults to writing into its
+  internal scratch directory** (`~/.gemini/antigravity-cli/scratch/`),
+  not the process's actual working directory -- confirmed directly: a
+  first real run's file landed there instead of the workspace, which
+  would have silently broken the entire per-workspace isolation model if
+  shipped unnoticed. `--add-dir <workspace_path>` fixes it (confirmed by
+  a second real run landing the file correctly) and is now always passed.
+- **A `step_update`'s `conversation_id` sits at the event's top level**,
+  not nested under its own `"init"` object the way a first guess
+  (pattern-matched against the other adapters' shapes) assumed -- a real
+  spawn's `[init] session` line printed empty until this was corrected
+  against the actual raw log. Also found live: a real tool call fires
+  *two* `step_update`s (`state: "ACTIVE"` then `"DONE"`) for the same
+  tool invocation; only `ACTIVE` is surfaced now, or every real tool call
+  printed twice in the live CLI view.
+
+**MCP config mechanism is process-global, not per-invocation** -- a real,
+structural difference from every other adapter, not a workaround: `agy
+mcp add <name> <command> [args...]` writes to a single
+`~/.gemini/config/mcp_config.json` shared by *every* `agy` invocation on
+the machine (confirmed by adding a test entry and finding where it
+landed), unlike Claude Code/Copilot CLI's per-spawn config file, Codex's
+inline overrides, or even Gemini CLI's fixed-but-at-least-per-project
+path. `build_command` re-registers this workspace's own `pact mcp-serve`
+invocation under the fixed name `pact-coord` immediately before each
+spawn ("add or update" semantics, confirmed by hand) -- correct for one
+`agy` run at a time, but genuinely racy if two or more `agy` spawns are
+truly concurrent: whichever registered last wins for both, so which
+workspace's coordination server a given `agy` process actually talks to
+depends on timing, not which workspace it's running in. Documented as a
+real limitation of `agy`'s own current CLI, not silently worked around --
+`spawn-many --agent agy` with more than one concurrent task should be
+treated as unsafe for coordination until Antigravity ships a
+per-invocation config mechanism.
+
+No coordination-status event was observed in the real spawn's own raw
+log at all (unlike Claude Code/Copilot's explicit `mcp_servers_loaded`-
+style events) -- `pact` correctly falls into the same "never reported a
+status" honest-warning path Codex's adapter already uses, not a new gap.
 
 ### Real parallel launch: OS threads, not async/tokio
 
@@ -637,7 +692,7 @@ graph TD
     Core["pact-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
     VCS["pact-vcs<br/>(PidLock + git worktree lifecycle)"]
     Deps["pact-deps<br/>(dependency broker: detect + passthrough to each ecosystem's own cache)"]
-    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex live-verified, Gemini CLI not yet)"]
+    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex + Antigravity live-verified, Gemini CLI not yet)"]
     Coord["pact-coord<br/>(leases + messages, its own MCP server process)"]
 
     CLI --> Core
@@ -774,6 +829,8 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 9 | Gemini CLI adapter | **Built, not live-verified** (no auth available -- see below) |
 | 10 | Pluggable coordination server (`--coord-command`/`--coord-arg`) | **Done** |
 | 11 | First-5-minutes doc + demo GIF | **Done** |
+| 12 | Antigravity (`agy`) adapter, the real live-verified path to Gemini-model access | **Done, live-verified** |
+| 13 | Typed handoff/negotiation protocol between agents | **Done** |
 
 Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
 all succeeded (reproducing, then passing, the exact scenario that fails in
@@ -951,10 +1008,23 @@ pipeline and what it still doesn't capture.
   batch**, not per-task -- consistent with what issue #3's acceptance
   criteria actually asked for; a plausible follow-up, not built ahead of
   being needed.
-- **The Gemini CLI adapter is built, not live-verified** -- no Gemini
-  API key or Google Cloud auth is configured in this environment. See
-  "Gemini CLI adapter" under Design decisions for exactly what was and
-  wasn't confirmed. Issue #9 stays open until this changes.
+- **The standalone `gemini` CLI adapter (`--agent gemini`) is built, not
+  fully live-verified** -- its old individual-auth "Sign in with Google"
+  OAuth path is discontinued; the still-maintained `GEMINI_API_KEY` path
+  isn't configured in this environment either (re-confirmed by hand: a
+  real headless call hangs indefinitely with zero output). See "Gemini
+  CLI adapter" under Design decisions for what *was* partially confirmed
+  with a real key in an earlier session. Antigravity (`--agent agy`,
+  issue #9) is the real, live-verified path to Gemini-model access --
+  see its own section under Design decisions.
+- **`--agent agy`'s coordination is unsafe under real concurrency** --
+  Antigravity's own MCP-server registration (`agy mcp add`) is
+  process-global, not per-invocation, so `spawn-many --agent agy` with
+  more than one concurrent task races every `agy` process to overwrite
+  the same global registration; whichever workspace registered last is
+  what every concurrent `agy` process actually talks to. A single
+  `--agent agy` task at a time works correctly. See "Antigravity
+  adapter" under Design decisions.
 - **The Homebrew tap (`zekariasasaminew/homebrew-pact`) is built, not
   live-verified against a real `brew install`** -- no macOS/Linux Homebrew
   install available in this environment, and the formula's syntax was
@@ -1003,6 +1073,7 @@ running `./target/release/pact` after building from source -- see
 pact spawn "implement the thing"
 pact spawn "implement the thing" --agent copilot
 pact spawn "implement the thing" --agent gemini  # built, not live-verified -- see Known limitations
+pact spawn "implement the thing" --agent agy  # Antigravity, live-verified -- real path to Gemini-model access
 pact spawn "implement the thing" --agent claude --safety acceptEdits
 pact spawn "implement the thing" --coord-command /path/to/alt-coord --coord-arg --some-flag
 pact spawn-many --task claude:"implement X" --task claude:"implement Y"
