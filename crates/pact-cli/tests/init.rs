@@ -96,6 +96,29 @@ fn init_force_overwrites_an_existing_pact_toml() {
     cleanup(&repo);
 }
 
+/// Issue #219: `--register-skill` must never fail `pact init` itself,
+/// regardless of whether any agent CLI with a confirmed registration
+/// mechanism (today: only Copilot, via `copilot skill add`) happens to be
+/// installed on the machine running this test -- `detect_installed_agents`
+/// already gates whether that shell-out is even attempted, so this is a
+/// no-op on a machine without `copilot` on PATH and a real (fast, free,
+/// no-LLM-call) registration on one with it. Either way, `pact init`
+/// itself must still succeed and still write pact.toml.
+#[test]
+fn init_register_skill_never_fails_the_command_regardless_of_detected_agents() {
+    let repo = init_repo("register-skill");
+
+    let output = run_pact(&repo, &["init", "--register-skill"]);
+    assert!(
+        output.status.success(),
+        "expected `pact init --register-skill` to succeed either way, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(repo.join("pact.toml").exists(), "expected pact.toml to still be written");
+
+    cleanup(&repo);
+}
+
 #[test]
 fn spawn_dry_run_picks_up_pact_toml_defaults_agent_when_flag_omitted() {
     let repo = init_repo("spawn-picks-up-config");
