@@ -1408,20 +1408,49 @@ result to a job afterward; the handle leak happens one level up, in how
 Rust's std itself creates the piped `Stdio` and hands its write end to
 the direct child.
 
-**A real fix needs a different mechanism for capturing agent stdout on
-Windows** -- one immune to default handle inheritance (e.g. a named pipe
-opened with an explicitly non-inheritable handle, or overlapped I/O with
-manual duplication) -- not a small patch to the current anonymous-pipe
-approach. That's a real architectural change to how every agent adapter's
-output is captured, not a bug fix, and is being left for a real
-conversation rather than attempted unilaterally in this pass. A
-deliberately slow, `#[ignore]`d test
-(`run_and_stream_is_blocked_by_a_windows_grandchild_that_inherits_the_
-stdout_pipe`) reproduces and asserts the current, honest behavior (blocks
-for close to the grandchild's full lifetime) so this finding has a real,
-runnable anchor rather than only living in this paragraph -- run
-explicitly with `cargo test --ignored` (~2 minutes), not part of the
-default suite.
+**Fixed in issue #253, and not the way this section originally proposed.**
+The first idea considered -- replacing the anonymous pipe with a named
+pipe opened non-inheritable, or scoping what the direct child inherits via
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` -- turned out not to actually solve
+this on its own: Windows preserves a handle's inheritable flag across
+inheritance, so a handle that reaches the agent process still arrives
+marked inheritable *inside* the agent's own handle table, and the agent's
+own subsequent `CreateProcess` calls (however it spawns its sidecar) can
+still hand it down to a grandchild regardless of how carefully pact
+scoped the original grant. Actually preventing that would mean pact
+performing handle surgery on a process it doesn't own the code of --
+spawning the agent suspended, remotely duplicating its stdout handle to a
+non-inheritable copy via `DuplicateHandle` across process boundaries, and
+patching the still-suspended process's own cached handle value before
+resuming its first thread. That's real, documented Win32 capability, but
+it leans on internal-layout assumptions (`RTL_USER_PROCESS_PARAMETERS`)
+beyond what a small Rust CLI should take on for this.
+
+Instead, the fix accepts that the handle may leak and stops caring: OS
+handle security can restrict what the *direct* child receives, but can't
+stop that child from re-exposing an already-inherited handle to its own
+children, so `run_and_stream` no longer treats "the pipe hit EOF" as the
+signal that the run is over. Both stdout and stderr are read on detached
+background threads (not joined -- joining would just move the hang from
+the main loop into the join call); stdout lines are pushed through an
+`mpsc` channel, and the main loop calls `recv_timeout` in a
+`CHILD_EXIT_POLL_INTERVAL` (50ms) loop, racing each line against a
+non-blocking `Supervisor::try_wait` poll of the *direct* agent process.
+The loop exits as soon as that direct child exits, whether or not the
+pipe has actually seen EOF -- a lingering grandchild's copy of the write
+handle is no longer this process's problem to wait out. The existing
+post-wait `kill()` sweep (above) still runs afterward and still reaches
+the grandchild in the common case (it's still in the same job/group), so
+nothing is left orphaned either.
+
+Verified by turning the adversarial test from a documented limitation
+into real regression coverage:
+`run_and_stream_returns_promptly_despite_a_windows_grandchild_that_
+inherited_the_stdout_pipe` asserts `run_and_stream` now returns in well
+under 10 seconds against the same `fake_parent_with_grandchild` (previously
+measured at 120.57s), *and* that the grandchild marker process is gone by
+the time the function returns -- both the hang and the orphan are covered
+by one test.
 
 ### run_and_stream
 
