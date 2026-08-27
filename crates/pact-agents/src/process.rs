@@ -17,6 +17,19 @@ use crate::supervisor::{ChildPoll, Supervisor};
 /// `run_and_stream` for why this polling exists at all.
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long to keep waiting for more stdout lines after the direct child
+/// is first observed to have exited, before giving up on the reader
+/// thread entirely -- found necessary by a real, intermittent failure
+/// under genuine parallel test contention (not a hypothetical): `try_wait`
+/// reporting the child gone and the reader thread delivering that child's
+/// already-written final line (its `Result` event, in practice) are two
+/// independent signals, racing each other, so a `child_exited` check that
+/// broke immediately could observe the exit before the last line arrived
+/// and silently drop it. A short grace period, not an immediate break,
+/// closes that window while staying bounded (unlike the pipe itself, a
+/// grandchild can hold open indefinitely).
+const CHILD_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(500);
+
 /// How an agent process run ended.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
@@ -171,8 +184,19 @@ pub fn run_and_stream(
     });
 
     let mut saw_result: Option<RunOutcome> = None;
+    // Set once the direct child is observed to have exited -- from that
+    // point on, a still-open pipe is a leaked grandchild's problem, not
+    // this loop's. Not an immediate break, though: the exit is observed
+    // via `try_wait`, a separate signal from the reader thread's own
+    // channel, so a line the child already wrote (its final `Result`
+    // event, say) can still be in flight, not yet delivered, at the exact
+    // instant `try_wait` reports it gone. `child_exited` switches the
+    // poll to a short, bounded grace period instead of stopping cold, so
+    // that race can't silently drop the run's last few lines.
+    let mut child_exited = false;
     loop {
-        match stdout_rx.recv_timeout(CHILD_EXIT_POLL_INTERVAL) {
+        let poll_interval = if child_exited { CHILD_EXIT_GRACE_PERIOD } else { CHILD_EXIT_POLL_INTERVAL };
+        match stdout_rx.recv_timeout(poll_interval) {
             Ok(line) => {
                 for parsed in parse_line(&line) {
                     if let AgentEvent::Result { success, summary } = &parsed {
@@ -188,14 +212,16 @@ pub fn run_and_stream(
             // end -- the common, unaffected case): no more lines are
             // coming, so there's nothing left to race.
             Err(RecvTimeoutError::Disconnected) => break,
-            // No line within this tick -- check whether the direct child
-            // has exited on its own. If so, stop waiting on the reader
-            // thread regardless of whether its pipe has actually hit EOF;
-            // a lingering grandchild's copy of the handle is not this
-            // process's problem to wait out.
             Err(RecvTimeoutError::Timeout) => {
-                if !matches!(supervisor.try_wait(slot), ChildPoll::Running) {
+                if child_exited {
+                    // Already gave it a full grace period since the exit
+                    // was observed, with nothing arriving -- a lingering
+                    // grandchild's copy of the handle is not this
+                    // process's problem to wait out any further.
                     break;
+                }
+                if !matches!(supervisor.try_wait(slot), ChildPoll::Running) {
+                    child_exited = true;
                 }
             }
         }
