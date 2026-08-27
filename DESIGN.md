@@ -1896,6 +1896,92 @@ gemini-2.5-flash` was silently not honored -- the quota error reported
 once the daily quota resets (or with a paid/billed key) to close the
 remaining gap in issue #9.
 
+### Antigravity adapter (issue #9) -- the real, live-verified resolution
+
+`agy`'s own CLI first had to be *found*: registered in the Windows User
+PATH registry (`AppData\Local\agy\bin`), but invisible to this session's
+own shell processes, which had inherited their environment before that
+PATH entry was added -- a stale-inherited-environment issue, not a real
+absence, confirmed by reading the registry directly
+(`[System.Environment]::GetEnvironmentVariable("Path","User")`) and
+invoking the binary by its full resolved path once found.
+
+**A genuinely different tool, not a `gemini`-CLI replacement.** `agy
+models` lists Gemini, Claude, and GPT-OSS backends all selectable via
+`--model` -- confirming this is Google's own multi-model successor
+product (Antigravity), not a wrapper around the standalone `gemini` CLI
+above. `GeminiAdapter` (`gemini.rs`) is left as-is, still honestly
+labeled unconfirmed for its own remaining gaps -- `AgyAdapter` is a
+fifth, separate `AgentKind::Antigravity`, not a repurposing.
+
+**Live-verified end-to-end, not built from `--help` text alone**: a real
+`pact spawn --agent agy` against a scratch repo ran a genuine tool-using
+task (write a file with specific content) to completion, and the file's
+actual on-disk contents were confirmed correct by hand. Real, confirmed
+CLI surface: `-p`/`--output-format stream-json`/`--dangerously-skip-
+permissions`/`--mode {accept-edits,plan}`, all from a real `agy --help`
+and exercised for real, not guessed.
+
+**Two real bugs found and fixed while building this** (both the class
+this codebase's "confirm by hand" discipline exists to catch, not
+hypothetical edge cases):
+
+1. **`write_to_file` defaults to `agy`'s own internal scratch directory**
+   (`~/.gemini/antigravity-cli/scratch/`), ignoring the process's actual
+   working directory entirely -- confirmed directly: a first real run's
+   output file landed there, not in the pact workspace passed as cwd.
+   Would have silently broken the entire per-workspace isolation model
+   (an agent editing files outside its own worktree) if shipped
+   unverified. `--add-dir <workspace_path>` fixes it, confirmed by a
+   second real run landing the file correctly inside the workspace.
+   `build_command` now always includes it.
+2. **`conversation_id` sits at the `step_update` event's top level**, a
+   sibling of `"init"`, not nested inside it -- a first guess (pattern-
+   matched against the nesting shape the other adapters happen to use)
+   put it under `"init"` instead, and a real spawn's `[init] session`
+   line printed empty until corrected against the actual raw log.
+   Related, found in the same log: a real tool call fires *two*
+   `step_update`s for one invocation (`state: "ACTIVE"` then `"DONE"`,
+   same `tool_name`/`tool_info` both times) -- only `ACTIVE` is now
+   surfaced as a `ToolUse`; the `DONE` duplicate is dropped, or every
+   real tool call prints twice in the live CLI view (confirmed: it did,
+   before this fix).
+
+**MCP config is process-global, a real structural difference from every
+other adapter, not a workaround needed.** `agy mcp add <name> <command>
+[args...]` writes to one `~/.gemini/config/mcp_config.json` shared by
+*every* `agy` invocation on the machine -- confirmed by adding a test
+entry via `agy mcp add` and finding where it actually landed (`grep -rl`
+across likely directories, since it's not documented). Unlike Claude
+Code/Copilot CLI (`--mcp-config <path>`/`--additional-mcp-config @<path>`
+per spawn), Codex (inline `-c` overrides), or even the standalone
+`gemini` CLI (a fixed path, but still scoped per working directory),
+there is no per-invocation config mechanism at all. `build_command`
+calls `agy mcp add pact-coord <coord.command> <coord.args...>`
+synchronously before returning, re-registering (`agy mcp add` is
+documented as "add or update," confirmed by hand) this workspace's own
+`pact mcp-serve` invocation under the fixed name `pact-coord` -- correct
+for one `agy` spawn running at a time, but a real, disclosed
+race under true concurrency: two or more simultaneous `agy` spawns each
+overwrite the same global registration, and which workspace's
+coordination server a given `agy` process actually ends up talking to
+depends on registration timing, not which workspace it's running in.
+Not hidden -- flagged in the README's Known limitations, and
+`spawn-many --agent agy` with more than one concurrent task should be
+treated as unsafe for coordination until Antigravity ships a
+per-invocation config mechanism of its own.
+
+**No coordination-status event observed at all** in a real spawn's raw
+log (unlike Claude Code/Copilot's explicit `mcp_servers_loaded`-style
+events) -- `pact` falls into the same "never reported a status" honest
+warning path already built for Codex, not a new gap this adapter
+introduced.
+
+**Cost**: Antigravity's own account banner reads "Starter Quota," not a
+per-token price -- `adapter_rate` (`spawn-many --dry-run --estimate-cost`)
+treats it as quota-bounded like Copilot's flat-rate plans, not confirmed
+against a published per-token rate the way Claude/Codex/Gemini are.
+
 ### Copilot CLI safety default
 
 Unlike Claude Code, no confirmed non-hanging alternative to

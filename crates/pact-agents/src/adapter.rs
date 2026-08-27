@@ -66,8 +66,16 @@ pub enum AgentKind {
     Codex,
     /// Built from a real installed CLI but not live-verified against a
     /// real authenticated session -- see `gemini.rs`'s doc comment and
-    /// issue #9.
+    /// issue #9. The standalone `gemini` CLI's individual-auth OAuth path
+    /// remains genuinely blocked in this environment; `Antigravity`
+    /// below is the real, live-verified path to Gemini-model access.
     Gemini,
+    /// Antigravity (`agy`), a distinct multi-model CLI (Gemini, Claude,
+    /// and GPT-OSS backends all selectable via `--model`), not a
+    /// `gemini`-CLI replacement -- see `agy.rs`'s doc comment and issue
+    /// #9. Live-verified: a real headless run with a real tool call
+    /// (`write_to_file`) completed successfully.
+    Antigravity,
 }
 
 impl AgentKind {
@@ -77,6 +85,7 @@ impl AgentKind {
             "copilot" => Some(Self::Copilot),
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
+            "agy" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -88,6 +97,7 @@ pub fn adapter(kind: AgentKind) -> Box<dyn AgentAdapter> {
         AgentKind::Copilot => Box::new(crate::copilot::CopilotAdapter),
         AgentKind::Codex => Box::new(crate::codex::CodexAdapter),
         AgentKind::Gemini => Box::new(crate::gemini::GeminiAdapter),
+        AgentKind::Antigravity => Box::new(crate::agy::AgyAdapter),
     }
 }
 
@@ -155,6 +165,16 @@ pub fn resolve_safety_profile(agent: AgentKind, safety: Option<&str>) -> Option<
         (AgentKind::Gemini, SafetyProfile::Strict) => Some("plan".to_string()),
         (AgentKind::Gemini, SafetyProfile::WorkspaceWrite) => Some("auto_edit".to_string()),
         (AgentKind::Gemini, SafetyProfile::Unrestricted) => None,
+
+        // agy's own vocabulary is a --mode value (accept-edits, plan) or
+        // no override at all (pact's existing default,
+        // --dangerously-skip-permissions -- see agy.rs). Only "plan" is
+        // live-verified; "accept-edits" is inferred from agy's own
+        // --help text, same "not yet confirmed" honesty as the rest of
+        // this adapter's less-traveled paths.
+        (AgentKind::Antigravity, SafetyProfile::Strict) => Some("plan".to_string()),
+        (AgentKind::Antigravity, SafetyProfile::WorkspaceWrite) => Some("accept-edits".to_string()),
+        (AgentKind::Antigravity, SafetyProfile::Unrestricted) => None,
 
         // Copilot CLI has no gradient at all -- `build_command` ignores
         // `safety_override` unconditionally and always passes

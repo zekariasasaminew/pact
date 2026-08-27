@@ -9,6 +9,7 @@
 //! is implemented from documentation only -- see `codex.rs`'s doc comment.
 
 mod adapter;
+mod agy;
 mod claude_code;
 mod codex;
 mod copilot;

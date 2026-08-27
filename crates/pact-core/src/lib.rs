@@ -1073,6 +1073,7 @@ fn agent_kind_name(kind: AgentKind) -> &'static str {
         AgentKind::Copilot => "copilot",
         AgentKind::Codex => "codex",
         AgentKind::Gemini => "gemini",
+        AgentKind::Antigravity => "agy",
     }
 }
 
