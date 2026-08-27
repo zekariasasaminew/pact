@@ -9,12 +9,12 @@
 //!    tracked primary process has *already* exited still reaches and
 //!    kills a grandchild that outlived it. This is the exact call
 //!    `run_and_stream` now makes right after `wait()`.
-//! 2. `run_and_stream_is_blocked_by_a_windows_grandchild_that_inherits_
-//!    the_stdout_pipe` (`#[ignore]`d, slow, Windows-only): a deeper root
-//!    cause the investigation for this issue surfaced and verified, which
-//!    the fix above does *not* solve. Kept as a real, reproducible,
-//!    honestly-labeled anchor for that follow-up rather than silently
-//!    dropped.
+//! 2. `run_and_stream_returns_promptly_despite_a_windows_grandchild_that_
+//!    inherited_the_stdout_pipe` (Windows-only): a deeper root cause the
+//!    investigation for this issue surfaced, and which issue #253 later
+//!    fixed -- `run_and_stream` no longer blocks on stdout pipe EOF, so it
+//!    returns promptly once the direct child exits regardless of what a
+//!    grandchild does with an inherited handle.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -86,31 +86,26 @@ fn killing_a_process_group_after_its_primary_already_exited_still_reaches_a_gran
     assert_eq!(remaining, 0, "grandchild marker process survived the kill (found {remaining} still running)");
 }
 
-/// `#[ignore]`d, slow, Windows-only: documents a real, deeper root cause
-/// found while investigating issue #237, which `run_and_stream`'s
-/// post-wait kill does *not* solve. `fake_parent_with_grandchild` (this
-/// package's own second `[[bin]]`) spawns a `ping -n 120` grandchild with
-/// its own stdio explicitly set to `Stdio::null()`, then exits almost
-/// immediately. On Windows, that grandchild still inherits pact's own
-/// piped stdout write handle by default (`std::process::Command`'s
-/// `bInheritHandles=true` duplicates *every* inheritable handle open in
-/// the spawning process' table, not just the three explicitly configured
-/// ones) -- so the pipe's write end stays open, and `run_and_stream`'s
-/// read loop cannot see EOF, until the grandchild's *own* lifetime ends
-/// naturally. By the time the post-wait kill runs, the grandchild is
-/// already gone on its own -- there's nothing left to sweep. This is a
-/// stronger, worse bug than "an orphan survives after exit": pact's own
-/// process can't finish at all until the grandchild does, matching the
-/// original report's exact symptom (the shell never got its prompt
-/// back). A real fix needs a different mechanism for capturing agent
-/// stdout that isn't vulnerable to default Windows handle inheritance
-/// (e.g. a named pipe with an explicitly non-inheritable handle) -- out
-/// of scope for this pass; see DESIGN.md for the full writeup and why
-/// this is being left for a real conversation rather than attempted here.
+/// Real regression coverage for issue #253's fix. `fake_parent_with_
+/// grandchild` (this package's own second `[[bin]]`) spawns a `ping -n 120`
+/// grandchild with its own stdio explicitly set to `Stdio::null()`, then
+/// exits almost immediately. On Windows, that grandchild still inherits
+/// pact's own piped stdout write handle by default (`std::process::
+/// Command`'s `bInheritHandles=true` duplicates *every* inheritable handle
+/// open in the spawning process' table, not just the three explicitly
+/// configured ones) -- so the pipe's write end stays open well past the
+/// direct child's own exit. Before the fix, `run_and_stream` blocked
+/// reading stdout until the grandchild's *own* ~119s lifetime ended --
+/// pact's own process couldn't finish at all, matching the original
+/// report's exact symptom (the shell never got its prompt back). The fix
+/// races each stdout line against a poll of the direct child's exit status
+/// instead of waiting for pipe EOF (see `run_and_stream`'s doc comment).
+/// This test asserts both halves: `run_and_stream` returns promptly (not
+/// after ~2 minutes), and the existing group-kill sweep still reaches and
+/// kills the grandchild on the way out, so nothing is left orphaned.
 #[test]
-#[ignore = "slow (~2min): documents a known, unresolved Windows pipe-inheritance limitation, issue #237"]
 #[cfg(windows)]
-fn run_and_stream_is_blocked_by_a_windows_grandchild_that_inherits_the_stdout_pipe() {
+fn run_and_stream_returns_promptly_despite_a_windows_grandchild_that_inherited_the_stdout_pipe() {
     let supervisor = Supervisor::new();
     let program = env!("CARGO_BIN_EXE_fake_parent_with_grandchild");
     let log_path = std::env::temp_dir().join(format!("pact-agents-orphan-cleanup-test-{}.log", std::process::id()));
@@ -126,15 +121,23 @@ fn run_and_stream_is_blocked_by_a_windows_grandchild_that_inherits_the_stdout_pi
         |_event| {},
         |_pid| {},
     );
-    assert!(outcome.is_ok(), "run_and_stream itself must complete (eventually): {outcome:?}");
+    assert!(outcome.is_ok(), "run_and_stream must complete: {outcome:?}");
     assert!(
-        start.elapsed() >= Duration::from_secs(60),
-        "expected the known limitation to reproduce (blocked for close to the grandchild's own \
-         119s lifetime); it returned in {:?} -- if this starts failing, the underlying Windows \
-         handle-inheritance behavior may have changed and this test (and its documentation) \
-         should be revisited",
+        start.elapsed() < Duration::from_secs(10),
+        "expected run_and_stream to return promptly once the direct child exits, not block on \
+         the grandchild's own ~119s lifetime; took {:?}",
         start.elapsed()
     );
+
+    let mut remaining = count_marker_processes();
+    for _ in 0..20 {
+        if remaining == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        remaining = count_marker_processes();
+    }
+    assert_eq!(remaining, 0, "grandchild marker process survived (found {remaining} still running)");
 
     let _ = std::fs::remove_file(&log_path);
 }

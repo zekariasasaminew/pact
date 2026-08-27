@@ -2,13 +2,20 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use command_group::CommandGroup;
 
 use crate::event::AgentEvent;
-use crate::supervisor::Supervisor;
+use crate::supervisor::{ChildPoll, Supervisor};
+
+/// How often the main loop re-checks the direct child's own exit status
+/// while waiting for the next stdout line -- see the loop in
+/// `run_and_stream` for why this polling exists at all.
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How an agent process run ended.
 #[derive(Debug, Clone)]
@@ -53,6 +60,21 @@ fn build_agent_command(program: &str) -> Command {
 /// ("pact-agents > run_and_stream") for `on_pid`'s timing, the stderr
 /// draining approach, and why `parse_line` returns zero-or-more events per
 /// line rather than exactly one.
+///
+/// Deliberately does not wait for stdout EOF to decide the run is over
+/// (issue #253): on Windows, `std::process::Command`'s `bInheritHandles`
+/// duplicates every inheritable handle in this process into the spawned
+/// agent, including the stdout pipe's write end -- if that agent spawns its
+/// own subprocess (an MCP sidecar) without explicitly excluding it, the
+/// grandchild holds the write end open long after the agent itself exits,
+/// and a naive "read until EOF" blocks for the grandchild's entire
+/// lifetime. Instead, stdout is read on a background thread that feeds a
+/// channel, and the main loop races each line against a poll of the
+/// *direct* child's own exit status, returning as soon as that child is
+/// gone -- see DESIGN.md for the full writeup and why this is preferred
+/// over OS-level handle-inheritance controls (which can restrict what the
+/// direct child receives, but can't stop that child from re-exposing an
+/// inherited, still-inheritable handle to its own children).
 #[allow(clippy::too_many_arguments)]
 pub fn run_and_stream(
     supervisor: &Supervisor,
@@ -119,8 +141,15 @@ pub fn run_and_stream(
 
     let slot = supervisor.register(child);
 
+    // Both reader threads are deliberately detached, not joined: on
+    // Windows, either pipe can be kept open indefinitely by a grandchild
+    // neither thread controls (issue #253), so joining would just move the
+    // hang from the main loop into the join call. Whatever they've already
+    // written to the log by the time this function returns is what a real
+    // agent CLI would actually have produced by then anyway -- nothing
+    // meaningful is lost by not waiting for their natural end.
     let stderr_log = Arc::clone(&log);
-    let stderr_thread = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             if let Ok(mut f) = stderr_log.lock() {
                 let _ = writeln!(f, "[stderr] {line}");
@@ -128,23 +157,49 @@ pub fn run_and_stream(
         }
     });
 
-    let mut saw_result: Option<RunOutcome> = None;
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        if let Ok(mut f) = log.lock() {
-            let _ = writeln!(f, "{line}");
-        }
-        for parsed in parse_line(&line) {
-            if let AgentEvent::Result { success, summary } = &parsed {
-                saw_result = Some(RunOutcome {
-                    success: *success,
-                    summary: summary.clone(),
-                });
+    let (stdout_tx, stdout_rx) = mpsc::channel::<String>();
+    let stdout_log = Arc::clone(&log);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(mut f) = stdout_log.lock() {
+                let _ = writeln!(f, "{line}");
             }
-            on_event(&parsed);
+            if stdout_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut saw_result: Option<RunOutcome> = None;
+    loop {
+        match stdout_rx.recv_timeout(CHILD_EXIT_POLL_INTERVAL) {
+            Ok(line) => {
+                for parsed in parse_line(&line) {
+                    if let AgentEvent::Result { success, summary } = &parsed {
+                        saw_result = Some(RunOutcome {
+                            success: *success,
+                            summary: summary.clone(),
+                        });
+                    }
+                    on_event(&parsed);
+                }
+            }
+            // Real EOF (the direct child, or nothing else, held the write
+            // end -- the common, unaffected case): no more lines are
+            // coming, so there's nothing left to race.
+            Err(RecvTimeoutError::Disconnected) => break,
+            // No line within this tick -- check whether the direct child
+            // has exited on its own. If so, stop waiting on the reader
+            // thread regardless of whether its pipe has actually hit EOF;
+            // a lingering grandchild's copy of the handle is not this
+            // process's problem to wait out.
+            Err(RecvTimeoutError::Timeout) => {
+                if !matches!(supervisor.try_wait(slot), ChildPoll::Running) {
+                    break;
+                }
+            }
         }
     }
-
-    let _ = stderr_thread.join();
 
     let status = match supervisor.take(slot) {
         Some(mut c) => {
