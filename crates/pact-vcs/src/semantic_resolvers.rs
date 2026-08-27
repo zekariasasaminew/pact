@@ -187,6 +187,31 @@ impl SemanticResolver for UnionResolver {
         let (ours, _) = &stages.ours;
         let (theirs, _) = &stages.theirs;
 
+        // Sentinel-marker insertion mode (issue #87): a plain append at
+        // file end loses position for a barrel file whose union-mergeable
+        // block sits above other code (a finalizer like `start()`, or a
+        // trailing `module.exports`) -- only the first workspace's
+        // addition ever lands inside the intended block; every merge
+        // after that appends past the finalizer instead. Opt-in via a
+        // marker pair the user adds to their own file -- no CLI flag,
+        // the markers' presence in `ours` *is* the opt-in. Exactly one
+        // well-formed pair activates it; zero markers keeps today's
+        // plain-append behavior unchanged (non-breaking); anything else
+        // (multiple pairs, unmatched start/end) refuses rather than
+        // guessing which pair is the right insertion point.
+        //
+        // Scanned against `ours`' *raw* lines, not the deduped list built
+        // below -- two marker pairs using byte-identical marker text would
+        // otherwise silently collapse into what looks like one pair once
+        // the dedup step below removes the repeated line, defeating the
+        // refusal this mode is supposed to give a genuinely ambiguous file.
+        let ours_lines: Vec<&str> = ours.lines().collect();
+        let end_marker_text = match sentinel_end_marker_index(&ours_lines) {
+            MarkerScan::NoMarkers => None,
+            MarkerScan::OnePair(end_index) => Some(ours_lines[end_index]),
+            MarkerScan::Malformed => return Ok(None),
+        };
+
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut merged_lines: Vec<&str> = Vec::new();
         for line in ours.lines() {
@@ -194,9 +219,34 @@ impl SemanticResolver for UnionResolver {
                 merged_lines.push(line);
             }
         }
-        for line in theirs.lines() {
-            if seen.insert(line) {
-                merged_lines.push(line);
+
+        // The end marker's index within the *deduped* list -- found by
+        // content, not carried over from `ours_lines`' index, since an
+        // earlier duplicate line elsewhere in `ours` could have shifted it.
+        let insertion_index = end_marker_text.and_then(|text| merged_lines.iter().position(|l| *l == text));
+
+        match insertion_index {
+            Some(mut index) => {
+                for line in theirs.lines() {
+                    if is_sentinel_marker_line(line) {
+                        // Never insert a duplicate marker line, even one
+                        // that happens to differ in surrounding comment
+                        // syntax from ours' own -- dedup below only
+                        // catches an exact text match.
+                        continue;
+                    }
+                    if seen.insert(line) {
+                        merged_lines.insert(index, line);
+                        index += 1;
+                    }
+                }
+            }
+            None => {
+                for line in theirs.lines() {
+                    if seen.insert(line) {
+                        merged_lines.push(line);
+                    }
+                }
             }
         }
 
@@ -217,6 +267,45 @@ impl SemanticResolver for UnionResolver {
         }
 
         Ok(Some(ResolvedFile { content: result }))
+    }
+}
+
+/// The literal tokens a sentinel marker line contains -- deliberately not
+/// tied to any one comment syntax (`//`, `#`, `<!--`, ...). This feature
+/// sits on `--append-only`, which is itself language-agnostic (any glob,
+/// any file type); hardcoding a `//`-style marker would silently not
+/// work for a Python/YAML/HTML barrel file. A caller writes whatever
+/// comment syntax is idiomatic for their language, as long as the line
+/// contains this token -- `// pact:union-start`, `# pact:union-start`,
+/// `<!-- pact:union-start -->` all match.
+const SENTINEL_START_TOKEN: &str = "pact:union-start";
+const SENTINEL_END_TOKEN: &str = "pact:union-end";
+
+fn is_sentinel_marker_line(line: &str) -> bool {
+    line.contains(SENTINEL_START_TOKEN) || line.contains(SENTINEL_END_TOKEN)
+}
+
+enum MarkerScan {
+    /// No start or end marker anywhere -- today's plain-append behavior
+    /// applies unchanged.
+    NoMarkers,
+    /// Exactly one well-formed pair (one start, one end, start before
+    /// end) -- the end marker's index in `lines`.
+    OnePair(usize),
+    /// Anything else (multiple pairs, an end with no start, a start
+    /// after its end, ...) -- refuse rather than guess which pair, if
+    /// any, is the right insertion point.
+    Malformed,
+}
+
+fn sentinel_end_marker_index(lines: &[&str]) -> MarkerScan {
+    let starts: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.contains(SENTINEL_START_TOKEN)).map(|(i, _)| i).collect();
+    let ends: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.contains(SENTINEL_END_TOKEN)).map(|(i, _)| i).collect();
+
+    match (starts.as_slice(), ends.as_slice()) {
+        ([], []) => MarkerScan::NoMarkers,
+        (&[start], &[end]) if start < end => MarkerScan::OnePair(end),
+        _ => MarkerScan::Malformed,
     }
 }
 
@@ -382,6 +471,131 @@ mod tests {
         // these (for different properties) is a legitimate union merge.
         let content = "module.exports.mul = require('./mul');\nmodule.exports.div = require('./div');\n";
         assert!(union_merge_is_safe("src/index.js", content));
+    }
+
+    fn union_stages(ours: &str, theirs: &str) -> ConflictStages {
+        ConflictStages {
+            path: "src/plugins.js".to_string(),
+            base: None,
+            ours: (ours.to_string(), false),
+            theirs: (theirs.to_string(), false),
+        }
+    }
+
+    #[test]
+    fn sentinel_end_marker_index_finds_a_well_formed_pair() {
+        let lines = ["a", "// pact:union-start", "b", "// pact:union-end", "c"];
+        assert!(matches!(sentinel_end_marker_index(&lines), MarkerScan::OnePair(3)));
+    }
+
+    #[test]
+    fn sentinel_end_marker_index_is_none_with_no_markers() {
+        let lines = ["a", "b", "c"];
+        assert!(matches!(sentinel_end_marker_index(&lines), MarkerScan::NoMarkers));
+    }
+
+    #[test]
+    fn sentinel_end_marker_index_refuses_multiple_pairs() {
+        let lines = ["// pact:union-start", "a", "// pact:union-end", "// pact:union-start", "b", "// pact:union-end"];
+        assert!(matches!(sentinel_end_marker_index(&lines), MarkerScan::Malformed));
+    }
+
+    #[test]
+    fn sentinel_end_marker_index_refuses_an_end_before_its_start() {
+        let lines = ["// pact:union-end", "a", "// pact:union-start"];
+        assert!(matches!(sentinel_end_marker_index(&lines), MarkerScan::Malformed));
+    }
+
+    #[test]
+    fn sentinel_end_marker_index_refuses_an_unmatched_start() {
+        let lines = ["// pact:union-start", "a"];
+        assert!(matches!(sentinel_end_marker_index(&lines), MarkerScan::Malformed));
+    }
+
+    #[test]
+    fn union_resolve_falls_back_to_append_at_end_with_no_markers() {
+        let resolver = UnionResolver { globs: vec!["src/*.js".to_string()] };
+        let stages = union_stages(
+            "register('a');\nfinalize();\n",
+            "register('b');\nfinalize();\n",
+        );
+        let resolved = resolver.resolve(&stages).unwrap().unwrap();
+        assert_eq!(resolved.content, "register('a');\nfinalize();\nregister('b');\n");
+    }
+
+    #[test]
+    fn union_resolve_inserts_before_the_end_marker_when_one_pair_is_present() {
+        let resolver = UnionResolver { globs: vec!["src/*.js".to_string()] };
+        let stages = union_stages(
+            "// pact:union-start\nregister('a');\n// pact:union-end\nfinalize();\n",
+            "// pact:union-start\nregister('a');\nregister('b');\n// pact:union-end\nfinalize();\n",
+        );
+        let resolved = resolver.resolve(&stages).unwrap().unwrap();
+        assert_eq!(
+            resolved.content,
+            "// pact:union-start\nregister('a');\nregister('b');\n// pact:union-end\nfinalize();\n",
+            "expected register('b') inserted before the end marker, not after finalize()"
+        );
+    }
+
+    #[test]
+    fn union_resolve_accumulates_multiple_insertions_in_order_before_the_marker() {
+        // Simulates a second sequential merge against an already-merged
+        // `ours` that itself resulted from a prior sentinel insertion --
+        // confirms insertions compound correctly across N workspaces.
+        let resolver = UnionResolver { globs: vec!["src/*.js".to_string()] };
+        let stages = union_stages(
+            "// pact:union-start\nregister('a');\nregister('b');\n// pact:union-end\nfinalize();\n",
+            "// pact:union-start\nregister('a');\nregister('c');\n// pact:union-end\nfinalize();\n",
+        );
+        let resolved = resolver.resolve(&stages).unwrap().unwrap();
+        assert_eq!(
+            resolved.content,
+            "// pact:union-start\nregister('a');\nregister('b');\nregister('c');\n// pact:union-end\nfinalize();\n"
+        );
+    }
+
+    #[test]
+    fn union_resolve_never_duplicates_theirs_own_marker_lines() {
+        let resolver = UnionResolver { globs: vec!["src/*.js".to_string()] };
+        let stages = union_stages(
+            "// pact:union-start\nregister('a');\n// pact:union-end\nfinalize();\n",
+            "// pact:union-start\nregister('a');\nregister('b');\n// pact:union-end\nfinalize();\n",
+        );
+        let resolved = resolver.resolve(&stages).unwrap().unwrap();
+        assert_eq!(
+            resolved.content.matches("pact:union-start").count(),
+            1,
+            "theirs' own copy of the start marker must not be inserted as a duplicate line"
+        );
+        assert_eq!(resolved.content.matches("pact:union-end").count(), 1);
+    }
+
+    #[test]
+    fn union_resolve_refuses_when_ours_has_multiple_marker_pairs() {
+        let resolver = UnionResolver { globs: vec!["src/*.js".to_string()] };
+        let stages = union_stages(
+            "// pact:union-start\na\n// pact:union-end\n// pact:union-start\nb\n// pact:union-end\n",
+            "c\n",
+        );
+        assert!(resolver.resolve(&stages).unwrap().is_none(), "expected a refusal (real conflict), not a guess");
+    }
+
+    #[test]
+    fn union_resolve_marker_detection_is_comment_syntax_agnostic() {
+        // Python-style `#` comments -- the whole point of matching on the
+        // literal token rather than a fixed `//` prefix.
+        let resolver = UnionResolver { globs: vec!["src/*.py".to_string()] };
+        let mut stages = union_stages(
+            "# pact:union-start\nregister('a')\n# pact:union-end\nfinalize()\n",
+            "# pact:union-start\nregister('a')\nregister('b')\n# pact:union-end\nfinalize()\n",
+        );
+        stages.path = "src/plugins.py".to_string();
+        let resolved = resolver.resolve(&stages).unwrap().unwrap();
+        assert_eq!(
+            resolved.content,
+            "# pact:union-start\nregister('a')\nregister('b')\n# pact:union-end\nfinalize()\n"
+        );
     }
 
     #[test]
