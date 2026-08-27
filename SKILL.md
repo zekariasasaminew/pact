@@ -74,10 +74,11 @@ Key things that surprise people:
 
 ## Coordination MCP conventions
 
-Every spawned agent automatically gets four MCP tools — `claim_files`,
-`release_files`, `send_message`, `check_messages` — no setup required. If
-you're an agent operating *inside* a pact workspace (not the human driving
-pact from the outside), the conventions are:
+Every spawned agent automatically gets seven MCP tools — `claim_files`,
+`release_files`, `send_message`, `check_messages`, `request_handoff`,
+`check_handoffs`, `respond_handoff` — no setup required. If you're an
+agent operating *inside* a pact workspace (not the human driving pact
+from the outside), the conventions are:
 
 **Your host CLI names these tools differently — check your own real tool
 list rather than assuming the bare name below works.** The bare names
@@ -100,6 +101,17 @@ correctly connected.
    function signature another agent depends on. `check_messages` only
    returns what's arrived since you last checked.
 4. **Release on completion** so the lease doesn't linger past your task.
+5. **Prefer `request_handoff` over a prose `send_message`** when what you
+   actually need is a real answer to "can I take these files" or "please
+   hold off on this scope" — it gets you a typed status
+   (`pending`/`accepted`/`rejected`/`narrowed`/`expired`/`cancelled`)
+   instead of you having to interpret free text. It does not block: call
+   it, then check back later with `check_handoffs` (same polling model as
+   `check_messages`) — don't wait synchronously for a response. If the
+   other agent narrows the request (offers a smaller/different scope
+   instead), and you want to accept that counter-offer, send a fresh
+   `request_handoff` scoped to the narrowed files rather than expecting
+   the original request to update further.
 
 ## Task-file templates
 

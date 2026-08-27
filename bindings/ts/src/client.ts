@@ -7,9 +7,10 @@
  * ("pact-coord SDK bindings v1", issue #127) covers why this is the
  * right shape (there is no standing coordination server to connect to
  * instead) and why the response parsing below is asymmetric
- * (claimFiles/checkMessages return real JSON text; releaseFiles/
- * sendMessage return a plain human-readable sentence, by pact-coord's
- * own design, not an oversight here).
+ * (claimFiles/checkMessages/requestHandoff/checkHandoffs return real
+ * JSON text; releaseFiles/sendMessage/respondHandoff return a plain
+ * human-readable sentence, by pact-coord's own design, not an oversight
+ * here).
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -55,6 +56,33 @@ export interface ActiveLease {
   expiresAt: number;
 }
 
+/** The status lifecycle for a handoff request -- see DESIGN.md
+ * ("pact-coord > Typed handoff/negotiation protocol", issue #163) for
+ * the full design. `narrowed` is terminal for this request: accept a
+ * counter-offer by sending a fresh `requestHandoff` scoped to
+ * `narrowedFiles`, not by any further change to this one. */
+export type HandoffStatus = "pending" | "accepted" | "rejected" | "narrowed" | "expired" | "cancelled";
+
+export interface HandoffRequest {
+  id: number;
+  from: string;
+  to: string;
+  files: string[];
+  message: string;
+  status: HandoffStatus;
+  createdAt: number;
+  expiresAt: number;
+  respondedAt?: number;
+  responseMessage?: string;
+  /** Only set when `status === "narrowed"`. */
+  narrowedFiles?: string[];
+}
+
+export interface HandoffRequestResult {
+  requestId: number;
+  expiresAt: number;
+}
+
 interface RawClaimResult {
   accepted: boolean;
   expires_at: number;
@@ -74,6 +102,25 @@ interface RawMessage {
 interface RawActiveLease {
   pattern: string;
   holder: string;
+  expires_at: number;
+}
+
+interface RawHandoffRequest {
+  id: number;
+  from: string;
+  to: string;
+  files: string[];
+  message: string;
+  status: HandoffStatus;
+  created_at: number;
+  expires_at: number;
+  responded_at?: number | null;
+  response_message?: string | null;
+  narrowed_files?: string[] | null;
+}
+
+interface RawHandoffRequestResult {
+  request_id: number;
   expires_at: number;
 }
 
@@ -108,13 +155,36 @@ function parseActiveLeases(text: string): ActiveLease[] {
   return data.map((l) => ({ pattern: l.pattern, holder: l.holder, expiresAt: l.expires_at }));
 }
 
+function parseHandoffRequests(text: string): HandoffRequest[] {
+  const data = JSON.parse(text) as RawHandoffRequest[];
+  return data.map((r) => ({
+    id: r.id,
+    from: r.from,
+    to: r.to,
+    files: r.files,
+    message: r.message,
+    status: r.status,
+    createdAt: r.created_at,
+    expiresAt: r.expires_at,
+    respondedAt: r.responded_at ?? undefined,
+    responseMessage: r.response_message ?? undefined,
+    narrowedFiles: r.narrowed_files ?? undefined,
+  }));
+}
+
+function parseHandoffRequestResult(text: string): HandoffRequestResult {
+  const data = JSON.parse(text) as RawHandoffRequestResult;
+  return { requestId: data.request_id, expiresAt: data.expires_at };
+}
+
 export interface SpawnOptions {
   /** Path (or bare name, resolved via PATH) to the pact binary. Defaults to "pact". */
   pactBin?: string;
 }
 
 /**
- * An open MCP session speaking pact-coord's four tools.
+ * An open MCP session speaking pact-coord's tools (file leases,
+ * messaging, and typed handoff requests).
  *
  * Construct via `PactCoordClient.spawn(...)` (spawns `pact mcp-serve`
  * itself), then call `close()` when done -- or use `withClient` to have
@@ -195,6 +265,45 @@ export class PactCoordClient {
   async listClaims(): Promise<ActiveLease[]> {
     const text = await this.call("list_claims", {});
     return parseActiveLeases(text);
+  }
+
+  /** Asks another agent to hand over, hold off on, or otherwise
+   * coordinate on a specific set of files -- a structured alternative to
+   * a prose `sendMessage`, with a real status you (and they) can poll.
+   * Does not block -- returns immediately with a request id and expiry;
+   * check on it later with `checkHandoffs`. */
+  async requestHandoff(to: string, files: string[], message: string, ttlSeconds?: number): Promise<HandoffRequestResult> {
+    const args: Record<string, unknown> = { to, files, message };
+    if (ttlSeconds !== undefined) args.ttl_seconds = ttlSeconds;
+    const text = await this.call("request_handoff", args);
+    return parseHandoffRequestResult(text);
+  }
+
+  /** New/changed handoff requests relevant to this agent since it last
+   * checked -- both new requests addressed to it, and responses to
+   * requests it sent. A request this agent sent doesn't appear here
+   * while still pending; it appears once accepted, rejected, narrowed,
+   * or expired. */
+  async checkHandoffs(): Promise<HandoffRequest[]> {
+    const text = await this.call("check_handoffs", {});
+    return parseHandoffRequests(text);
+  }
+
+  /** Responds to a pending handoff request addressed to this agent.
+   * `decision` must be exactly "accept", "reject", or "narrow" --
+   * "narrow" requires `narrowedFiles` (the smaller/different scope
+   * actually on offer instead of the original ask). Only the request's
+   * own recipient can respond, and only while it's still pending. */
+  async respondHandoff(
+    requestId: number,
+    decision: "accept" | "reject" | "narrow",
+    narrowedFiles?: string[],
+    message?: string,
+  ): Promise<string> {
+    const args: Record<string, unknown> = { request_id: requestId, decision };
+    if (narrowedFiles !== undefined) args.narrowed_files = narrowedFiles;
+    if (message !== undefined) args.message = message;
+    return this.call("respond_handoff", args);
   }
 
   async close(): Promise<void> {

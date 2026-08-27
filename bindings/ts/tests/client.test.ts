@@ -151,4 +151,79 @@ describe("PactCoordClient", () => {
       await expect(client.claimFiles(["["])).rejects.toBeInstanceOf(PactCoordError);
     }, { pactBin });
   });
+
+  it("delivers a new handoff request to its target immediately", async () => {
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      const result = await client.requestHandoff("agent-b", ["src/shared.py"], "can I take this?");
+      expect(result.requestId).toBeGreaterThan(0);
+      expect(result.expiresAt).toBeGreaterThan(0);
+    }, { pactBin });
+
+    await withClient(scratchRepo, "agent-b", scratchRepo, async (client) => {
+      const incoming = await client.checkHandoffs();
+      expect(incoming).toHaveLength(1);
+      expect(incoming[0].from).toBe("agent-a");
+      expect(incoming[0].status).toBe("pending");
+      expect(incoming[0].files).toEqual(["src/shared.py"]);
+    }, { pactBin });
+  });
+
+  it("does not echo the requester's own still-pending request back to them", async () => {
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      await client.requestHandoff("agent-b", ["src/shared.py"], "can I take this?");
+      const outgoing = await client.checkHandoffs();
+      expect(outgoing).toEqual([]);
+    }, { pactBin });
+  });
+
+  it("round-trips an accepted response back to the requester", async () => {
+    let requestId = -1;
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      const result = await client.requestHandoff("agent-b", ["src/shared.py"], "can I take this?");
+      requestId = result.requestId;
+    }, { pactBin });
+
+    await withClient(scratchRepo, "agent-b", scratchRepo, async (client) => {
+      const text = await client.respondHandoff(requestId, "accept", undefined, "go ahead");
+      expect(text).toContain(String(requestId));
+    }, { pactBin });
+
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      const outgoing = await client.checkHandoffs();
+      expect(outgoing).toHaveLength(1);
+      expect(outgoing[0].status).toBe("accepted");
+      expect(outgoing[0].responseMessage).toBe("go ahead");
+    }, { pactBin });
+  });
+
+  it("carries the counter-offered scope on a narrowed response", async () => {
+    let requestId = -1;
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      const result = await client.requestHandoff("agent-b", ["src/*.py"], "can I take these?");
+      requestId = result.requestId;
+    }, { pactBin });
+
+    await withClient(scratchRepo, "agent-b", scratchRepo, async (client) => {
+      await client.respondHandoff(requestId, "narrow", ["src/only_this.py"], "only this one is free");
+    }, { pactBin });
+
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      const outgoing = await client.checkHandoffs();
+      expect(outgoing).toHaveLength(1);
+      expect(outgoing[0].status).toBe("narrowed");
+      expect(outgoing[0].narrowedFiles).toEqual(["src/only_this.py"]);
+    }, { pactBin });
+  });
+
+  it("raises PactCoordError responding to a request addressed to someone else", async () => {
+    let requestId = -1;
+    await withClient(scratchRepo, "agent-a", scratchRepo, async (client) => {
+      const result = await client.requestHandoff("agent-b", ["src/shared.py"], "can I take this?");
+      requestId = result.requestId;
+    }, { pactBin });
+
+    await withClient(scratchRepo, "agent-c", scratchRepo, async (client) => {
+      await expect(client.respondHandoff(requestId, "accept")).rejects.toBeInstanceOf(PactCoordError);
+    }, { pactBin });
+  });
 });

@@ -80,7 +80,28 @@ pub fn open(repo_root: &Path) -> Result<Connection> {
             status TEXT NOT NULL DEFAULT 'open',
             resolved_at INTEGER
         );
-        CREATE INDEX IF NOT EXISTS conflicts_workspace_id ON conflicts(workspace_id);",
+        CREATE INDEX IF NOT EXISTS conflicts_workspace_id ON conflicts(workspace_id);
+        CREATE TABLE IF NOT EXISTS handoff_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_agent TEXT NOT NULL,
+            to_agent TEXT NOT NULL,
+            requested_files TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            responded_at INTEGER,
+            response_message TEXT,
+            narrowed_files TEXT,
+            activity_seq INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS handoff_requests_activity_seq ON handoff_requests(activity_seq);
+        CREATE INDEX IF NOT EXISTS handoff_requests_to_agent ON handoff_requests(to_agent);
+        CREATE INDEX IF NOT EXISTS handoff_requests_from_agent ON handoff_requests(from_agent);
+        CREATE TABLE IF NOT EXISTS handoff_read_cursors (
+            agent_id TEXT PRIMARY KEY,
+            last_seen_handoff_id INTEGER NOT NULL DEFAULT 0
+        );",
     )?;
 
     Ok(conn)

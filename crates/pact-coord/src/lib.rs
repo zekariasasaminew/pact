@@ -8,12 +8,14 @@
 //! by a SQLite database shared across every agent in one repo's session.
 
 mod db;
+mod handoffs;
 mod leases;
 mod messages;
 mod operations;
 mod persisted_conflicts;
 mod server;
 
+pub use handoffs::{HandoffDecision, HandoffRequest, HandoffRequestResult, HandoffStatus};
 pub use leases::{ActiveLease, Conflict, ClaimResult};
 pub use messages::Message;
 pub use operations::{HistoryFilter, Operation};
@@ -56,6 +58,17 @@ pub struct CoordStatus {
 pub fn clear_leases(repo_root: &Path) -> Result<usize> {
     let conn = db::open(repo_root)?;
     leases::clear_leases(&conn)
+}
+
+/// Best-effort teardown integration for the handoff protocol (issue
+/// #163): cancels every still-pending handoff request addressed *to*
+/// `agent_id` (a workspace id), since it can no longer respond once torn
+/// down. See `handoffs::cancel_pending_handoffs_to` for the exact scope
+/// and why outgoing requests are left alone. Returns how many rows were
+/// cancelled.
+pub fn cancel_pending_handoffs_to(repo_root: &Path, agent_id: &str) -> Result<usize> {
+    let conn = db::open(repo_root)?;
+    handoffs::cancel_pending_handoffs_to(&conn, agent_id)
 }
 
 /// Computes a `CoordStatus` snapshot. Read-only: unlike `check_messages`,

@@ -10,7 +10,8 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{leases, messages, operations};
+use crate::{handoffs, leases, messages, operations};
+use crate::handoffs::HandoffDecision;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClaimFilesParams {
@@ -31,6 +32,35 @@ pub struct ClaimFilesParams {
 pub struct ReleaseFilesParams {
     /// Glob patterns previously passed to claim_files.
     pub globs: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RequestHandoffParams {
+    /// Recipient's agent id (workspace id).
+    pub to: String,
+    /// Glob patterns or file paths you're asking `to` to hand over, hold
+    /// off on, or otherwise coordinate on -- the actual scope of the ask.
+    pub files: Vec<String>,
+    /// Why you're asking -- free text, shown to the recipient.
+    pub message: String,
+    /// How long before this request auto-expires if never responded to,
+    /// in seconds. Defaults to 10 minutes if omitted. Must be positive
+    /// and at most 86400 (24 hours).
+    pub ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RespondHandoffParams {
+    pub request_id: i64,
+    /// "accept", "reject", or "narrow".
+    pub decision: String,
+    /// Required when decision is "narrow": the narrower file scope
+    /// you're actually willing to hand over instead of the original ask.
+    /// The requester sees this and can send a fresh request_handoff
+    /// scoped to it if they want to accept the counter-offer.
+    pub narrowed_files: Option<Vec<String>>,
+    /// Optional free-text explanation, shown to the requester.
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -196,6 +226,73 @@ impl CoordServer {
             Err(e) => error_result(format!("error: {e:#}")),
         }
     }
+
+    #[tool(
+        description = "Ask another agent to hand over, hold off on, or otherwise coordinate on a specific set of files -- a structured alternative to a prose send_message, with a real status you (and they) can poll: pending, accepted, rejected, narrowed (they're offering a smaller/different scope instead -- see the narrowed_files field on what check_handoffs returns), expired (they never responded in time), or cancelled. This does not block -- it returns immediately with a request_id and expires_at; check on it later with check_handoffs, the same way you'd poll check_messages. If narrowed, and you want to accept the counter-offer, send a fresh request_handoff scoped to the narrowed files."
+    )]
+    fn request_handoff(
+        &self,
+        Parameters(params): Parameters<RequestHandoffParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let conn = self.conn.lock().unwrap();
+        match handoffs::request_handoff(&conn, &self.agent_id, &params.to, &params.files, &params.message, params.ttl_seconds) {
+            Ok(result) => {
+                log_op(
+                    &conn,
+                    "handoff_request",
+                    &self.agent_id,
+                    serde_json::json!({ "to": params.to, "files": params.files, "request_id": result.request_id }),
+                );
+                text_result(
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("error serializing result: {e}")),
+                )
+            }
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Check for handoff requests relevant to you since you last checked -- both new requests addressed to you (which you can act on with respond_handoff) and responses to requests you sent. A request you sent doesn't show up here while it's still pending (you already know you sent it); it appears once the other agent accepts, rejects, narrows, or it expires."
+    )]
+    fn check_handoffs(&self) -> Result<CallToolResult, McpError> {
+        let conn = self.conn.lock().unwrap();
+        match handoffs::check_handoffs(&conn, &self.agent_id) {
+            Ok(requests) => text_result(
+                serde_json::to_string_pretty(&requests).unwrap_or_else(|e| format!("error serializing result: {e}")),
+            ),
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Respond to a pending handoff request addressed to you. decision must be exactly \"accept\", \"reject\", or \"narrow\" -- narrow requires narrowed_files (the smaller/different scope you're actually willing to hand over instead of the original ask). Only the request's own recipient can respond, and only while it's still pending -- an already-expired, already-responded, or already-cancelled request errors instead of silently being overwritten."
+    )]
+    fn respond_handoff(
+        &self,
+        Parameters(params): Parameters<RespondHandoffParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let conn = self.conn.lock().unwrap();
+        let decision = match params.decision.as_str() {
+            "accept" => HandoffDecision::Accept,
+            "reject" => HandoffDecision::Reject,
+            "narrow" => HandoffDecision::Narrow(params.narrowed_files.clone().unwrap_or_default()),
+            other => {
+                return error_result(format!("error: decision must be \"accept\", \"reject\", or \"narrow\", got \"{other}\""));
+            }
+        };
+        match handoffs::respond_handoff(&conn, params.request_id, &self.agent_id, decision, params.message.as_deref()) {
+            Ok(()) => {
+                log_op(
+                    &conn,
+                    "handoff_respond",
+                    &self.agent_id,
+                    serde_json::json!({ "request_id": params.request_id, "decision": params.decision }),
+                );
+                text_result(format!("responded to handoff request {}", params.request_id))
+            }
+            Err(e) => error_result(format!("error: {e:#}")),
+        }
+    }
 }
 
 #[tool_handler]
@@ -258,6 +355,24 @@ mod tests {
                 op_type TEXT NOT NULL,
                 workspace_id TEXT,
                 detail TEXT NOT NULL
+            );
+            CREATE TABLE handoff_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_agent TEXT NOT NULL,
+                to_agent TEXT NOT NULL,
+                requested_files TEXT NOT NULL,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                responded_at INTEGER,
+                response_message TEXT,
+                narrowed_files TEXT,
+                activity_seq INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE handoff_read_cursors (
+                agent_id TEXT PRIMARY KEY,
+                last_seen_handoff_id INTEGER NOT NULL DEFAULT 0
             );",
         )
         .unwrap();
@@ -353,6 +468,75 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].holder, "agent-a");
         assert_eq!(active[0].pattern, "some.txt");
+    }
+
+    #[test]
+    fn request_handoff_sets_is_error_on_empty_files() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = server
+            .request_handoff(Parameters(RequestHandoffParams {
+                to: "agent-b".to_string(),
+                files: vec![],
+                message: "please".to_string(),
+                ttl_seconds: None,
+            }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn request_handoff_succeeds_and_target_sees_it_via_check_handoffs() {
+        let requester = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let result = requester
+            .request_handoff(Parameters(RequestHandoffParams {
+                to: "agent-b".to_string(),
+                files: vec!["src/*.rs".to_string()],
+                message: "can I take these?".to_string(),
+                ttl_seconds: None,
+            }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+
+        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), tool_router: CoordServer::tool_router() };
+        let incoming = target.check_handoffs().unwrap();
+        assert_eq!(incoming.is_error, Some(false));
+        let requests: Vec<handoffs::HandoffRequest> = serde_json::from_str(result_text(&incoming)).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].from, "agent-a");
+        assert_eq!(requests[0].message, "can I take these?");
+    }
+
+    #[test]
+    fn respond_handoff_rejects_an_unknown_decision_string() {
+        let requester = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        requester
+            .request_handoff(Parameters(RequestHandoffParams { to: "agent-b".to_string(), files: vec!["x.txt".to_string()], message: "please".to_string(), ttl_seconds: None }))
+            .unwrap();
+
+        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), tool_router: CoordServer::tool_router() };
+        let result = target
+            .respond_handoff(Parameters(RespondHandoffParams { request_id: 1, decision: "maybe".to_string(), narrowed_files: None, message: None }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn respond_handoff_accept_flows_through_to_the_requester() {
+        let requester = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        requester
+            .request_handoff(Parameters(RequestHandoffParams { to: "agent-b".to_string(), files: vec!["x.txt".to_string()], message: "please".to_string(), ttl_seconds: None }))
+            .unwrap();
+
+        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), tool_router: CoordServer::tool_router() };
+        let response = target
+            .respond_handoff(Parameters(RespondHandoffParams { request_id: 1, decision: "accept".to_string(), narrowed_files: None, message: Some("go ahead".to_string()) }))
+            .unwrap();
+        assert_eq!(response.is_error, Some(false));
+
+        let outgoing = requester.check_handoffs().unwrap();
+        let requests: Vec<handoffs::HandoffRequest> = serde_json::from_str(result_text(&outgoing)).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(requests[0].status, handoffs::HandoffStatus::Accepted));
     }
 
     fn result_text(result: &CallToolResult) -> &str {

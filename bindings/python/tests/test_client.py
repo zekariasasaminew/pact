@@ -156,3 +156,76 @@ async def test_malformed_glob_raises_pact_coord_error(scratch_repo: Path) -> Non
     async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client:
         with pytest.raises(PactCoordError):
             await client.claim_files(["["])
+
+
+@pytest.mark.asyncio
+async def test_target_sees_a_new_handoff_request_immediately(scratch_repo: Path) -> None:
+    pact_bin = _find_pact_binary()
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client_a:
+        result = await client_a.request_handoff("agent-b", ["src/shared.py"], "can I take this?")
+        assert result.request_id > 0
+        assert result.expires_at > 0
+
+    async with PactCoordClient.spawn(scratch_repo, "agent-b", scratch_repo, pact_bin=pact_bin) as client_b:
+        incoming = await client_b.check_handoffs()
+        assert len(incoming) == 1
+        assert incoming[0].from_ == "agent-a"
+        assert incoming[0].status == "pending"
+        assert incoming[0].files == ["src/shared.py"]
+
+
+@pytest.mark.asyncio
+async def test_requester_does_not_see_their_own_still_pending_request(scratch_repo: Path) -> None:
+    pact_bin = _find_pact_binary()
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client:
+        await client.request_handoff("agent-b", ["src/shared.py"], "can I take this?")
+        assert await client.check_handoffs() == []
+
+
+@pytest.mark.asyncio
+async def test_accepted_response_round_trips_to_the_requester(scratch_repo: Path) -> None:
+    pact_bin = _find_pact_binary()
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client_a:
+        result = await client_a.request_handoff("agent-b", ["src/shared.py"], "can I take this?")
+        request_id = result.request_id
+
+    async with PactCoordClient.spawn(scratch_repo, "agent-b", scratch_repo, pact_bin=pact_bin) as client_b:
+        text = await client_b.respond_handoff(request_id, "accept", message="go ahead")
+        assert str(request_id) in text
+
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client_a:
+        outgoing = await client_a.check_handoffs()
+        assert len(outgoing) == 1
+        assert outgoing[0].status == "accepted"
+        assert outgoing[0].response_message == "go ahead"
+
+
+@pytest.mark.asyncio
+async def test_narrowed_response_carries_the_counter_offered_scope(scratch_repo: Path) -> None:
+    pact_bin = _find_pact_binary()
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client_a:
+        result = await client_a.request_handoff("agent-b", ["src/*.py"], "can I take these?")
+        request_id = result.request_id
+
+    async with PactCoordClient.spawn(scratch_repo, "agent-b", scratch_repo, pact_bin=pact_bin) as client_b:
+        await client_b.respond_handoff(
+            request_id, "narrow", narrowed_files=["src/only_this.py"], message="only this one is free"
+        )
+
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client_a:
+        outgoing = await client_a.check_handoffs()
+        assert len(outgoing) == 1
+        assert outgoing[0].status == "narrowed"
+        assert outgoing[0].narrowed_files == ["src/only_this.py"]
+
+
+@pytest.mark.asyncio
+async def test_responding_as_someone_else_raises_pact_coord_error(scratch_repo: Path) -> None:
+    pact_bin = _find_pact_binary()
+    async with PactCoordClient.spawn(scratch_repo, "agent-a", scratch_repo, pact_bin=pact_bin) as client_a:
+        result = await client_a.request_handoff("agent-b", ["src/shared.py"], "can I take this?")
+        request_id = result.request_id
+
+    async with PactCoordClient.spawn(scratch_repo, "agent-c", scratch_repo, pact_bin=pact_bin) as client_c:
+        with pytest.raises(PactCoordError):
+            await client_c.respond_handoff(request_id, "accept")
