@@ -277,6 +277,16 @@ enum Command {
     /// Read-only -- unlike an agent calling check_messages, looking here
     /// never marks anything as read.
     CoordStatus,
+    /// Unconditionally removes every lease for this repo's coordination
+    /// database, active or expired -- issue #209: leases persist with a
+    /// 15-minute default TTL, so a fresh dev/test run can hit a false
+    /// conflict against a prior run's still-live lease from minutes
+    /// earlier. Deliberately not a "stale" heuristic (age-based, or
+    /// scoped to workspaces that no longer exist) -- an explicit action
+    /// you run when you already know nothing real is in flight, the same
+    /// "advisory, not enforced" philosophy leases themselves follow.
+    /// Messages and history are untouched.
+    ClearLeases,
     /// Show the coordination layer's operation log: every claim, release,
     /// broadcast, direct message, merge-all invocation, arbiter decision,
     /// and teardown recorded this session (and any prior session against
@@ -869,6 +879,10 @@ fn main() -> Result<()> {
             let status = orchestrator.coord_status()?;
             let active_workspace_ids: Vec<String> = orchestrator.list()?.into_iter().map(|w| w.id).collect();
             print_coord_status(&status, &active_workspace_ids);
+        }
+        Command::ClearLeases => {
+            let removed = orchestrator.clear_leases()?;
+            println!("cleared {removed} lease(s)");
         }
         Command::History { workspace, since, op_type, limit, json } => {
             let filter = pact_coord::HistoryFilter { workspace_id: workspace, since, op_type, limit };

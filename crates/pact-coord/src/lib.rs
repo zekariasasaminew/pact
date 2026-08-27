@@ -49,6 +49,15 @@ pub struct CoordStatus {
     pub connected_agent_ids: std::collections::HashSet<String>,
 }
 
+/// Unconditionally removes every lease for `repo_root`'s coordination
+/// database -- `pact clear-leases` (issue #209). See
+/// `leases::clear_leases` for why this deliberately isn't a
+/// staleness heuristic. Returns how many rows were removed.
+pub fn clear_leases(repo_root: &Path) -> Result<usize> {
+    let conn = db::open(repo_root)?;
+    leases::clear_leases(&conn)
+}
+
 /// Computes a `CoordStatus` snapshot. Read-only: unlike `check_messages`,
 /// looking at pending counts here never advances anyone's cursor.
 pub fn status(repo_root: &Path) -> Result<CoordStatus> {

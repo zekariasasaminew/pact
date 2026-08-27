@@ -2002,6 +2002,36 @@ negative TTL silently produced an already-expired lease and an unbounded
 one produced an `expires_at` centuries out, both misleadingly returning
 `accepted: true` either way.
 
+### `pact clear-leases` (issue #209)
+
+Leases persist in SQLite across `mcp-serve` process restarts by design --
+coordination state needs to outlive any single sidecar process (see
+"Database placement" above). Combined with the 15-minute default TTL,
+this meant a fresh dev/test run's very first claim could hit a false
+conflict against a *prior* run's still-live lease from minutes earlier --
+a real report: `fail_on_conflict=True` raised before the reporter's own
+script had claimed anything at all.
+
+**Deliberately not fixed by shortening the default TTL or building a
+"stale" detector.** Both were considered and rejected in a real design
+conversation before implementing anything (this project's standing
+convention for genuine forks -- see #65, #84/#85, #159-162): a shorter
+default trades off against real agent sessions that legitimately run
+longer than the new default without re-claiming, silently weakening real
+conflict detection to fix a dev-loop annoyance; and "stale" has no clean
+definition here (by age? by workspace existence? by repo?) that can't
+also misclassify a real, still-relevant lease from a genuinely slow
+agent.
+
+**What shipped instead: `pact clear-leases`**, an explicit,
+unconditional wipe of every lease row (active or already expired) for
+the repo's coordination database -- no heuristic, no scope decision to
+get wrong, purely "you, the caller, are asserting nothing real is in
+flight, so nothing is." The same posture leases themselves already take
+(advisory, not enforced) applied to their own lifecycle management.
+Messages and history are untouched -- this is scoped to the one table
+issue #209 was actually about.
+
 ### Opt-in strict claim response (issue #162)
 
 pact has no mechanism to physically stop an agent from writing a file --
