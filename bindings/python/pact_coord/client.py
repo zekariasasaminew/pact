@@ -5,9 +5,10 @@ Spawns `pact mcp-serve` itself and speaks real MCP (via Anthropic's own
 `mcp` package) over stdio -- pact's own DESIGN.md ("pact-coord SDK
 bindings v1", issue #127) covers why this is the right shape (there is
 no standing coordination server to connect to instead) and why the
-response parsing below is asymmetric (claim_files/check_messages return
-real JSON text; release_files/send_message return a plain human-readable
-sentence, by pact-coord's own design, not an oversight here).
+response parsing below is asymmetric (claim_files/check_messages/
+request_handoff/check_handoffs return real JSON text; release_files/
+send_message/respond_handoff return a plain human-readable sentence, by
+pact-coord's own design, not an oversight here).
 """
 
 from __future__ import annotations
@@ -71,6 +72,34 @@ class Message:
     created_at: int
 
 
+@dataclass
+class HandoffRequest:
+    """Mirrors pact-coord's `HandoffRequest` field-for-field. `status` is
+    one of "pending", "accepted", "rejected", "narrowed", "expired",
+    "cancelled". `narrowed_files` is only set when `status ==
+    "narrowed"` -- accept a counter-offer by sending a fresh
+    `request_handoff` scoped to it, not by anything further happening to
+    this same request."""
+
+    id: int
+    from_: str
+    to: str
+    files: list[str]
+    message: str
+    status: str
+    created_at: int
+    expires_at: int
+    responded_at: Optional[int] = None
+    response_message: Optional[str] = None
+    narrowed_files: Optional[list[str]] = None
+
+
+@dataclass
+class HandoffRequestResult:
+    request_id: int
+    expires_at: int
+
+
 def _parse_claim_result(text: str) -> ClaimResult:
     data = json.loads(text)
     return ClaimResult(
@@ -104,8 +133,34 @@ def _parse_messages(text: str) -> list[Message]:
     ]
 
 
+def _parse_handoff_requests(text: str) -> list[HandoffRequest]:
+    data = json.loads(text)
+    return [
+        HandoffRequest(
+            id=r["id"],
+            from_=r["from"],
+            to=r["to"],
+            files=r["files"],
+            message=r["message"],
+            status=r["status"],
+            created_at=r["created_at"],
+            expires_at=r["expires_at"],
+            responded_at=r.get("responded_at"),
+            response_message=r.get("response_message"),
+            narrowed_files=r.get("narrowed_files"),
+        )
+        for r in data
+    ]
+
+
+def _parse_handoff_request_result(text: str) -> HandoffRequestResult:
+    data = json.loads(text)
+    return HandoffRequestResult(request_id=data["request_id"], expires_at=data["expires_at"])
+
+
 class PactCoordClient:
-    """An open MCP session speaking pact-coord's four tools.
+    """An open MCP session speaking pact-coord's tools (file leases,
+    messaging, and typed handoff requests).
 
     Construct via `PactCoordClient.spawn(...)` (spawns `pact mcp-serve`
     itself) used as an async context manager:
@@ -204,6 +259,50 @@ class PactCoordClient:
         unlike check_messages, calling this never marks anything as read."""
         text = await self._call("list_claims", {})
         return _parse_active_leases(text)
+
+    async def request_handoff(
+        self, to: str, files: list[str], message: str, *, ttl_seconds: Optional[int] = None
+    ) -> HandoffRequestResult:
+        """Asks `to` to hand over, hold off on, or otherwise coordinate on
+        `files` -- a structured alternative to a prose `send_message`,
+        with a real status you (and they) can poll. Does not block --
+        returns immediately with a request id and expiry; check on it
+        later with `check_handoffs`."""
+        args: dict[str, Any] = {"to": to, "files": files, "message": message}
+        if ttl_seconds is not None:
+            args["ttl_seconds"] = ttl_seconds
+        text = await self._call("request_handoff", args)
+        return _parse_handoff_request_result(text)
+
+    async def check_handoffs(self) -> list[HandoffRequest]:
+        """New/changed handoff requests relevant to this agent since it
+        last checked -- both new requests addressed to it, and responses
+        to requests it sent. A request this agent sent doesn't appear
+        here while still pending; it appears once accepted, rejected,
+        narrowed, or expired."""
+        text = await self._call("check_handoffs", {})
+        return _parse_handoff_requests(text)
+
+    async def respond_handoff(
+        self,
+        request_id: int,
+        decision: str,
+        *,
+        narrowed_files: Optional[list[str]] = None,
+        message: Optional[str] = None,
+    ) -> str:
+        """Responds to a pending handoff request addressed to this agent.
+        `decision` must be exactly "accept", "reject", or "narrow" --
+        "narrow" requires `narrowed_files` (the smaller/different scope
+        actually on offer instead of the original ask). Only the
+        request's own recipient can respond, and only while it's still
+        pending. Returns pact-coord's own confirmation text."""
+        args: dict[str, Any] = {"request_id": request_id, "decision": decision}
+        if narrowed_files is not None:
+            args["narrowed_files"] = narrowed_files
+        if message is not None:
+            args["message"] = message
+        return await self._call("respond_handoff", args)
 
     async def _call(self, tool: str, args: dict[str, Any]) -> str:
         result = await self._session.call_tool(tool, args)

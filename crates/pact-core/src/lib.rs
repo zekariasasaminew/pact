@@ -1020,6 +1020,14 @@ impl Orchestrator {
         // refuses on uncommitted changes unless `force` is set.
         self.workspaces.remove_workspace(id, keep_branch, force)?;
         self.log_operation("teardown", Some(id), serde_json::json!({ "keep_branch": keep_branch, "force": force }));
+        // Issue #163: a torn-down workspace can never respond to a
+        // handoff request addressed to it -- best-effort, matching every
+        // other coordination-layer write in this method: a failure here
+        // is logged, not surfaced, since teardown's actual job (removing
+        // the workspace) already succeeded above.
+        if let Err(err) = pact_coord::cancel_pending_handoffs_to(&self.repo_root, id) {
+            tracing::warn!("teardown: failed to cancel {id}'s outstanding handoff requests: {err:#}");
+        }
         Ok(())
     }
 

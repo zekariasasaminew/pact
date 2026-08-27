@@ -2099,6 +2099,120 @@ flight, so nothing is." The same posture leases themselves already take
 Messages and history are untouched -- this is scoped to the one table
 issue #209 was actually about.
 
+### Typed handoff/negotiation protocol (issue #163)
+
+The project's actual differentiator bet, stated directly by the user
+during planning: real multi-agent *cooperation* while working -- N
+agents coordinating on one feature better than any single CLI's own
+built-in multi-agent mode or a third-party orchestrator -- not just
+mechanical conflict detection after the fact. Coordination before this
+issue was two primitives: advisory file leases and a flat message log.
+Nothing let one agent formally ask another "can I take these files" or
+"please hold off on this scope" and get back a real, structured answer
+instead of having to parse prose.
+
+**Given real weight, not picked unilaterally**: two research passes ran
+before any schema was written -- prior art in distributed/multi-agent
+negotiation protocols, and the polling-vs-blocking reliability question
+specific to this system's own constraints (agents talk to `pact
+mcp-serve` synchronously over stdio, no persistent connection, no
+server-initiated push). Findings, synthesized into a concrete design and
+confirmed before implementation:
+
+- **Contract Net Protocol** (Reid G. Smith, 1980; FIPA-standardized) is
+  the closest real prior art: `cfp -> {propose|refuse} -> {accept-
+  proposal|reject-proposal} -> {inform-done|failure}`, with a `reply-by`
+  deadline as a first-class protocol field -- not an external convention
+  -- so the initiator never blocks past a known bound. The status
+  vocabulary here (`pending -> accepted|rejected|narrowed|expired|
+  cancelled`) is shaped by it directly.
+- **RFC 5546 (iTIP)**, the real-world precedent for "narrowed": a
+  calendar invite's `COUNTER` method carries a *modified event*, not
+  prose -- modeled `narrowed` the same way, carrying a structured
+  `narrowed_files` scope rather than leaving the counter-offer as free
+  text the requester has to interpret.
+- **MCP's own 2026-07-28 draft**, moving long-running requests to a
+  stateless, poll-friendly pattern (an opaque token the caller re-submits
+  to check progress) rather than a stateful in-flight wait -- confirms
+  polling, not blocking, is the right shape for a protocol designed
+  under this exact no-persistent-connection constraint, not just this
+  project's own precedent.
+- **Never block on `ask`**: an agent's own MCP tool call blocking is not
+  like a stateless backend service holding a connection open -- it
+  pauses that agent's entire reasoning loop, with no orchestrating
+  process watching that specific call to intervene if the other side
+  never responds. `pact-coord` has no background-task machinery at all
+  (`mcp-serve`'s own `tokio::Runtime` exists solely to satisfy the MCP
+  SDK's async-trait requirement for stdio, not to host a scheduler) --
+  introducing one just for a bounded wait would cut against that
+  deliberately minimal footprint for no real benefit.
+
+**Schema**: `handoff_requests` (id, from_agent, to_agent,
+requested_files JSON, message, status, created_at, expires_at,
+responded_at, response_message, narrowed_files JSON, activity_seq) plus
+`handoff_read_cursors`, mirroring `messages`/`read_cursors`'s existing
+shape rather than inventing a new one. `activity_seq` is the one real
+addition beyond that mirror -- see below for why.
+
+**MCP tools** (`crates/pact-coord/src/server.rs`): `request_handoff`
+(returns immediately with a request id and expiry, never blocks),
+`check_handoffs` (cursor-based poll, same model as `check_messages`),
+`respond_handoff` (accept/reject/narrow -- only the request's own
+`to_agent` may respond, and only while genuinely `pending`; responding
+to an already-terminal request errors rather than silently overwriting a
+real prior outcome).
+
+**A cursor bug found and fixed before it shipped, not after**: `messages`
+rows are insert-only, so a simple "id > cursor" works fine there -- once
+you've seen message N, there's nothing more to learn about it. A
+`handoff_requests` row is *mutated in place* (status flips from
+`pending` to `accepted`/etc. on the same row via `UPDATE`), so a cursor
+keyed on the row's own `id` would mean the requester's cursor advances
+past the row the moment it's created, and the requester would *never*
+see the eventual response -- the entire point of the protocol silently
+broken by reusing a pattern that only looks identical to `messages`' at
+first glance. Fixed with a separate `activity_seq` column, bumped to a
+fresh monotonic value on both insert and `UPDATE` (via `(SELECT
+COALESCE(MAX(activity_seq), 0) + 1 FROM handoff_requests)` in the same
+statement) -- the cursor tracks activity, not row identity. Caught by
+writing `requester_sees_the_response_once_the_target_replies` before
+trusting the design, not after a real bug report.
+
+**Requester doesn't self-echo a still-pending request**: `check_handoffs`
+returns incoming requests (`to_agent = caller`) unconditionally -- new
+information the moment they exist -- but only returns outgoing requests
+(`from_agent = caller`) once they've left `pending`. The requester
+already knows it sent a pending request (`request_handoff`'s own return
+value told it the id and expiry); there's nothing new to report until
+the other side actually acts.
+
+**Lazy expiry, no sweeper** -- same `leases::claim_files` pattern
+(`DELETE FROM leases WHERE expires_at <= ?1`, evaluated inline at write
+time), except an `UPDATE` to `'expired'` rather than a `DELETE`: unlike a
+lease, a handoff request's history (who asked whom for what, and how it
+was left) stays meaningful after expiry. Evaluated at the start of both
+`check_handoffs` and `respond_handoff` -- the latter so responding to an
+already-lapsed request correctly errors ("no longer pending") instead of
+racing a stale row.
+
+**`pact teardown` integration**: a torn-down workspace can never respond
+to a handoff addressed to it, so every still-`pending` request with
+`to_agent` equal to the departing workspace is marked `cancelled`,
+best-effort (a failure here is logged, never fails teardown itself --
+the workspace removal already succeeded by that point). Deliberately
+scoped to *incoming* requests only -- an outgoing request the departing
+workspace itself sent, still awaiting a response, is left alone: the
+target may still meaningfully act on it even though the requester is
+gone.
+
+**SDK bindings kept in sync**, per this project's existing default (see
+"pact-coord SDK bindings v1" below) -- both `bindings/python` and
+`bindings/ts` gained matching `request_handoff`/`check_handoffs`/
+`respond_handoff` methods and `HandoffRequest`/`HandoffRequestResult`
+types, verified with the same real-`pact-mcp-serve`-subprocess,
+no-mocking approach their existing tests already use, not just the Rust
+side.
+
 ### Opt-in strict claim response (issue #162)
 
 pact has no mechanism to physically stop an agent from writing a file --
