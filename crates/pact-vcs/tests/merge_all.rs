@@ -80,6 +80,23 @@ fn init_repo_with_barrel() -> PathBuf {
     root
 }
 
+/// Same base as `init_repo`, plus a `src/plugins.ts` barrel with a sentinel
+/// marker pair around a registration block, followed by a trailing
+/// finalizer call -- the exact shape issue #87 was filed about: a plain
+/// append-at-end lands new registrations after `finalize()`, not inside
+/// the intended block.
+fn init_repo_with_sentinel_barrel() -> PathBuf {
+    let root = init_repo();
+    std::fs::write(
+        root.join("src/plugins.ts"),
+        "// pact:union-start\n// pact:union-end\nfinalize();\n",
+    )
+    .unwrap();
+    run_git(&root, &["add", "-A"]);
+    run_git(&root, &["commit", "-q", "-m", "add plugins barrel"]);
+    root
+}
+
 fn show(repo: &Path, spec: &str) -> String {
     let output = Command::new("git")
         .args(["show", spec])
@@ -577,6 +594,62 @@ fn merge_all_union_resolves_matched_file_conflict() {
     let content = show(&repo, &format!("{}:src/barrel.ts", report.target_branch));
     assert!(content.contains("export * from './chunk';"));
     assert!(content.contains("export * from './omit';"));
+
+    cleanup(&repo);
+}
+
+/// Real, end-to-end regression coverage for issue #87's sentinel-marker
+/// insertion mode, through the actual git merge pipeline (not just the
+/// resolver in isolation) -- three workspaces sequentially merged, each
+/// registering a different plugin inside the marked block. Before this
+/// fix, only the first workspace's addition would land inside
+/// `pact:union-start`/`-end`; the second and third would land after
+/// `finalize()` instead.
+#[test]
+fn merge_all_union_inserts_before_sentinel_end_marker_across_three_workspaces() {
+    let repo = init_repo_with_sentinel_barrel();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("register a", None).unwrap();
+    std::fs::write(
+        a.path.join("src/plugins.ts"),
+        "// pact:union-start\nregister('a');\n// pact:union-end\nfinalize();\n",
+    )
+    .unwrap();
+
+    let b = manager.create_workspace("register b", None).unwrap();
+    std::fs::write(
+        b.path.join("src/plugins.ts"),
+        "// pact:union-start\nregister('b');\n// pact:union-end\nfinalize();\n",
+    )
+    .unwrap();
+
+    let c = manager.create_workspace("register c", None).unwrap();
+    std::fs::write(
+        c.path.join("src/plugins.ts"),
+        "// pact:union-start\nregister('c');\n// pact:union-end\nfinalize();\n",
+    )
+    .unwrap();
+
+    let report = manager
+        .merge_all(None, None, &["src/plugins.ts".to_string()], None, None, false)
+        .unwrap();
+
+    assert_eq!(report.skipped.len(), 0, "expected all three to merge via --union, got skipped={:?}", report.skipped);
+    assert_eq!(report.merged.len(), 3);
+
+    let content = show(&repo, &format!("{}:src/plugins.ts", report.target_branch));
+    assert!(content.contains("register('a');"));
+    assert!(content.contains("register('b');"));
+    assert!(content.contains("register('c');"));
+
+    let end_marker_pos = content.find("pact:union-end").expect("end marker must survive the merge");
+    let finalize_pos = content.find("finalize();").expect("finalizer must survive the merge");
+    for name in ["register('a');", "register('b');", "register('c');"] {
+        let pos = content.find(name).unwrap_or_else(|| panic!("expected {name} in merged content:\n{content}"));
+        assert!(pos < end_marker_pos, "expected {name} before the end marker, got:\n{content}");
+    }
+    assert!(end_marker_pos < finalize_pos, "expected the end marker before the finalizer, got:\n{content}");
 
     cleanup(&repo);
 }

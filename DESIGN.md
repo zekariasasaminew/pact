@@ -644,6 +644,73 @@ if that stage doesn't exist for this path (e.g. the file was added fresh
 on only one side) is treated as "don't understand this shape well enough
 to auto-resolve," not an error.
 
+### Sentinel-marker union-merge insertion (issue #87)
+
+Plain append-at-end (above) is wrong for a barrel file whose
+union-mergeable region sits *above* other code -- a `// PLUGINS-START`/
+`-END` block followed by a file-final `start()`/`module.exports`.
+Confirmed by an outside R3 shakedown against a synthetic 10-workspace
+Fastify `app.js` barrel: only the first workspace's plugin registration
+landed inside the block; the other nine landed as extra lines after the
+finalizer. Still parseable, no correctness bug in the narrow sense
+`union_merge_is_safe` checks for -- but a surprising structure on first
+encounter, and the docs-only fix (GETTING_STARTED.md's "barrel file
+gotcha" callout) only explained the limitation, it didn't remove it.
+
+**Design, decided in a real conversation rather than picked
+unilaterally** (the issue's own comment had already proposed the shape;
+revisited and refined here rather than implemented as-is, per the
+user's explicit "take the time to get to the right decision"): an
+opt-in marker pair a caller adds to their own file activates
+insertion-before-end-marker instead of append-at-end. One change from
+the original proposal: **marker detection is comment-syntax-agnostic**
+(`is_sentinel_marker_line` matches the literal tokens `pact:union-start`/
+`pact:union-end` anywhere in a line, not a fixed `//`-prefixed pattern).
+`--append-only` itself is language-agnostic -- any glob, any file type
+-- so hardcoding a `//`-style marker would have silently not worked for
+a Python/YAML/HTML barrel file, undermining the feature's own stated
+scope for no real benefit; a caller writes whatever comment syntax is
+idiomatic for their language, pact just looks for the substring.
+
+Behavior: `ours`' raw lines (before the existing line-dedup step, see
+below for why that ordering matters) are scanned for the two tokens.
+Zero of either -- today's plain-append behavior, unchanged, fully
+backward compatible. Exactly one well-formed pair (one start, one end,
+start before end) -- `theirs`' not-yet-present lines are inserted
+immediately before the end marker, in order, instead of appended at
+file end; `theirs`' own copy of either marker line is never inserted as
+a duplicate. Anything else (multiple pairs, an unmatched start or end, an
+end before its start) -- refuses (`Ok(None)`, falls through to a real
+conflict) rather than guessing which pair, if any, is the right
+insertion point -- multiple named marker pairs are real future scope,
+not attempted here.
+
+**A real bug found and fixed while writing this section's own tests,
+not shipped as originally coded**: the first implementation scanned for
+markers against the already-deduplicated `merged_lines` list (the same
+list `theirs`' unique lines get inserted into) rather than `ours`' raw
+lines. Two marker pairs using byte-identical marker text (a plausible
+mistake, not a contrived edge case) silently collapsed into what looked
+like *one* pair once the pre-existing line-dedup step removed the
+repeated marker text -- defeating the "refuse on multiple pairs" safety
+net entirely, the opposite of "safe direction" this feature is supposed
+to take. `union_resolve_refuses_when_ours_has_multiple_marker_pairs`
+caught it on first run. Fixed by scanning `ours.lines()` directly (before
+any dedup) to classify the file and locate the end marker's *text*, then
+finding that text's position within the deduped `merged_lines` list
+separately for the actual insertion index -- the two lists can diverge
+in length (and therefore index) whenever `ours` has any other internal
+duplicate line, not just around the markers.
+
+Verified end-to-end, not just at the resolver level:
+`merge_all_union_inserts_before_sentinel_end_marker_across_three_workspaces`
+(`crates/pact-vcs/tests/merge_all.rs`) drives three real sequential
+workspace merges against a real git repo, each registering a different
+plugin inside a marked block followed by a `finalize()` call, and
+confirms all three land before the end marker (in order) and the
+finalizer stays last -- proving insertions compound correctly across N
+workspaces, not just a single pairwise merge.
+
 ### Arbiter resolver hook
 
 `ArbiterResolver` is a hook `merge_all`'s caller can supply to attempt

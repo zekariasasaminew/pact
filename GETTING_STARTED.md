@@ -165,11 +165,29 @@ the union-mergeable region sits above other code -- a trailing
 `module.exports`, a file-final `start()`/`listen()` call -- only the
 first workspace's addition lands where you'd expect; every workspace
 after that gets appended past the trailing code instead of inside the
-intended block. The file still parses, but the structure is easy to be
-surprised by on first encounter. If you're using `--append-only` on a
-barrel file, keep any finalization step in a separate file agents don't
-touch, so there's nothing below the union-mergeable region to land
-after.
+intended block.
+
+If that's your file's shape, add a sentinel marker pair around the
+region you want new lines inserted into, using whatever comment syntax
+your language uses -- `// pact:union-start` / `// pact:union-end` for
+JS/TS, `# pact:union-start` / `# pact:union-end` for Python, etc. (pact
+looks for the literal text, not a specific comment style). With exactly
+one marker pair present, new lines from `--append-only`-matched files
+insert right before the end marker instead of at file end, so every
+workspace's addition lands inside the block, in order:
+
+```js
+// pact:union-start
+registerPlugin(pluginA);
+registerPlugin(pluginB);   // <- newly merged workspaces land here, in order
+// pact:union-end
+start();                   // <- stays below the block regardless of how many workspaces merge
+```
+
+No markers at all keeps the plain append-at-end behavior (nothing to
+change if you don't need this). More than one marker pair in the same
+file is treated as ambiguous and falls back to a real conflict rather
+than guessing which pair is the right one.
 
 ## What just happened
 
