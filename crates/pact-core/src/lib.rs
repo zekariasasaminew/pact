@@ -120,8 +120,8 @@ pub struct SpawnOptions<'a> {
     pub safety_override: Option<&'a str>,
     pub coord_override: Option<&'a CoordServerOverride>,
     /// Skip dependency prep entirely -- issue #233: a task that never
-    /// touches dependencies shouldn't pay prep's full cost, content-store
-    /// contention included, for zero benefit.
+    /// touches dependencies shouldn't pay prep's full cost for zero
+    /// benefit.
     pub no_deps: bool,
 }
 
@@ -571,10 +571,10 @@ impl Orchestrator {
         //
         // Skipped entirely under --no-deps (issue #233): a task that
         // doesn't touch dependencies at all shouldn't pay prep's full
-        // cost, content-store contention included, for zero benefit. No
-        // -deps.json sidecar is written either -- "prep was never
-        // attempted" is a different fact than "prep ran and found nothing
-        // to do", and the sidecar's absence says so honestly.
+        // cost for zero benefit. No -deps.json sidecar is written either
+        // -- "prep was never attempted" is a different fact than "prep
+        // ran and found nothing to do", and the sidecar's absence says so
+        // honestly.
         if !options.no_deps {
             on_event(&AgentEvent::Phase("preparing dependencies".to_string()));
             let dep_reports = pact_deps::prepare(&workspace.path);
@@ -1007,14 +1007,6 @@ impl Orchestrator {
         pact_coord::status(&self.repo_root)
     }
 
-    /// The shared npm dependency content store for this repo -- what
-    /// `pact store` (issue #160) operates on directly. Cache/
-    /// materialization bookkeeping only, entirely separate from workspace
-    /// state.
-    pub fn npm_store(&self) -> Result<pact_deps::ContentStore> {
-        pact_deps::ContentStore::new(self.workspaces.state_dir().join("store").join("npm"))
-    }
-
     pub fn teardown(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         // WorkspaceManager::remove_workspace already kills any live agent
         // process recorded against this workspace before removing it, and
@@ -1075,8 +1067,7 @@ fn unix_now() -> u64 {
 
 /// The `Phase` event text printed right after dependency prep finishes --
 /// issue #241: a real run's ~22-minute dependency-prep stall produced
-/// zero output the whole time. Summarizes what actually happened
-/// (cache hit/miss, or a fallback/failure) instead of just "done".
+/// zero output the whole time.
 fn dependency_phase_summary(reports: &[pact_deps::ManagerPrepReport]) -> String {
     if reports.is_empty() {
         return "no dependencies detected".to_string();
@@ -1084,11 +1075,7 @@ fn dependency_phase_summary(reports: &[pact_deps::ManagerPrepReport]) -> String 
     if reports.iter().any(|r| !r.success) {
         return "dependency prep had issues, continuing without it -- see pact inspect".to_string();
     }
-    match reports.iter().find_map(|r| r.store_hit) {
-        Some(true) => "dependencies ready (shared cache hit)".to_string(),
-        Some(false) => "dependencies ready (installed, cached for next time)".to_string(),
-        None => "dependencies ready".to_string(),
-    }
+    "dependencies ready".to_string()
 }
 
 /// Builds one Arbiter attempt's `decision.json` value (issue #148) --
@@ -1481,13 +1468,10 @@ mod tests {
         SpawnManyTask { agent, task: text.to_string(), name: None }
     }
 
-    fn fake_prep_report(manager: &str, success: bool, store_hit: Option<bool>) -> pact_deps::ManagerPrepReport {
+    fn fake_prep_report(manager: &str, success: bool) -> pact_deps::ManagerPrepReport {
         pact_deps::ManagerPrepReport {
             manager: manager.to_string(),
-            strategy: "content-store".to_string(),
-            store_key: None,
-            store_hit,
-            materialization: None,
+            strategy: "npm-ci".to_string(),
             success,
             warnings: Vec::new(),
         }
@@ -1499,26 +1483,14 @@ mod tests {
     }
 
     #[test]
-    fn dependency_phase_summary_reports_a_cache_hit() {
-        let reports = vec![fake_prep_report("npm", true, Some(true))];
-        assert_eq!(dependency_phase_summary(&reports), "dependencies ready (shared cache hit)");
-    }
-
-    #[test]
-    fn dependency_phase_summary_reports_a_cache_miss() {
-        let reports = vec![fake_prep_report("npm", true, Some(false))];
-        assert_eq!(dependency_phase_summary(&reports), "dependencies ready (installed, cached for next time)");
-    }
-
-    #[test]
-    fn dependency_phase_summary_reports_a_passthrough_manager_with_no_store_concept() {
-        let reports = vec![fake_prep_report("cargo", true, None)];
+    fn dependency_phase_summary_reports_ready_when_every_manager_succeeded() {
+        let reports = vec![fake_prep_report("npm", true), fake_prep_report("cargo", true)];
         assert_eq!(dependency_phase_summary(&reports), "dependencies ready");
     }
 
     #[test]
     fn dependency_phase_summary_reports_issues_when_any_manager_failed() {
-        let reports = vec![fake_prep_report("npm", true, Some(true)), fake_prep_report("cargo", false, None)];
+        let reports = vec![fake_prep_report("npm", true), fake_prep_report("cargo", false)];
         assert!(dependency_phase_summary(&reports).contains("had issues"));
     }
 

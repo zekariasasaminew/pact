@@ -19,8 +19,10 @@ Originally built because git itself races on `.git/config.lock` when `git
 worktree add`/`remove` run concurrently (see
 anthropics/claude-code#34645) -- but the mechanism isn't git-specific,
 it's just "serialize access to a resource, and don't leave it stuck locked
-forever if the holder died." `pact-deps` reuses it verbatim to guard
-concurrent population of a shared dependency store entry.
+forever if the holder died." `pact-deps` used to reuse it verbatim to
+guard concurrent population of a shared dependency store entry -- gone
+along with that store (issue #233); `PidLock` today guards git worktree
+operations only.
 
 ### Lock timeout: 30s -> 30min (issue #230)
 
@@ -2478,17 +2480,67 @@ calling this fully done.
 ## pact-deps — dependency materialization
 
 Detects a workspace's package manager(s) and makes sure dependencies are
-ready before the agent's first real command runs. Most ecosystems (pnpm,
-yarn, uv, poetry, pipenv, Cargo, Go modules, Maven, Gradle) already have a
-good global shared cache, so those just get their normal install/fetch
-command run (`passthrough`). npm (flat, per-project `node_modules`, no
-built-in sharing) is routed through a lockfile-hash-keyed content store
-instead (`store`), materialized via reflink or read-only hardlink so a
-second-plus workspace doesn't pay for a full reinstall. Plain pip/venv is
+ready before the agent's first real command runs. Every ecosystem this
+detects (pnpm, yarn, uv, poetry, pipenv, Cargo, Go modules, Maven, Gradle,
+and npm) already has a good global shared cache, so `prepare` just runs
+each one's normal install/fetch command (`passthrough` for most; `npm ci`
+directly for npm) and lets that cache do the sharing. Plain pip/venv is
 intentionally left as passthrough-only (see "Passthrough caching strategy"
 below).
 
-### Structured prep reporting (issue #12)
+### Content store removed in favor of npm's own cache (issue #233)
+
+npm didn't always get this treatment. Through issue #233, it was the one
+ecosystem pact built its own sharing for: a lockfile-hash-keyed content
+store (`ContentStore` in `store.rs`), populated once per (platform,
+lockfile) pair via a real `npm ci` under a `PidLock`, then materialized
+into each workspace via reflink or read-only hardlink. Every section
+below through "npm store manifest, verification, cleanup" documents that
+subsystem's real history -- issues found, fixes shipped, all verified at
+the time. It's kept for that history, not as current documentation:
+**that entire subsystem is deleted.**
+
+The removal decision itself (not a new problem found, a re-evaluation of
+whether purpose-built sharing was worth its maintenance cost) landed once
+`prepare_npm` already had a documented open question along exactly these
+lines (see "Content store lock timeout, and --no-deps" below: "whether
+the content-store subsystem should exist at all... left for a real
+conversation rather than decided here"). That conversation happened: npm
+already has a global cache (`~/.npm`, or wherever `npm config get cache`
+points) shared automatically across every concurrent `npm ci` call on the
+machine, with npm's own locking, no pact-side coordination needed --
+which is exactly the property the custom store existed to provide, built
+from scratch instead of reused. Verified by hand before deleting
+anything (this project's standing discipline for every git/OS-level
+assumption): 5 concurrent `npm ci` calls into 5 separate workspace
+directories, sharing one global cache, run twice (a cold cache, then a
+second pass with a warm one) -- both runs succeeded for all 5, no
+corruption, no errors, comparable wall time to what the custom store's
+own Phase 1 verification measured.
+
+What this trades away, honestly: reflink/hardlink materialization meant a
+second-plus workspace's `node_modules` came from an already-extracted
+copy rather than npm re-extracting from its cache archive per workspace.
+`npm ci` against a warm cache still avoids the network, just not the
+per-workspace extraction step. What it gains: ~250 lines of custom
+lock/manifest/materialization machinery deleted, one less subsystem
+carrying its own bug class (the Windows `MAX_PATH` failure below is a
+direct consequence of the store's own directory-nesting depth -- a
+workspace-local `node_modules` doesn't have that problem to have), and
+symmetry with how every other ecosystem in this crate is already
+handled: pass through to the tool's own cache, don't rebuild it.
+
+This is a real breaking change to the CLI surface: `pact store list`,
+`pact store verify`, and `pact store clean` no longer exist. Shipped
+with a minor version bump and called out in that release's notes, not
+silently.
+
+### Structured prep reporting (issue #12) -- historical, superseded above
+
+Everything from here through "npm store manifest, verification, cleanup"
+documents the deleted content-store subsystem's real history. Kept for
+that reason, not as current behavior -- see "Content store removed"
+above.
 
 From an outside code review (2026-07-24), verified against source:
 `prepare` returned bare `Result<()>`, and every real per-manager failure
@@ -2732,9 +2784,11 @@ embedding absolute paths from the wrong venv (activation scripts, `.pth`
 files, console script shebangs) -- a correctness risk, not just extra
 engineering, so it's left as future work rather than shipped provisionally.
 
-### ReadOnlyHardlink tradeoff
+### ReadOnlyHardlink tradeoff -- historical, superseded (issue #233)
 
-A hardlink shares the same underlying file record as its content-store
+Documents the deleted content store's materialization strategy -- see
+"Content store removed in favor of npm's own cache" above. A hardlink
+shares the same underlying file record as its content-store
 entry, so marking the destination read-only also freezes the canonical
 store copy after first use -- intentional, not a side effect to work
 around. The tradeoff: a package that writes into its own installed files
@@ -3484,9 +3538,9 @@ Its one test exercises the exact combination the original report hit:
 5 concurrent `spawn-many` tasks against a repo with a real (zero-dependency,
 no-network) npm lockfile, then a dependency-requiring `--require-passing-
 tests` gate -- covering #230 (count fidelity under real `git worktree
-add` contention), #233 (content-store sharing under real concurrent
-`npm ci`), and #232 (the gate's environment-vs-code diagnosis) together,
-not simulated separately.
+add` contention), #233 (each task's real `npm ci` succeeding under real
+concurrent contention), and #232 (the gate's environment-vs-code
+diagnosis) together, not simulated separately.
 
 **This tier caught a real bug on its first run, which is the whole
 point of it existing.** `prepare_npm` computed `store_hit` via a
@@ -3508,6 +3562,19 @@ strengthened to assert exactly one of 4 concurrent callers reports
 `populated_now: true`, so this specific race has fast, deterministic
 regression coverage too -- the slow tier found it, a fast test now
 guards it.
+
+**Both `store_hit` and `populate_if_absent` are gone now** -- issue #233
+later deleted the whole content store this race lived in, in favor of
+npm's own global cache (see "Content store removed in favor of npm's own
+cache" under pact-deps). The paragraph above is kept as history: real
+concurrency finding a real bug that fast synthetic tests couldn't, which
+is what justified this tier existing in the first place, independent of
+whether the specific subsystem it found the bug in survived.
+`five_concurrent_tasks_each_run_a_real_npm_ci_under_real_contention`
+(renamed from a "content store" name that no longer fit) now asserts the
+simpler post-#233 property directly: all 5 concurrent tasks' `npm ci`
+report `success: true` under real contention against one shared global
+cache, no pact-side lock involved at all.
 
 ### `spawn-many --dry-run --estimate-cost` (issue #222)
 

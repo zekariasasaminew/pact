@@ -77,7 +77,7 @@ fn inspect_shows_persisted_dependency_prep_and_run_metadata() {
     let meta_dir = manager.state_dir().join("meta");
     std::fs::write(
         meta_dir.join(format!("{}-deps.json", ws.id)),
-        r#"[{"manager":"npm","strategy":"content-store","store_key":"key1","store_hit":true,"materialization":"reflink","success":true,"warnings":[]}]"#,
+        r#"[{"manager":"npm","strategy":"npm-ci","success":true,"warnings":[]}]"#,
     )
     .unwrap();
     std::fs::write(
@@ -93,9 +93,7 @@ fn inspect_shows_persisted_dependency_prep_and_run_metadata() {
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("npm via content-store [ok]"), "got: {stdout}");
-    assert!(stdout.contains("store hit"), "got: {stdout}");
-    assert!(stdout.contains("materialized via reflink"), "got: {stdout}");
+    assert!(stdout.contains("npm via npm-ci [ok]"), "got: {stdout}");
     assert!(stdout.contains("agent: claude"), "got: {stdout}");
     assert!(stdout.contains("succeeded in 42s: Created foo.rs"), "got: {stdout}");
     assert!(stdout.contains("coordination: connected"), "got: {stdout}");

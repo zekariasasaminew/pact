@@ -45,9 +45,8 @@ this space (parallel git-worktree agent orchestration) are built on tmux,
 which is POSIX-only and excludes Windows entirely. Pact ships a native
 Windows binary and has real Windows-specific correctness work behind it --
 `.cmd` shim resolution for npm/pnpm/yarn (`std::process::Command` doesn't
-consult `PATHEXT` the way a real shell does), a `MAX_PATH` fallback for
-the npm content store, and UTF-8 BOM handling for files written by
-PowerShell's own default encoding. Verified on Windows 10/11 with
+consult `PATHEXT` the way a real shell does), and UTF-8 BOM handling for
+files written by PowerShell's own default encoding. Verified on Windows 10/11 with
 PowerShell 5.1, not just cross-compiled and assumed to work.
 
 ## Getting started
@@ -165,46 +164,44 @@ several child processes at once.
 
 Most package ecosystems already solved global dependency sharing — Cargo,
 Go modules, Maven, Gradle, uv, pnpm, yarn, Bun, poetry, and pipenv all use
-a global content-addressed or version-keyed cache by default. The gap is
-narrower than "no ecosystem shares dependencies": it's specifically plain
-npm (flat, per-project `node_modules`) and plain pip/venv. So
-`pact-deps` (Phase 1) detects the package manager and passes through
-to the ecosystem's own cache where one already exists well
-(`passthrough.rs`), and only builds its own lockfile-hash-keyed content
-store for the ecosystem that doesn't (`store.rs`, npm only).
+a global content-addressed or version-keyed cache by default. `pact-deps`
+(Phase 1) detects the package manager and passes through to the
+ecosystem's own cache (`passthrough.rs`) — including npm, via `npm ci`
+relying on npm's own global cache (`~/.npm` or wherever `npm config get
+cache` points), shared automatically across concurrent `npm ci` calls
+with no pact-side coordination needed.
 
-Plain pip/venv was *also* a candidate for a custom store, and was
-deliberately rejected, not deferred by accident: Python venvs aren't
-reliably relocatable (activation scripts, `.pth` files, and console-script
-shebangs can embed absolute paths tied to the original venv), so
-hardlinking `site-packages` into a fresh venv is a correctness risk, not
-just extra engineering — the same category of problem that justified
-spiking jj before committing to it. Since pip already has its own global
-download cache (`~/.cache/pip`) covering the expensive part (network
-fetch), the remaining gap is bounded and left as future work.
+That wasn't the original design. Through issue #233, npm was the one
+ecosystem pact built its own machinery for: a lockfile-hash-keyed content
+store (`store.rs`), with reflink/read-only-hardlink/copy materialization
+into each workspace and its own `PidLock`-guarded population. It worked,
+and grew real correctness features over several phases (see "Store keying
+grew two dimensions" below for that history) — but it was pact-specific
+infrastructure solving a problem npm already has a good answer to via its
+own cache. Issue #233 deleted it in favor of just calling `npm ci`
+directly in each workspace, the same passthrough treatment every other
+ecosystem already got. Verified by hand before deleting it: 5 concurrent
+`npm ci` calls sharing one global cache, both cold and warm, succeeded
+with no corruption and no errors. This is a breaking change to the CLI
+surface (`pact store list/verify/clean` no longer exist) — see the
+release notes for the version that shipped it.
 
-**A sharper risk surfaced during an independent plan review before this
-store was built, not after:** a plain *writable* hardlink means every
-workspace's copy is the same underlying file record as the store entry —
-so a package that writes into its own installed files post-install (a
-native build step, a binary downloader, a git-hook installer) would
-silently corrupt every other workspace, present and future, materialized
-from that hash. `ContentStore::materialize` prefers reflink (copy-on-write,
-safe under mutation by construction) and falls back to a hardlink marked
-**read-only** at the destination, not a plain one — turning that failure
-mode loud (the write fails) instead of silent (the store quietly rots).
-One consequence worth knowing: because NTFS (and most filesystems) key
-basic attributes to the underlying file record rather than the individual
-link, marking a hardlink read-only also freezes the canonical store entry
-itself after first use.
+Plain pip/venv remains a case where no custom store was built, for a
+different, still-valid reason: Python venvs aren't reliably relocatable
+(activation scripts, `.pth` files, and console-script shebangs can embed
+absolute paths tied to the original venv), so hardlinking `site-packages`
+into a fresh venv would have been a correctness risk, not just extra
+engineering. Since pip already has its own global download cache
+(`~/.cache/pip`) covering the expensive part (network fetch), the
+remaining gap is bounded and left as future work.
 
 If a workspace's repo has no committed `package-lock.json` at all, npm
 install still runs (so the agent has working `node_modules` from the
-start) but with `--no-package-lock`, and the content store is skipped —
-there's no stable lockfile hash to key a shared cache on, and letting each
-workspace generate its own lockfile independently would otherwise show up
-as a spurious merge conflict on `package-lock.json` at `merge-all` time
-even when the two workspaces touched entirely disjoint source files.
+start) but with `--no-package-lock` — there's no stable lockfile to run
+`npm ci` against, and letting each workspace generate its own lockfile
+independently would otherwise show up as a spurious merge conflict on
+`package-lock.json` at `merge-all` time even when the two workspaces
+touched entirely disjoint source files.
 
 ### Signaling scope for v1
 
@@ -547,6 +544,13 @@ directly once `diff` has shown what's there.
 
 ### Store keying grew two dimensions, and gained a real fallback -- both found by risk analysis, one confirmed by a real failure
 
+**Superseded by issue #233** — the custom npm content store this section
+describes was deleted in favor of relying on npm's own global cache (see
+"Dependency sharing leans on what already exists" above). Kept here as
+history: real correctness work that happened and was verified, on
+infrastructure that later turned out not to be worth keeping once a
+simpler alternative was actually tried.
+
 The npm content store's original key (`{os}-{arch}-node{major}-{lockfile
 hash}`) had two real gaps, found by working through concrete failure
 scenarios rather than assuming the existing dimensions were enough:
@@ -632,7 +636,7 @@ graph TD
     CLI["pact-cli<br/>(clap binary: spawn / list / teardown)"]
     Core["pact-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
     VCS["pact-vcs<br/>(PidLock + git worktree lifecycle)"]
-    Deps["pact-deps<br/>(dependency broker: detect + passthrough + content store)"]
+    Deps["pact-deps<br/>(dependency broker: detect + passthrough to each ecosystem's own cache)"]
     Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex live-verified, Gemini CLI not yet)"]
     Coord["pact-coord<br/>(leases + messages, its own MCP server process)"]
 
@@ -645,10 +649,7 @@ graph TD
     Agent2["chosen agent CLI (child process)"] -.launches as its own child, over stdio.-> Coord
 ```
 
-`pact-deps` reuses `pact-vcs`'s `PidLock` directly (generalized
-from its original git-specific name) to guard concurrent population of a
-store entry, the same protection Phase 0 built for `git worktree`
-operations. `pact-coord` is not called in-process by `pact-core`
+`pact-coord` is not called in-process by `pact-core`
 at all -- the orchestrator only writes the config file that tells the
 agent CLI to launch it itself, over stdio, as its own separate process.
 
@@ -671,7 +672,7 @@ sequenceDiagram
     Core->>Lock: release (on drop)
     Core->>Deps: prepare(workspace.path)
     Note over Deps: pnpm/uv/cargo/go/etc: run native install (warms existing cache)
-    Note over Deps: npm: hash lockfile, populate-or-reuse content store, materialize
+    Note over Deps: npm: npm ci (relies on npm's own global cache directly)
     Deps-->>Core: ok (failure here is logged, not fatal)
     Core->>Agent: spawn claude -p ... --output-format stream-json --verbose
     Agent-->>Core: on_pid(pid) -- persisted immediately, before blocking
@@ -689,9 +690,11 @@ The git lock exists because git itself races on `.git/config.lock` when
 ([anthropics/claude-code#34645](https://github.com/anthropics/claude-code/issues/34645)) --
 `pact-vcs` serializes what git doesn't safely parallelize on its own,
 and steals locks left behind by a process that died without cleaning up
-(checked via PID liveness, not a timeout guess). The same `PidLock` guards
-content-store population in `pact-deps`, so two concurrent spawns
-targeting the same lockfile hash don't race each other.
+(checked via PID liveness, not a timeout guess). Concurrent `npm ci`
+calls across workspaces are safe without any equivalent lock in
+`pact-deps` -- they race npm's own global cache, which handles
+concurrent access itself (verified by hand, see "Dependency sharing
+leans on what already exists").
 
 `teardown` kills a workspace's live agent process (whole tree, not just the
 tracked PID -- see Status) before removing its worktree, in case it's
@@ -742,10 +745,7 @@ so it never shows up in the main repo's `git status`:
 ├── meta/<id>.json               # id, path, branch, task, created_at, agent_pid
 ├── mcp/<id>.json                 # generated --mcp-config file for this workspace
 ├── workspaces/<id>/            # the actual git worktree for that agent
-├── logs/<id>.jsonl              # raw NDJSON, one line per agent stdout line, as-is
-└── store/npm/<platform>-<hash>/   # populated once per (platform, lockfile) pair,
-    ├── ...                         # materialized (reflink/read-only-hardlink/copy)
-    └── <hash>.lock                 # into every workspace whose lockfile matches
+└── logs/<id>.jsonl              # raw NDJSON, one line per agent stdout line, as-is
 ```
 
 The coordination database is the one exception -- deliberately *not* here
@@ -769,7 +769,7 @@ e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
 | 4 | Copilot CLI + Codex adapters (both live-verified); `--agent`/`--safety` CLI flags | **Done** |
 | 5 | Real parallel launch (`spawn-many`) from a single invocation | **Done** |
 | 6 | Post-run review (`diff`) + safe teardown (uncommitted-change guard) | **Done** |
-| 7 | Shared npm store: extended keying + populate-failure fallback | **Done** |
+| 7 | Shared npm store: extended keying + populate-failure fallback | **Done, later removed (issue #233) in favor of npm's own global cache** |
 | 8 | Cross-workspace conflict detection (`conflicts`, informational) | **Done** |
 | 9 | Gemini CLI adapter | **Built, not live-verified** (no auth available -- see below) |
 | 10 | Pluggable coordination server (`--coord-command`/`--coord-arg`) | **Done** |
@@ -782,12 +782,9 @@ exactly, and `teardown` removed a worktree cleanly with no orphaned
 metadata.
 
 Phase 1 was verified against a real npm project (a `package.json` depending
-on a small real package): a cold `spawn` ran a real `npm ci` into the
-content store (~9s); a second `spawn` materialized instead of reinstalling
-(~0.5s); `node_modules` resolved correctly (`require` worked) in both; and
-two concurrent spawns racing the *same* lockfile hash both succeeded with
-a single, correctly-populated store entry — no corruption, no partial
-state. One real bug found and fixed along the way: on Windows,
+on a small real package): a cold `spawn` ran a real `npm ci` (~9s), and
+`node_modules` resolved correctly (`require` worked). One real bug found
+and fixed along the way: on Windows,
 `std::process::Command` doesn't resolve `npm`/`pnpm`/`yarn`'s `.cmd` shims
 the way a shell does (no `PATHEXT` lookup), so every passthrough call was
 silently failing with "program not found" until routed through `cmd /C`.
@@ -954,20 +951,6 @@ pipeline and what it still doesn't capture.
   batch**, not per-task -- consistent with what issue #3's acceptance
   criteria actually asked for; a plausible follow-up, not built ahead of
   being needed.
-- **The npm content store's cross-filesystem/unsupported-FS fallback and
-  APFS/ext4/btrfs behavior are verified by code inspection, not by
-  constructing real cross-filesystem or non-NTFS scenarios** -- this
-  project's dev environment only has one local NTFS volume available.
-  What *was* confirmed on real hardware: store keying, the
-  populate-failure fallback (via a genuine Windows `MAX_PATH` failure, not
-  a synthetic one), and its logging.
-- **Long store-key directory names can push deeply-nested npm package
-  paths over Windows' `MAX_PATH` (260 chars)**, especially under an
-  already-long state-dir root -- confirmed directly (see Phase 7). The
-  populate-failure fallback catches this and falls back to a plain
-  install, so it degrades safely rather than leaving a workspace with no
-  `node_modules`, but the store itself doesn't avoid the failure, only
-  recovers from it.
 - **The Gemini CLI adapter is built, not live-verified** -- no Gemini
   API key or Google Cloud auth is configured in this environment. See
   "Gemini CLI adapter" under Design decisions for exactly what was and
@@ -1050,7 +1033,7 @@ read-only.
 
 `spawn` creates the worktree, best-effort prepares dependencies for every
 package manager it detects (pass-through install for ecosystems with their
-own cache, content-store materialization for npm), then launches the
+own cache, including `npm ci` for npm), then launches the
 chosen agent CLI (`--agent claude` by default) headlessly -- with a
 generated coordination config giving it `claim_files`/`release_files`/
 `send_message`/`check_messages` tools automatically, no extra setup

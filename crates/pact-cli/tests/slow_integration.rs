@@ -10,12 +10,13 @@
 //! Issue #11 (renumbered #240)'s own critique, verified against this
 //! project's prior test suite before this file existed: `require_passing_
 //! tests` was covered only by `true`/`false` fixtures that never needed
-//! any dependency, `store.rs` had no test exercising real concurrent
-//! population, and nothing asserted N spawn-many tasks produce N
-//! workspaces under real (not simulated) contention. This file's single
-//! test exercises the real, reported failure shape end to end: N=5
-//! concurrent tasks, a real (tiny, no-network) npm install shared through
-//! the content store, and a dependency-requiring `--require-passing-tests`
+//! any dependency, nothing exercised real concurrent `npm ci` contention,
+//! and nothing asserted N spawn-many tasks produce N workspaces under real
+//! (not simulated) contention. This file's single test exercises the
+//! real, reported failure shape end to end: N=5 concurrent tasks, a real
+//! (tiny, no-network) `npm ci` in each workspace against npm's own shared
+//! global cache (issue #233 removed pact's own custom content store in
+//! favor of it), and a dependency-requiring `--require-passing-tests`
 //! gate -- the exact combination the original production report hit.
 
 use std::path::{Path, PathBuf};
@@ -41,10 +42,9 @@ fn init_repo(name: &str) -> PathBuf {
     run_git(&root, &["config", "user.name", "test"]);
     // Zero-dependency package.json/package-lock.json -- a real `npm ci`
     // against this needs no network access and stays fast, while still
-    // exercising the real content-store/materialization path, unlike
-    // every prior `require_passing_tests` fixture (issue #11/#240's own
-    // complaint: a fixture that needs nothing can't catch a "needs
-    // dependencies" bug).
+    // exercising the real `npm ci` path, unlike every prior
+    // `require_passing_tests` fixture (issue #11/#240's own complaint: a
+    // fixture that needs nothing can't catch a "needs dependencies" bug).
     std::fs::write(root.join("package.json"), "{\"name\":\"scratch\",\"version\":\"1.0.0\"}").unwrap();
     std::fs::write(
         root.join("package-lock.json"),
@@ -113,17 +113,19 @@ fn state_dir_for(repo: &Path) -> PathBuf {
 /// The real, reported failure shape end to end: 5 concurrent tasks
 /// against a repo with real (if trivial) npm dependencies. Exercises
 /// issue #230 (count fidelity under real concurrency, real `git worktree
-/// add` contention, not simulated), #233 (content-store sharing: only
-/// the first task should populate, the rest should hit -- proving the
-/// widened lock timeout lets that happen instead of N redundant
-/// installs), and #232 (a merge gate that genuinely needs dependencies
-/// correctly gets an environment diagnosis, not a false per-workspace
-/// "your code failed" -- since `merge_all`'s integration worktree still
-/// has no dependency prep performed on it, issue #233's still-open
-/// deferred half, documented in DESIGN.md) -- all in one real run.
+/// add` contention, not simulated), #233 (each of the 5 concurrent tasks
+/// runs its own real `npm ci` against npm's own shared global cache --
+/// proving that's safe under real concurrent load, with no pact-side
+/// locking, the same thing verified by hand before removing the old
+/// custom content store), and #232 (a merge gate that genuinely needs
+/// dependencies correctly gets an environment diagnosis, not a false
+/// per-workspace "your code failed" -- since `merge_all`'s integration
+/// worktree still has no dependency prep performed on it, a still-open,
+/// deliberately deferred gap documented in DESIGN.md) -- all in one real
+/// run.
 #[test]
 #[ignore = "slow: 5 concurrent workspaces + a real npm ci -- run explicitly with `cargo test --ignored`"]
-fn five_concurrent_tasks_share_a_real_content_store_under_real_contention() {
+fn five_concurrent_tasks_each_run_a_real_npm_ci_under_real_contention() {
     let repo = init_repo("five-way");
     let shim = shim_dir();
 
@@ -146,12 +148,12 @@ fn five_concurrent_tasks_share_a_real_content_store_under_real_contention() {
         "expected the issue #231 reconciliation line to confirm full count fidelity, got:\n{spawn_text}"
     );
 
-    // issue #233: content-store sharing -- exactly one -deps.json sidecar
-    // must record a real populate (store_hit: false); the rest must be
-    // cache hits (store_hit: true), not N independent installs.
+    // issue #233: every one of the N concurrent tasks runs its own real
+    // `npm ci` (no shared staging/materialization step anymore) against
+    // npm's own global cache -- all N must succeed under real concurrent
+    // contention, with npm's own cache locking, not pact's.
     let deps_dir = state_dir_for(&repo).join("meta");
-    let mut populate_count = 0;
-    let mut hit_count = 0;
+    let mut npm_ci_success_count = 0;
     for entry in std::fs::read_dir(&deps_dir).unwrap().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().to_string();
         if !name.ends_with("-deps.json") {
@@ -159,20 +161,19 @@ fn five_concurrent_tasks_share_a_real_content_store_under_real_contention() {
         }
         let reports: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
         for report in reports {
-            match report["store_hit"].as_bool() {
-                Some(false) => populate_count += 1,
-                Some(true) => hit_count += 1,
-                None => {}
+            if report["manager"] == "npm" {
+                assert_eq!(report["strategy"], "npm-ci", "expected the lockfile-present path, got: {report}");
+                assert_eq!(report["success"], true, "expected npm ci to succeed under real concurrency, got: {report}");
+                npm_ci_success_count += 1;
             }
         }
     }
-    assert_eq!(populate_count, 1, "expected exactly one real content-store populate across {N} concurrent tasks");
-    assert_eq!(hit_count, N - 1, "expected the remaining {} tasks to hit the shared store, not reinstall", N - 1);
+    assert_eq!(npm_ci_success_count, N, "expected all {N} concurrent tasks to run and report a successful npm ci");
 
     // issue #232, honest end-to-end check: `merge_all`'s integration
-    // worktree never gets dependency prep performed on it (issue #233's
-    // still-open, deliberately deferred half -- see DESIGN.md), so a gate
-    // that genuinely needs node_modules can't pass there regardless of
+    // worktree never gets dependency prep performed on it (a known,
+    // deliberately deferred gap -- see DESIGN.md), so a gate that
+    // genuinely needs node_modules can't pass there regardless of
     // which workspace merges. The correct, fixed behavior is a *single*
     // preflight abort with an environment diagnosis before any workspace
     // is even considered -- not #232's pre-fix bug (every workspace
