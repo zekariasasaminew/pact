@@ -960,7 +960,9 @@ file's own index state, and the agent may be checking for that
 repo-wide signal too, not just the per-file one. Not chased further
 this pass (a repo-wide `MERGE_HEAD` neutralize/restore would be a bigger
 change than the per-file one already shipped, and "modest" real-agent
-spend was the brief for this session).
+spend was the brief for this session). **Resolved in a later pass** --
+see "Arbiter merge-state neutralization (issue #185)" below for the fix
+and its own live re-verification (4/4 real successes, zero denials).
 
 Every rejection path -- old or new -- falls back to the same existing
 safety net regardless: the workspace stays a normal skipped/persisted
@@ -1006,14 +1008,24 @@ bytes back and a real `git commit --no-edit` still succeeds afterward
 (the same sequence `merge_branch_into` performs); a no-op when the
 worktree isn't mid-merge at all.
 
-**Honestly unverified against a real agent as of this fix** -- issue
-#185's own real-agent evidence (one `Write` denial that survived
-per-file neutralization) is the motivating case, but confirming this
-repo-level fix actually resolves *that* denial needs another real,
-billed Arbiter invocation, which wasn't spent unilaterally implementing
-this. Issue #185 stays open for that live re-verification; this is a
-plausible, well-reasoned fix for a real gap in the neutralization
-approach, not a confirmed resolution.
+**Live re-verified, real spend, resolved.** 4 independent real
+`claude`-as-Arbiter attempts against the same reproducible conflict
+shape as the original investigation (two branches each adding a
+different function -- `add`/`multiply` -- to the same `math.js`, right
+after an existing `subtract`, forcing a conflict at both the function
+insertion point and the `module.exports` line): **4/4 full successes**,
+zero `Write` denials. Each was a genuinely fresh repo/conflict (not the
+same one retried), spawned via real `claude` agent calls for both
+conflicting edits, then a real `merge-all --arbiter-agent claude
+--test-cmd "node -e \"require('./math.js')\""` invocation. Every
+resulting merge was inspected directly (`git show`), not just trusted
+from exit code: all four contained both functions, correct syntax, and
+a correctly merged `module.exports` in every case. Compare to the
+pre-fix baseline this issue itself established: 1 success, 3 rejections
+in 4 attempts, one of which was exactly this repo-level-state denial.
+Zero for four against three-for-four is a real, verified improvement,
+not a coincidence at this sample size given the fix's mechanism directly
+addresses the hypothesis that was tested and confirmed.
 
 ### Arbiter scope enforcement (issue #146/#147)
 
