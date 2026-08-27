@@ -73,6 +73,16 @@ pub fn list_active_leases(conn: &Connection) -> Result<Vec<ActiveLease>> {
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
+/// Unconditionally removes every lease row -- active or already expired
+/// -- for `pact clear-leases` (issue #209). Deliberately not a
+/// "stale" heuristic: an explicit action a caller runs when they already
+/// know nothing real is in flight, not an automatic policy that has to
+/// get "stale" right. Returns how many rows were actually removed, for
+/// user-facing feedback.
+pub fn clear_leases(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM leases", [])?)
+}
+
 /// Expands a glob pattern against every file currently in `root`, returning
 /// paths relative to `root` with forward slashes (normalized across
 /// platforms). Overlap between two glob patterns is detected by expanding
@@ -562,5 +572,30 @@ mod tests {
     fn list_active_leases_empty_when_no_leases() {
         let conn = test_conn();
         assert!(list_active_leases(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_leases_removes_both_active_and_expired_rows() {
+        let conn = test_conn();
+        let root = std::env::temp_dir();
+        claim_files(&conn, &root, "agent-a", &["active.txt".to_string()], Some(900), false).unwrap();
+        let now = db::now_unix();
+        conn.execute(
+            "INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES ('expired.txt', 'agent-b', ?1, ?2)",
+            (now - 100, now - 1),
+        )
+        .unwrap();
+        assert_eq!(lease_count(&conn), 2);
+
+        let removed = clear_leases(&conn).unwrap();
+
+        assert_eq!(removed, 2, "expected both the active and the already-expired row to be removed");
+        assert_eq!(lease_count(&conn), 0);
+    }
+
+    #[test]
+    fn clear_leases_is_a_no_op_on_an_empty_table() {
+        let conn = test_conn();
+        assert_eq!(clear_leases(&conn).unwrap(), 0);
     }
 }

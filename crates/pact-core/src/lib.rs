@@ -1007,6 +1007,13 @@ impl Orchestrator {
         pact_coord::status(&self.repo_root)
     }
 
+    /// Unconditionally removes every lease for this repo's coordination
+    /// database -- `pact clear-leases` (issue #209). Returns how
+    /// many rows were removed.
+    pub fn clear_leases(&self) -> Result<usize> {
+        pact_coord::clear_leases(&self.repo_root)
+    }
+
     pub fn teardown(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         // WorkspaceManager::remove_workspace already kills any live agent
         // process recorded against this workspace before removing it, and
