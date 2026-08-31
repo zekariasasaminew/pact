@@ -566,6 +566,124 @@ fn merge_all_package_json_merge_handles_utf8_bom() {
     cleanup(&repo);
 }
 
+/// Regression test for issue #276: a reproducible, in-repo version of the
+/// real-world benchmark issue #268 reported by hand -- N agents, one
+/// file, disjoint regions, assert every expected value lands in the
+/// merged tree with zero conflicts. That report used 5 real Copilot
+/// agents (4 editing the same root `package.json` in disjoint regions,
+/// 1 editing a second manifest) and got 13/13 expected changes, 0
+/// conflicts; this reconstructs the same *shape* deterministically with
+/// 5 simulated workspaces (direct `create_workspace` + file writes, the
+/// same technique every other test in this file already uses -- no real
+/// agent CLI needed, since what's under test is `merge_all`'s own
+/// correctness, not anything about how a workspace's changes got there).
+///
+/// Deliberately placed here rather than in `pact-cli`'s `#[ignore]`d
+/// slow-integration tier (issue #240): unlike that tier's tests, this one
+/// needs no real dependency install or concurrency contention -- it's the
+/// same fast, deterministic shape as every other JSON-merge test in this
+/// file, just scaled from 2 workspaces to 5, so it belongs in the default
+/// `cargo test --workspace` run like the rest of them.
+///
+/// Deliberately uses `PackageJsonResolver`'s 4 already-supported
+/// dependency-block keys (`dependencies`/`devDependencies`/
+/// `peerDependencies`/`optionalDependencies`), not the real report's
+/// `overrides` key -- `overrides` isn't one of `PACKAGE_JSON_DEP_KEYS`,
+/// so a synthetic conflict built around it wouldn't exercise JSON-aware
+/// resolution at all (it would either fall through to a real conflict or
+/// pass by accident via a clean plain-git merge, neither of which proves
+/// what this test exists to prove).
+#[test]
+fn merge_all_correctly_merges_four_agents_disjoint_edits_to_one_package_json_plus_a_second_manifest() {
+    let repo = init_repo();
+    std::fs::write(
+        repo.join("package.json"),
+        "{\n  \"name\": \"bench\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {},\n  \
+         \"devDependencies\": {},\n  \"peerDependencies\": {},\n  \"optionalDependencies\": {}\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.join("jobs/reminders")).unwrap();
+    std::fs::write(
+        repo.join("jobs/reminders/package.json"),
+        "{\n  \"name\": \"reminders\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {}\n}\n",
+    )
+    .unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add bench package.json + second manifest"]);
+
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    // 4 agents, 4 disjoint blocks of the same root package.json.
+    let blocks = [
+        ("dependencies", "a", "1.0.0"),
+        ("devDependencies", "b", "2.0.0"),
+        ("peerDependencies", "c", "3.0.0"),
+        ("optionalDependencies", "d", "4.0.0"),
+    ];
+    let mut workspace_ids = Vec::new();
+    for (block, name, version) in blocks {
+        let ws = manager.create_workspace(&format!("add {name} to {block}"), None).unwrap();
+        std::fs::write(
+            ws.path.join("package.json"),
+            format!(
+                "{{\n  \"name\": \"bench\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {},\n  \
+                 \"devDependencies\": {},\n  \"peerDependencies\": {},\n  \"optionalDependencies\": {}\n}}\n",
+                if block == "dependencies" { format!("{{\n    \"{name}\": \"{version}\"\n  }}") } else { "{}".to_string() },
+                if block == "devDependencies" { format!("{{\n    \"{name}\": \"{version}\"\n  }}") } else { "{}".to_string() },
+                if block == "peerDependencies" { format!("{{\n    \"{name}\": \"{version}\"\n  }}") } else { "{}".to_string() },
+                if block == "optionalDependencies" { format!("{{\n    \"{name}\": \"{version}\"\n  }}") } else { "{}".to_string() },
+            ),
+        )
+        .unwrap();
+        workspace_ids.push(ws.id);
+    }
+
+    // 5th agent, a second, entirely unrelated manifest.
+    let e = manager.create_workspace("add e to jobs/reminders", None).unwrap();
+    std::fs::write(
+        e.path.join("jobs/reminders/package.json"),
+        "{\n  \"name\": \"reminders\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\n    \"e\": \"5.0.0\"\n  }\n}\n",
+    )
+    .unwrap();
+    workspace_ids.push(e.id);
+
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
+
+    assert!(report.conflicted.is_empty(), "expected zero unresolved conflicts, got: {:?}", report.conflicted);
+    assert!(report.skipped.is_empty(), "expected zero skipped workspaces, got: {:?}", report.skipped);
+    assert_eq!(report.merged.len(), 5, "expected all 5 workspaces to merge");
+
+    // The real report's headline: MORE than one workspace needed
+    // JSON-aware auto-resolution -- proving this holds at N-agent scale,
+    // not just the 2-workspace "exactly one" case the other tests above
+    // already cover.
+    let auto_resolved_count =
+        report.merged.iter().filter(|w| w.auto_resolved.iter().any(|f| f == "package.json")).count();
+    assert!(
+        auto_resolved_count >= 2,
+        "expected multiple workspaces to need JSON-aware auto-resolution on the shared package.json, got {auto_resolved_count}"
+    );
+
+    let content = show(&repo, &format!("{}:package.json", report.target_branch));
+    let value: serde_json::Value = serde_json::from_str(&content).expect("merged package.json must be valid JSON");
+    for (block, name, version) in blocks {
+        let block_obj = value.get(block).and_then(|b| b.as_object()).unwrap_or_else(|| panic!("missing block {block}"));
+        assert_eq!(
+            block_obj.get(name).and_then(|v| v.as_str()),
+            Some(version),
+            "expected {name}: {version} in {block}, got: {content}"
+        );
+    }
+
+    let second_manifest = show(&repo, &format!("{}:jobs/reminders/package.json", report.target_branch));
+    let second_value: serde_json::Value =
+        serde_json::from_str(&second_manifest).expect("merged second manifest must be valid JSON");
+    let second_deps = second_value.get("dependencies").and_then(|d| d.as_object()).expect("dependencies object");
+    assert_eq!(second_deps.get("e").and_then(|v| v.as_str()), Some("5.0.0"), "got: {second_manifest}");
+
+    cleanup(&repo);
+}
+
 #[test]
 fn merge_all_union_resolves_matched_file_conflict() {
     let repo = init_repo_with_barrel();
