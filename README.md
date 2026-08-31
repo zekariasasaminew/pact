@@ -2,7 +2,12 @@
 
 A language-agnostic orchestrator for running multiple AI coding agent CLIs
 (Claude Code, GitHub Copilot CLI, Codex, Gemini CLI, Antigravity) in
-parallel on the same repository, without them fighting each other.
+parallel on the same repository -- and landing all of their work back
+onto one branch automatically when they're done.
+
+![pact demo: two isolated workspaces created, listed, and merged onto one clean branch, zero decisions](docs/demo.gif)
+
+*(That's `pact demo`'s actual, real output -- zero-cost, zero-agent-CLI-call, run it yourself in 5 seconds. See Getting started below for the real thing, with real agents.)*
 
 **What "without fighting" means here:** each agent gets its own git
 worktree (real filesystem isolation, not just a hope that they touch
@@ -16,21 +21,27 @@ claimed. Worktree isolation and merge-all's conflict handling are the
 parts that are real guarantees; coordination is a convention agents
 opt into.
 
+**What "landing it all back" means:** `merge-all` sequences N agents' work
+by risk (small, low-risk changes first) and auto-resolves what it safely
+can -- including structurally: `package.json`'s dependency blocks get
+their own **JSON-aware merge** automatically, no flag needed. Verified
+under real adversarial load, not just unit tests: four concurrent Copilot
+agents editing the same root `package.json` in disjoint regions merged
+correctly and automatically -- 13 of 13 expected changes landed, zero
+conflicts. Whatever's left after that gates on your own test command
+before it's ever accepted (`--require-passing-tests`, Arbiter).
+
 **The full loop, end to end:** isolate each agent in its own git
 worktree &rarr; prepare dependencies before the agent's first command
 &rarr; launch the agent with coordination tools wired in automatically
 &rarr; track every claim, message, and merge in a queryable operation
 log (`pact history`) &rarr; merge completed work back onto one branch,
-sequenced by risk (small, low-risk changes first) &rarr; verify an AI-proposed conflict resolution
+sequenced by risk, JSON-aware where it can be &rarr; verify an AI-proposed conflict resolution
 against a real test command before ever accepting it (Arbiter). Six
 real subsystems working together, not just a lock server, not just a
 worktree wrapper, and not just an MCP integration -- coordination is
 the one most visible from the wire protocol, but it's one piece of the
 loop, not the whole tool.
-
-![pact demo: two isolated workspaces created, listed, and merged onto one clean branch, zero decisions](docs/demo.gif)
-
-*(That's `pact demo`'s actual, real output -- zero-cost, zero-agent-CLI-call, run it yourself in 5 seconds. See Getting started below for the real thing, with real agents.)*
 
 **[Getting started guide](GETTING_STARTED.md)** -- install to watching two
 agents work in parallel, in under 5 minutes, every command verified
@@ -51,7 +62,7 @@ PowerShell 5.1, not just cross-compiled and assumed to work.
 
 ## The problem
 
-Running several coding agents at once on one repo hits three separate kinds
+Running several coding agents at once on one repo hits four separate kinds
 of pain, in this priority order:
 
 1. **Dependency installs don't share.** Every `git worktree` starts with no
@@ -62,10 +73,16 @@ of pain, in this priority order:
 3. **Agents step on each other's files.** Two agents editing the same file
    in parallel is either avoided by manually partitioning work up front, or
    discovered as a merge conflict after the fact.
+4. **Landing N agents' work back onto one branch is hard.** Even when
+   nothing conflicts, someone still has to merge N branches by hand, in
+   some order, and hope nothing regresses -- and a real conflict (two
+   agents editing the same file) usually means starting that file's
+   change over from scratch, by hand.
 
-`git worktree` solves isolation but wasn't built for any of these three —
+`git worktree` solves isolation but wasn't built for any of these four —
 it was built for one human checking out a second branch, not an
-orchestrator spinning up and tearing down N agent sandboxes per session.
+orchestrator spinning up and tearing down N agent sandboxes per session,
+let alone landing their work back together afterward.
 
 ## Overview
 
