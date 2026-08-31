@@ -134,6 +134,28 @@ sufficient either** -- see issue #234 directly below: calling the *same*
 function twice is not the same as it returning the *same value* twice,
 and `workspace_id`'s random suffix meant it never did.
 
+### Default slug stops at the first sentence (issue #271)
+
+A real reported id, `cluster-next-deps-you-are-in-an-2df7ed2b`, showed the
+gap left by #234's deliberate scope cut: the default (no `--name`) path
+still slugified the *whole* task text and blindly truncated at
+`MAX_SLUG_LEN`, landing mid-clause whenever a real prompt carried a
+multi-sentence preamble ahead of the actual instruction ("You are in an
+environment where...").
+
+Orthogonal to #234's suffix-parity question -- this only changes what
+text feeds `slugify` for the *default* path, not the suffix behavior
+`--name` exists to fix. New `leading_phrase(text)` returns everything
+before the first `.`/`!`/`?`/newline, falling back to the whole text when
+none is found (unchanged behavior for the common single-clause task).
+`workspace_id`'s no-`--name` branch now slugifies `leading_phrase(task)`
+instead of `task` directly.
+
+Known, accepted limitation, same "conservative, not exhaustive" tradeoff
+`slugify` itself already makes: a `.` inside an abbreviation or a
+version-like token (`Next.js`, `v1.2`) reads as a sentence boundary too.
+Not attempting real sentence detection was a deliberate scope cut.
+
 ### Workspace names: `--name` (issue #234)
 
 A real production report found the #122 scheme above unusable in
