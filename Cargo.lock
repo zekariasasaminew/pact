@@ -879,6 +879,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "toml",
+ "toml_edit",
  "tracing",
  "uuid",
 ]

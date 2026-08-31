@@ -24,12 +24,14 @@ opt into.
 **What "landing it all back" means:** `merge-all` sequences N agents' work
 by risk (small, low-risk changes first) and auto-resolves what it safely
 can -- including structurally: `package.json`'s dependency blocks get
-their own **JSON-aware merge** automatically, no flag needed. Verified
-under real adversarial load, not just unit tests: four concurrent Copilot
-agents editing the same root `package.json` in disjoint regions merged
-correctly and automatically -- 13 of 13 expected changes landed, zero
-conflicts. Whatever's left after that gates on your own test command
-before it's ever accepted (`--require-passing-tests`, Arbiter).
+their own **JSON-aware merge** automatically, no flag needed, and
+`Cargo.toml`/`pyproject.toml`'s dependency tables get the same treatment
+with comments and formatting left untouched. Verified under real
+adversarial load, not just unit tests: four concurrent Copilot agents
+editing the same root `package.json` in disjoint regions merged correctly
+and automatically -- 13 of 13 expected changes landed, zero conflicts.
+Whatever's left after that gates on your own test command before it's
+ever accepted (`--require-passing-tests`, Arbiter).
 
 **The full loop, end to end:** isolate each agent in its own git
 worktree &rarr; prepare dependencies before the agent's first command

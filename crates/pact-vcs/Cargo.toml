@@ -12,6 +12,8 @@ uuid.workspace = true
 tracing.workspace = true
 sysinfo.workspace = true
 globset.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
 libc = "0.2.186"
 
 [dev-dependencies]
