@@ -196,6 +196,16 @@ pub enum ResolveOutcome {
 /// hook").
 pub type ArbiterResolver<'a> = dyn Fn(&Path, &str, &[String]) -> Vec<String> + 'a;
 
+/// Prepares dependencies (npm/etc.) for a fresh worktree before any shell
+/// command runs in it -- injected the same way `ArbiterResolver` is,
+/// since `pact-vcs` has no dependency on `pact-deps` or `pact-core`. See
+/// DESIGN.md ("pact-vcs > merge_all's integration worktree needs
+/// dependencies too", issue #269) for why this exists: a fresh
+/// `git worktree add` has no `node_modules` any more than a fresh agent
+/// workspace would, but only agent workspaces got dependency prep before
+/// this.
+pub type DependencyPrepHook<'a> = dyn Fn(&Path) + 'a;
+
 /// Never auto-resolved, even under `--union` -- see DESIGN.md ("pact-vcs >
 /// Semantic auto-resolution").
 const NEVER_AUTO_RESOLVE: &[&str] = &[
@@ -692,12 +702,14 @@ impl WorkspaceManager {
     /// workspace's *clean* merge on this command passing in the
     /// integration worktree before it's accepted -- see DESIGN.md
     /// ("pact-vcs > Test-gated merge (issue #65)").
+    #[allow(clippy::too_many_arguments)]
     pub fn merge_all(
         &self,
         ids: Option<&[String]>,
         target_branch: Option<&str>,
         union_globs: &[String],
         arbiter: Option<&ArbiterResolver<'_>>,
+        dependency_prep: Option<&DependencyPrepHook<'_>>,
         require_passing_tests: Option<&str>,
         dry_run: bool,
     ) -> Result<MergeReport> {
@@ -850,6 +862,19 @@ impl WorkspaceManager {
                     "failed to create integration branch '{branch_name}':\n{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
+            }
+        }
+
+        // A fresh integration worktree has no node_modules any more than
+        // a fresh agent workspace would -- issue #269: prepare
+        // dependencies here the same way `Orchestrator::spawn` already
+        // does for agent workspaces, before the gate ever runs, so a
+        // missing-dependency failure doesn't masquerade as a real test
+        // failure the way #232's own base-commit preflight is designed to
+        // catch. Only worth paying for when the gate is actually used.
+        if require_passing_tests.is_some() {
+            if let Some(prep) = dependency_prep {
+                prep(&integration_path);
             }
         }
 

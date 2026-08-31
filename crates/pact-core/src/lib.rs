@@ -763,8 +763,30 @@ impl Orchestrator {
             self.run_arbiter(arbiter.expect("resolver only invoked when arbiter is Some"), worktree_path, task_text, files)
         };
         let resolver_ref: Option<&ArbiterResolver<'_>> = if arbiter.is_some() { Some(&resolver) } else { None };
-        let report =
-            self.workspaces.merge_all(ids, target_branch, union_globs, resolver_ref, require_passing_tests, dry_run)?;
+        let dependency_prep = |worktree_path: &Path| {
+            let dep_reports = pact_deps::prepare(worktree_path);
+            for report in &dep_reports {
+                if !report.success {
+                    tracing::warn!(
+                        "dependency prepare step for {} failed in integration worktree {}: {:?}",
+                        report.manager,
+                        worktree_path.display(),
+                        report.warnings
+                    );
+                }
+            }
+        };
+        let dependency_prep_ref: Option<&pact_vcs::DependencyPrepHook<'_>> =
+            if require_passing_tests.is_some() { Some(&dependency_prep) } else { None };
+        let report = self.workspaces.merge_all(
+            ids,
+            target_branch,
+            union_globs,
+            resolver_ref,
+            dependency_prep_ref,
+            require_passing_tests,
+            dry_run,
+        )?;
         self.log_operation(
             "merge_all",
             None,

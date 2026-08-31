@@ -141,7 +141,7 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
 
     let merged_ids: Vec<&str> = report.merged.iter().map(|w| w.id.as_str()).collect();
     assert!(merged_ids.contains(&a.id.as_str()), "expected {} (well-separated append) to always merge cleanly", a.id);
@@ -221,7 +221,7 @@ fn merge_all_dry_run_touches_no_git_state() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, true).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, true).unwrap();
 
     assert!(report.dry_run);
     assert!(report.merged.is_empty(), "dry run must not actually merge anything");
@@ -274,7 +274,7 @@ fn merge_all_reports_skipped_not_merged_when_auto_commit_fails() {
         std::fs::set_permissions(&hook_path, perms).unwrap();
     }
 
-    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
 
     assert!(report.merged.is_empty(), "nothing should have been merged since the auto-commit failed");
     assert_eq!(report.skipped.len(), 1, "the workspace must show up as skipped, not silently dropped");
@@ -333,7 +333,7 @@ fn merge_all_dry_run_sequences_a_central_file_touch_after_a_larger_plain_changes
     std::fs::write(plain.path.join("b.ts"), "export const B = 1;\n").unwrap();
     std::fs::write(plain.path.join("c.ts"), "export const C = 1;\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, true).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, true).unwrap();
     assert!(report.dry_run);
     assert_eq!(report.planned.len(), 2);
     assert_eq!(report.planned[0].id, plain.id, "the larger plain changeset should still be sequenced first");
@@ -366,7 +366,7 @@ fn merge_all_dry_run_sequences_an_isolated_workspace_before_ones_sharing_a_file(
     let shares_b = manager.create_workspace("edit shared.ts (b)", None).unwrap();
     std::fs::write(shares_b.path.join("shared.ts"), "export const B = 1;\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, true).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, true).unwrap();
     assert!(report.dry_run);
     assert_eq!(report.planned.len(), 3);
     assert_eq!(report.planned[0].id, isolated.id, "the isolated workspace must be sequenced first");
@@ -394,7 +394,7 @@ fn merge_all_skips_workspace_whose_base_is_no_longer_an_ancestor() {
     // second, unrelated repo.
     run_git(&repo, &["commit", "--amend", "-q", "--allow-empty", "-m", "init (amended)"]);
 
-    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
 
     assert!(report.merged.is_empty(), "workspace with a moved base must not be merged");
     assert_eq!(report.skipped.len(), 1);
@@ -429,7 +429,7 @@ fn merge_all_auto_resolves_package_json_dependency_conflict() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
 
     assert_eq!(report.skipped.len(), 0, "expected both to merge via JSON-aware auto-resolution, got skipped={:?}", report.skipped);
     assert_eq!(report.merged.len(), 2);
@@ -488,7 +488,7 @@ fn merge_all_package_json_merge_preserves_key_order_and_indent() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
     assert_eq!(report.skipped.len(), 0, "expected both to merge via JSON-aware auto-resolution, got skipped={:?}", report.skipped);
 
     let content = show(&repo, &format!("{}:package.json", report.target_branch));
@@ -543,7 +543,7 @@ fn merge_all_package_json_merge_handles_utf8_bom() {
     )
     .unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
     assert_eq!(
         report.skipped.len(),
         0,
@@ -578,7 +578,7 @@ fn merge_all_union_resolves_matched_file_conflict() {
     std::fs::write(b.path.join("src/barrel.ts"), "export {};\nexport * from './omit';\n").unwrap();
 
     let report = manager
-        .merge_all(None, None, &["src/barrel.ts".to_string()], None, None, false)
+        .merge_all(None, None, &["src/barrel.ts".to_string()], None, None, None, false)
         .unwrap();
 
     assert_eq!(report.skipped.len(), 0, "expected both to merge via --union, got skipped={:?}", report.skipped);
@@ -632,7 +632,7 @@ fn merge_all_union_inserts_before_sentinel_end_marker_across_three_workspaces() 
     .unwrap();
 
     let report = manager
-        .merge_all(None, None, &["src/plugins.ts".to_string()], None, None, false)
+        .merge_all(None, None, &["src/plugins.ts".to_string()], None, None, None, false)
         .unwrap();
 
     assert_eq!(report.skipped.len(), 0, "expected all three to merge via --union, got skipped={:?}", report.skipped);
@@ -676,7 +676,7 @@ fn merge_all_never_auto_resolves_lockfiles_even_with_matching_union_glob() {
     // Even with an explicit --union match on the lockfile, NEVER_AUTO_RESOLVE
     // must win -- a real conflict here always stays a real conflict.
     let report = manager
-        .merge_all(None, None, &["package-lock.json".to_string()], None, None, false)
+        .merge_all(None, None, &["package-lock.json".to_string()], None, None, None, false)
         .unwrap();
 
     assert_eq!(report.merged.len(), 1, "expected exactly one of the two to merge cleanly");
@@ -724,7 +724,7 @@ fn merge_all_union_rejects_conflicting_module_exports() {
     .unwrap();
 
     let report = manager
-        .merge_all(None, None, &["src/barrel.js".to_string()], None, None, false)
+        .merge_all(None, None, &["src/barrel.js".to_string()], None, None, None, false)
         .unwrap();
 
     assert_eq!(report.merged.len(), 1, "expected exactly one of the two to merge cleanly");
@@ -779,7 +779,7 @@ fn merge_all_accepts_a_stub_arbiter_resolution() {
         files.to_vec()
     };
 
-    let report = manager.merge_all(None, None, &[], Some(&resolver), None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], Some(&resolver), None, None, false).unwrap();
 
     assert_eq!(report.skipped.len(), 0, "expected the stub arbiter to resolve the conflict, got skipped={:?}", report.skipped);
     assert_eq!(report.merged.len(), 2);
@@ -822,7 +822,7 @@ fn merge_all_still_aborts_when_arbiter_declines() {
     // configured at all.
     let resolver = |_worktree_path: &Path, _task_text: &str, _files: &[String]| -> Vec<String> { Vec::new() };
 
-    let report = manager.merge_all(None, None, &[], Some(&resolver), None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], Some(&resolver), None, None, false).unwrap();
 
     assert_eq!(report.merged.len(), 1, "expected exactly one of the two to merge cleanly");
     assert_eq!(report.skipped.len(), 1, "expected the other to stay a real conflict when arbiter declines");
