@@ -169,6 +169,199 @@ const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
     "optionalDependencies",
 ];
 
+/// TOML-aware merge of dependency tables in `Cargo.toml`/`pyproject.toml`
+/// -- the same shape as `PackageJsonResolver`, generalized to (a) a
+/// dotted path instead of a flat top-level key, since Poetry's
+/// dependency tables live under `[tool.poetry...]`, and (b) `toml_edit`
+/// for the actual write instead of a whole-document reserialize. TOML's
+/// comment culture is real (Cargo.toml routinely has per-dependency
+/// `# why this is pinned` comments) in a way JSON's isn't, so unlike
+/// `PackageJsonResolver` -- which accepts losing exact formatting
+/// details on every resolved file, matching JSON's own conventions --
+/// this only touches the specific table entries that actually changed,
+/// leaving every comment, unrelated key, and unrelated table byte-for-byte
+/// as "ours" had it. See DESIGN.md ("pact-vcs > TOML manifest structural
+/// merge (issue #272)").
+pub(crate) struct TomlManifestResolver {
+    pub(crate) file_name: &'static str,
+    /// Each entry is a dotted path to one dependency table, e.g.
+    /// `&["dependencies"]` for Cargo.toml's top-level table, or
+    /// `&["tool", "poetry", "dependencies"]` for Poetry's.
+    pub(crate) dependency_paths: &'static [&'static [&'static str]],
+}
+
+impl SemanticResolver for TomlManifestResolver {
+    fn can_handle(&self, path: &str) -> bool {
+        Path::new(path).file_name().and_then(|n| n.to_str()) == Some(self.file_name)
+    }
+
+    fn resolve(&self, stages: &ConflictStages) -> Result<Option<ResolvedFile>> {
+        let Some((base, _)) = &stages.base else {
+            return Ok(None);
+        };
+        let (ours, ours_had_bom) = &stages.ours;
+        let (theirs, _) = &stages.theirs;
+
+        // Parsed with the plain `toml` crate, semantic-value-only (no
+        // formatting/decor) -- used for both the "everything outside the
+        // dependency tables is identical" safety gate and the per-name
+        // 3-way resolution below. `toml_edit::Value` deliberately doesn't
+        // implement `PartialEq` (only `Debug`/`Clone` -- confirmed
+        // against its own source), so this crate is the only sound way
+        // to compare TOML content by value rather than by formatting.
+        let (Ok(base_v), Ok(ours_v), Ok(theirs_v)) = (
+            toml::from_str::<toml::Value>(base),
+            toml::from_str::<toml::Value>(ours),
+            toml::from_str::<toml::Value>(theirs),
+        ) else {
+            return Ok(None);
+        };
+
+        let mut ours_stripped = ours_v.clone();
+        let mut theirs_stripped = theirs_v.clone();
+        for path in self.dependency_paths {
+            remove_toml_path(&mut ours_stripped, path);
+            remove_toml_path(&mut theirs_stripped, path);
+        }
+        if ours_stripped != theirs_stripped {
+            return Ok(None);
+        }
+
+        let Ok(mut doc) = ours.parse::<toml_edit::DocumentMut>() else {
+            return Ok(None);
+        };
+
+        for path in self.dependency_paths {
+            let base_block = toml_path_table(&base_v, path);
+            let ours_block = toml_path_table(&ours_v, path);
+            let theirs_block = toml_path_table(&theirs_v, path);
+            if base_block.is_none() && ours_block.is_none() && theirs_block.is_none() {
+                continue;
+            }
+
+            let mut names: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
+            if let Some(m) = ours_block {
+                names.extend(m.keys());
+            }
+            if let Some(m) = theirs_block {
+                names.extend(m.keys());
+            }
+
+            let Some(edit_table) = toml_edit_path_table_mut(&mut doc, path) else {
+                return Ok(None);
+            };
+
+            for name in names {
+                let base_val = base_block.and_then(|m| m.get(name));
+                let ours_val = ours_block.and_then(|m| m.get(name));
+                let theirs_val = theirs_block.and_then(|m| m.get(name));
+                let resolved = match (ours_val, theirs_val) {
+                    (Some(o), Some(t)) if o == t => continue, // already what "ours" has, don't touch its formatting
+                    (Some(o), Some(t)) => {
+                        if base_val == Some(o) {
+                            t.clone() // only theirs changed this dependency
+                        } else if base_val == Some(t) {
+                            continue // only ours changed it -- already correct, don't touch it
+                        } else {
+                            return Ok(None); // both changed it, differently
+                        }
+                    }
+                    (Some(_), None) => continue, // ours already has it, theirs never touched this table
+                    (None, Some(t)) => t.clone(),
+                    (None, None) => unreachable!("name came from ours_block or theirs_block"),
+                };
+                let Some(edit_value) = toml_value_to_edit(&resolved) else {
+                    return Ok(None); // an unsupported value shape (e.g. a datetime) -- fall through to a real conflict
+                };
+                edit_table[name.as_str()] = toml_edit::Item::Value(edit_value);
+            }
+        }
+
+        let mut result = doc.to_string();
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        if *ours_had_bom {
+            result.insert(0, '\u{FEFF}');
+        }
+
+        Ok(Some(ResolvedFile { content: result }))
+    }
+}
+
+/// Removes the table at a dotted path from a `toml::Value`, if present --
+/// used to build the "everything besides the dependency tables" copy for
+/// `TomlManifestResolver`'s safety gate. A no-op if any segment along the
+/// path isn't a table (nothing to strip).
+fn remove_toml_path(value: &mut toml::Value, path: &[&str]) {
+    let Some((last, ancestors)) = path.split_last() else { return };
+    let mut current = value;
+    for segment in ancestors {
+        let Some(next) = current.get_mut(*segment) else { return };
+        current = next;
+    }
+    if let Some(table) = current.as_table_mut() {
+        table.remove(*last);
+    }
+}
+
+/// Reads the table at a dotted path from a `toml::Value`, if every
+/// segment along the way is itself a table.
+fn toml_path_table<'a>(value: &'a toml::Value, path: &[&str]) -> Option<&'a toml::map::Map<String, toml::Value>> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_table()
+}
+
+/// Same traversal as `toml_path_table`, but over a `toml_edit::DocumentMut`
+/// being edited -- creates any missing intermediate table along the path
+/// (e.g. a workspace that never had a `[dependencies]` table at all until
+/// this merge introduces one) rather than failing, since an entirely
+/// absent table is a legitimate starting point, not a malformed one.
+fn toml_edit_path_table_mut<'a>(doc: &'a mut toml_edit::DocumentMut, path: &[&str]) -> Option<&'a mut toml_edit::Table> {
+    let mut current = doc.as_table_mut();
+    for segment in path {
+        if !current.contains_key(segment) {
+            current.insert(segment, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        current = current.get_mut(segment)?.as_table_mut()?;
+    }
+    Some(current)
+}
+
+/// Converts a semantic `toml::Value` (from the `toml` crate) into a
+/// `toml_edit::Value` (from the `toml_edit` crate) for insertion into an
+/// edited document -- the two crates have no conversion between their
+/// value types, since one is plain-serde-backed and the other carries
+/// formatting. Returns `None` for `Datetime` (a dependency-table value
+/// is never realistically a datetime; falling through to a real conflict
+/// is safer than guessing at a conversion never exercised in practice).
+fn toml_value_to_edit(value: &toml::Value) -> Option<toml_edit::Value> {
+    match value {
+        toml::Value::String(s) => Some(toml_edit::Value::from(s.as_str())),
+        toml::Value::Integer(i) => Some(toml_edit::Value::from(*i)),
+        toml::Value::Float(f) => Some(toml_edit::Value::from(*f)),
+        toml::Value::Boolean(b) => Some(toml_edit::Value::from(*b)),
+        toml::Value::Datetime(_) => None,
+        toml::Value::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                array.push(toml_value_to_edit(item)?);
+            }
+            Some(toml_edit::Value::Array(array))
+        }
+        toml::Value::Table(table) => {
+            let mut inline = toml_edit::InlineTable::new();
+            for (k, v) in table {
+                inline.insert(k, toml_value_to_edit(v)?);
+            }
+            Some(toml_edit::Value::InlineTable(inline))
+        }
+    }
+}
+
 /// Plain line-union merge for a `--append-only`-matched file -- see
 /// DESIGN.md ("pact-vcs > Semantic auto-resolution"). Configured per call
 /// with the glob patterns from `merge-all --append-only`, since (unlike
@@ -421,8 +614,35 @@ fn binding_names(rest: &str) -> Vec<String> {
 pub(crate) fn resolvers(union_globs: &[String]) -> Vec<Box<dyn SemanticResolver>> {
     vec![
         Box::new(PackageJsonResolver),
+        Box::new(cargo_toml_resolver()),
+        Box::new(pyproject_toml_resolver()),
         Box::new(UnionResolver { globs: union_globs.to_vec() }),
     ]
+}
+
+fn cargo_toml_resolver() -> TomlManifestResolver {
+    TomlManifestResolver {
+        file_name: "Cargo.toml",
+        dependency_paths: &[&["dependencies"], &["dev-dependencies"], &["build-dependencies"]],
+    }
+}
+
+/// Poetry's dependency tables only -- see DESIGN.md ("pact-vcs > TOML
+/// manifest structural merge (issue #272)") for why PEP 621's
+/// `[project.dependencies]` (a flat array of version-spec strings, not a
+/// name-keyed table) is deliberately out of scope for this resolver: it
+/// isn't the same shape `PackageJsonResolver`/`TomlManifestResolver`
+/// already handle, it's a different merge problem (array-union keyed by
+/// the package name inside each string).
+fn pyproject_toml_resolver() -> TomlManifestResolver {
+    TomlManifestResolver {
+        file_name: "pyproject.toml",
+        dependency_paths: &[
+            &["tool", "poetry", "dependencies"],
+            &["tool", "poetry", "dev-dependencies"],
+            &["tool", "poetry", "group", "dev", "dependencies"],
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -636,6 +856,104 @@ mod tests {
             theirs: ("{\"name\":\"x\",\"dependencies\":{\"a\":\"3.0.0\"}}".to_string(), false),
         };
         assert!(PackageJsonResolver.resolve(&stages).unwrap().is_none());
+    }
+
+    #[test]
+    fn cargo_toml_resolver_can_handle_matches_only_the_exact_filename() {
+        let resolver = cargo_toml_resolver();
+        assert!(resolver.can_handle("Cargo.toml"));
+        assert!(resolver.can_handle("crates/pact-vcs/Cargo.toml"));
+        assert!(!resolver.can_handle("Cargo.lock"));
+    }
+
+    #[test]
+    fn cargo_toml_resolver_merges_non_conflicting_dependency_additions_and_preserves_comments() {
+        let stages = ConflictStages {
+            path: "Cargo.toml".to_string(),
+            base: Some((
+                "[package]\nname = \"x\"\n\n[dependencies]\n# pinned, see issue #1\nserde = \"1\"\n".to_string(),
+                false,
+            )),
+            ours: (
+                "[package]\nname = \"x\"\n\n[dependencies]\n# pinned, see issue #1\nserde = \"1\"\nanyhow = \"1\"\n"
+                    .to_string(),
+                false,
+            ),
+            theirs: (
+                "[package]\nname = \"x\"\n\n[dependencies]\n# pinned, see issue #1\nserde = \"1\"\nuuid = \"1\"\n"
+                    .to_string(),
+                false,
+            ),
+        };
+        let resolved = cargo_toml_resolver().resolve(&stages).unwrap().unwrap();
+        assert!(resolved.content.contains("anyhow = \"1\""), "got: {}", resolved.content);
+        assert!(resolved.content.contains("uuid = \"1\""), "got: {}", resolved.content);
+        assert!(
+            resolved.content.contains("# pinned, see issue #1"),
+            "expected the unrelated comment to survive the merge untouched, got: {}",
+            resolved.content
+        );
+    }
+
+    #[test]
+    fn cargo_toml_resolver_gives_up_when_both_sides_change_the_same_dependency() {
+        let stages = ConflictStages {
+            path: "Cargo.toml".to_string(),
+            base: Some(("[dependencies]\nserde = \"1\"\n".to_string(), false)),
+            ours: ("[dependencies]\nserde = \"2\"\n".to_string(), false),
+            theirs: ("[dependencies]\nserde = \"3\"\n".to_string(), false),
+        };
+        assert!(cargo_toml_resolver().resolve(&stages).unwrap().is_none());
+    }
+
+    #[test]
+    fn cargo_toml_resolver_gives_up_when_something_outside_dependencies_also_changed() {
+        let stages = ConflictStages {
+            path: "Cargo.toml".to_string(),
+            base: Some(("[package]\nversion = \"0.1.0\"\n\n[dependencies]\n".to_string(), false)),
+            ours: ("[package]\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n".to_string(), false),
+            theirs: ("[package]\nversion = \"0.2.0\"\n\n[dependencies]\n".to_string(), false),
+        };
+        assert!(
+            cargo_toml_resolver().resolve(&stages).unwrap().is_none(),
+            "a real conflict outside the dependency tables must not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn cargo_toml_resolver_handles_an_inline_table_dependency_value() {
+        let stages = ConflictStages {
+            path: "Cargo.toml".to_string(),
+            base: Some(("[dependencies]\n".to_string(), false)),
+            ours: ("[dependencies]\nserde = { version = \"1\", features = [\"derive\"] }\n".to_string(), false),
+            theirs: ("[dependencies]\nuuid = { version = \"1\", features = [\"v4\"] }\n".to_string(), false),
+        };
+        let resolved = cargo_toml_resolver().resolve(&stages).unwrap().unwrap();
+        assert!(resolved.content.contains("features"), "got: {}", resolved.content);
+        assert!(resolved.content.contains("uuid"), "got: {}", resolved.content);
+    }
+
+    #[test]
+    fn pyproject_toml_resolver_merges_non_conflicting_poetry_dependency_additions() {
+        let stages = ConflictStages {
+            path: "pyproject.toml".to_string(),
+            base: Some(("[tool.poetry.dependencies]\npython = \"^3.11\"\n".to_string(), false)),
+            ours: (
+                "[tool.poetry.dependencies]\npython = \"^3.11\"\nrequests = \"^2.0\"\n".to_string(),
+                false,
+            ),
+            theirs: ("[tool.poetry.dependencies]\npython = \"^3.11\"\nclick = \"^8.0\"\n".to_string(), false),
+        };
+        let resolved = pyproject_toml_resolver().resolve(&stages).unwrap().unwrap();
+        assert!(resolved.content.contains("requests"), "got: {}", resolved.content);
+        assert!(resolved.content.contains("click"), "got: {}", resolved.content);
+    }
+
+    #[test]
+    fn pyproject_toml_resolver_can_handle_matches_only_the_exact_filename() {
+        let resolver = pyproject_toml_resolver();
+        assert!(resolver.can_handle("pyproject.toml"));
+        assert!(!resolver.can_handle("poetry.lock"));
     }
 
     #[test]
