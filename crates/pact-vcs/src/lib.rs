@@ -1687,10 +1687,29 @@ fn workspace_id(task: &str, name: Option<&str>) -> String {
         return slugify(name);
     }
     let suffix = short_id();
-    match slugify(task) {
+    match slugify(leading_phrase(task)) {
         slug if slug.is_empty() => suffix,
         slug => format!("{slug}-{suffix}"),
     }
+}
+
+/// The leading clause/sentence of `task` -- issue #271: a real task
+/// prompt often carries a multi-sentence preamble ("You are in an
+/// environment where...") ahead of the actual instruction, and a blind
+/// `MAX_SLUG_LEN` character cut lands mid-clause regardless of where a
+/// sentence boundary actually is (`cluster-next-deps-you-are-in-an-...`,
+/// a real reported example). Stopping at the first sentence produces a
+/// slug that's at least a complete thought, even when it's still not the
+/// most important one. Falls back to the whole text when no sentence
+/// boundary is found within it, unchanged from before this issue.
+///
+/// A known, accepted limitation: a `.` inside an abbreviation or a
+/// version-like token (`Next.js`, `v1.2`) reads as a sentence boundary
+/// too -- no attempt at real sentence detection, this is the same
+/// "conservative, not exhaustive" tradeoff `slugify` itself already makes.
+fn leading_phrase(text: &str) -> &str {
+    let end = text.find(['.', '!', '?', '\n']).unwrap_or(text.len());
+    text[..end].trim()
 }
 
 /// Lowercase, hyphenated, ASCII-alphanumeric-only, capped at
@@ -1920,6 +1939,36 @@ mod tests {
         let a = workspace_id("task text", Some("stable-name"));
         let b = workspace_id("task text", Some("stable-name"));
         assert_eq!(a, b, "a named workspace's id must be identical every time, not just similar");
+    }
+
+    #[test]
+    fn leading_phrase_stops_at_the_first_sentence_boundary() {
+        assert_eq!(leading_phrase("Fix the login bug. Then update the changelog."), "Fix the login bug");
+        assert_eq!(leading_phrase("Add pagination to users? Sure, here's how."), "Add pagination to users");
+        assert_eq!(leading_phrase("Ship the release!\nDon't forget the tag."), "Ship the release");
+    }
+
+    #[test]
+    fn leading_phrase_falls_back_to_the_whole_text_with_no_boundary() {
+        assert_eq!(leading_phrase("add pagination to the users endpoint"), "add pagination to the users endpoint");
+    }
+
+    #[test]
+    fn workspace_id_default_slug_uses_only_the_leading_sentence() {
+        // Real reported shape: a multi-sentence preamble ahead of the
+        // actual instruction used to slice into the middle of an
+        // unrelated later clause (`cluster-next-deps-you-are-in-an-...`,
+        // issue #271) instead of stopping at a sentence boundary.
+        let id = workspace_id(
+            "Fix the auth bug. You are working in a shared monorepo with several teams and many independently \
+             degrading services.",
+            None,
+        );
+        assert!(id.starts_with("fix-the-auth-bug-"), "expected the slug to stop at the first sentence, got: {id}");
+        assert!(
+            !id.contains("shared-monorepo"),
+            "expected the second sentence's preamble to be excluded from the slug, got: {id}"
+        );
     }
 
     #[test]
