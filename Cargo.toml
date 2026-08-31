@@ -36,6 +36,7 @@ globset = "0.4"
 dirs = "5"
 schemars = "1"
 toml = "0.8"
+toml_edit = "0.22"
 
 pact-vcs = { path = "crates/pact-vcs" }
 pact-deps = { path = "crates/pact-deps" }

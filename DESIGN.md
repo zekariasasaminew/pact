@@ -693,6 +693,65 @@ if that stage doesn't exist for this path (e.g. the file was added fresh
 on only one side) is treated as "don't understand this shape well enough
 to auto-resolve," not an error.
 
+### TOML manifest structural merge (issue #272)
+
+Two real outside reports independently proved `PackageJsonResolver`'s
+pattern generalizes -- four real Copilot agents editing the same
+`package.json` in disjoint regions merged correctly and automatically,
+13/13 expected changes, zero conflicts -- and asked for the same
+treatment on other manifest formats. Scoped down (a real fork, resolved
+with the user rather than picked unilaterally) to the two closest to
+`package.json`'s own shape: `Cargo.toml`'s `[dependencies]`/
+`[dev-dependencies]`/`[build-dependencies]`, and Poetry's
+`[tool.poetry.dependencies]`/`[tool.poetry.dev-dependencies]`/
+`[tool.poetry.group.dev.dependencies]` in `pyproject.toml`. PEP 621's
+`[project.dependencies]` (a flat array of version-spec strings like
+`"requests>=2.0"`, not a name-keyed table) is deliberately out of scope
+here -- it isn't the same shape, it's a different merge problem
+(array-union keyed by the package name embedded in each string), left
+for a future issue if it comes up.
+
+**Why `toml_edit`, not the plain `toml` crate, for the write.**
+`PackageJsonResolver` accepts a whole-document reserialize on every
+resolved file -- reasonable for JSON, which has no comments to lose.
+TOML's comment culture is real (`# pinned, see issue #1234` next to a
+dependency line is completely normal in a real `Cargo.toml`), so
+reserializing the whole document through the plain `toml` crate would
+silently delete every comment and renormalize formatting on every merge
+-- a much worse regression than anything `PackageJsonResolver` accepts.
+`toml_edit::DocumentMut` is parsed from "ours" and only the specific
+table entries that actually changed are written into it; everything
+else (comments, unrelated keys, unrelated tables) survives byte-for-byte.
+Verified directly, not assumed: a real integration test
+(`merge_all_auto_resolves_cargo_toml_dependency_conflict`) plants a
+comment next to an untouched dependency and asserts it's still there in
+the merged output after a real 3-way git conflict, not just a direct
+`resolve()` call.
+
+**Why two TOML crates in the same resolver.** `toml_edit::Value`
+deliberately doesn't implement `PartialEq` (checked directly against its
+own source -- `Value`/`Item` derive only `Debug`/`Clone`), since equality
+there would have to decide whether formatting/decor counts, and the crate
+doesn't make that call for you. The "everything outside the dependency
+tables must be identical" safety gate (same contract
+`PackageJsonResolver` already has) and the per-name 3-way resolution both
+need real semantic equality, so both are done against the plain `toml`
+crate's `toml::Value` (parsed separately, purely for reading/comparing --
+never written back). `toml_value_to_edit` bridges a resolved
+`toml::Value` into the `toml_edit` document being edited; returns `None`
+(falls through to a real conflict) for `Datetime`, since a dependency
+table value is never realistically a datetime and guessing at an
+unexercised conversion is worse than refusing.
+
+`TomlManifestResolver` takes a dotted path per dependency table
+(`&["dependencies"]` for Cargo.toml's top-level table, `&["tool",
+"poetry", "dependencies"]` for Poetry's nested one) instead of
+`PackageJsonResolver`'s flat `PACKAGE_JSON_DEP_KEYS` list, since Poetry's
+tables aren't top-level. `toml_edit_path_table_mut` creates any missing
+intermediate table along that path rather than failing -- a workspace
+that never had a `[dependencies]` table until this merge introduces one
+is a legitimate starting point, not a malformed file.
+
 ### Sentinel-marker union-merge insertion (issue #87)
 
 Plain append-at-end (above) is wrong for a barrel file whose
