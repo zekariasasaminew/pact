@@ -64,7 +64,7 @@ fn a_clean_merge_is_skipped_when_the_test_command_fails() {
     let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, Some(fails_if_b_txt_exists()), false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, Some(fails_if_b_txt_exists()), false).unwrap();
 
     assert!(report.merged.is_empty(), "expected the workspace to be rejected by the failing test gate");
     assert_eq!(report.skipped.len(), 1);
@@ -114,7 +114,7 @@ fn a_gate_that_fails_on_the_unmodified_base_aborts_instead_of_skipping_every_wor
         if cfg!(windows) { "if exist setup_marker.txt (exit 0) else (exit 1)" } else { "test -f setup_marker.txt" };
 
     let err = manager
-        .merge_all(None, None, &[], None, Some(requires_missing_marker), false)
+        .merge_all(None, None, &[], None, None, Some(requires_missing_marker), false)
         .expect_err("a gate that fails on the unmodified base must abort merge_all, not return Ok with skips");
 
     let message = format!("{err:#}");
@@ -138,7 +138,7 @@ fn a_clean_merge_is_accepted_when_the_test_command_passes() {
     let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, Some(always_pass_cmd()), false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, Some(always_pass_cmd()), false).unwrap();
 
     assert_eq!(report.merged.len(), 1);
     assert_eq!(report.merged[0].id, a.id);
@@ -159,13 +159,69 @@ fn a_failed_gate_does_not_block_a_later_workspace_in_the_same_batch() {
 
     // fails_if_b_txt_exists fails for a's merge (introduces b.txt), passes
     // for b's (introduces c.txt only).
-    let report = manager.merge_all(None, None, &[], None, Some(fails_if_b_txt_exists()), false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, Some(fails_if_b_txt_exists()), false).unwrap();
 
     let merged_ids: Vec<&str> = report.merged.iter().map(|w| w.id.as_str()).collect();
     assert!(merged_ids.contains(&b.id.as_str()), "expected b's merge to pass the gate");
     assert!(!merged_ids.contains(&a.id.as_str()), "expected a's merge to fail the gate");
     assert_eq!(report.skipped.len(), 1);
     assert_eq!(report.skipped[0].id, a.id);
+
+    cleanup(&repo);
+}
+
+fn fails_unless_marker_file_exists() -> &'static str {
+    if cfg!(windows) { "if exist prepped.marker (exit 0) else (exit 1)" } else { "[ -f prepped.marker ]" }
+}
+
+/// Issue #269: a fresh integration worktree never got dependencies
+/// prepared, so `--require-passing-tests` was unusable on any project
+/// needing installed dependencies. Proves both the injection point (the
+/// hook runs in the integration worktree, not the repo root or the
+/// agent's own workspace) and the ordering (before the gate command, not
+/// after -- the gate here can only pass if the hook already ran).
+#[test]
+fn dependency_prep_hook_runs_in_the_integration_worktree_before_the_gate() {
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("add b.txt", None).unwrap();
+    std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
+
+    let seen_path = std::cell::RefCell::new(None);
+    let prep = |worktree_path: &Path| {
+        *seen_path.borrow_mut() = Some(worktree_path.to_path_buf());
+        std::fs::write(worktree_path.join("prepped.marker"), "").unwrap();
+    };
+
+    let report = manager
+        .merge_all(None, None, &[], None, Some(&prep), Some(fails_unless_marker_file_exists()), false)
+        .unwrap();
+
+    assert_eq!(report.merged.len(), 1, "expected the gate to pass once the prep hook's marker exists");
+    let seen = seen_path.borrow().clone().expect("dependency_prep hook should have been called");
+    assert_ne!(seen, repo, "the hook should run in the integration worktree, not the repo root");
+    assert_ne!(seen, a.path, "the hook should run in the integration worktree, not the agent's own workspace");
+
+    cleanup(&repo);
+}
+
+/// Dependency prep costs real time (a real `npm ci`, in production) --
+/// only worth paying for when the gate is actually going to run.
+#[test]
+fn dependency_prep_hook_is_not_invoked_when_the_gate_is_omitted() {
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+
+    let a = manager.create_workspace("add b.txt", None).unwrap();
+    std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
+
+    let called = std::cell::Cell::new(false);
+    let prep = |_: &Path| called.set(true);
+
+    let report = manager.merge_all(None, None, &[], None, Some(&prep), None, false).unwrap();
+    assert_eq!(report.merged.len(), 1);
+    assert!(!called.get(), "dependency prep shouldn't run when no gate command was requested");
 
     cleanup(&repo);
 }
@@ -178,7 +234,7 @@ fn require_passing_tests_is_a_no_op_when_omitted() {
     let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
     assert_eq!(report.merged.len(), 1, "expected unchanged behavior when the gate is omitted");
 
     cleanup(&repo);

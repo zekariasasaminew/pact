@@ -558,6 +558,33 @@ wiring dependency prep into `merge_all` before #233 lands risks
 reintroducing #233's own lock-contention stall directly into the merge
 path. Sequenced as its own follow-up once #233 ships.
 
+### Dependencies for the integration worktree (issue #269)
+
+The deferred follow-up above, landed once #233 shipped (the custom
+content store was deleted; dependency prep is now just `npm ci` against
+npm's own global cache, safe under real concurrent load). Two outside
+reports (a retest and a strategy review, both against `edge @ 85d4cc3`)
+independently confirmed the gap was still live: `--require-passing-tests`
+worked correctly on the diagnosis but was unusable on any real project,
+since the integration worktree it runs the gate in never got
+`node_modules` any more than it did before #232's fix.
+
+Same closure-injection shape `ArbiterResolver` already uses, for the same
+reason -- `pact-vcs` has no dependency on `pact-deps` or `pact-agents`,
+so it can't call `pact_deps::prepare` itself. `pact-vcs::merge_all` takes
+a new `dependency_prep: Option<&DependencyPrepHook<'_>>` parameter and
+calls it once, on `integration_path`, right after the worktree is
+created and before the base-commit preflight -- covering both the
+preflight and the per-workspace gate, since they run in the same
+worktree. `pact-core::merge_all` builds the real closure over
+`pact_deps::prepare`, warning (not failing) on a per-manager prep
+failure, same as `spawn_with_supervisor` already does for agent
+workspaces.
+
+Only invoked when `require_passing_tests` is actually given -- a `dry_run`
+or a plain merge with no gate never pays the cost, matching this
+codebase's existing `--no-deps` cost-avoidance stance.
+
 ### Semantic auto-resolution
 
 `merge_branch_into` tries a plain `git merge` first. On a real conflict, it
