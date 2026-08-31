@@ -752,6 +752,35 @@ intermediate table along that path rather than failing -- a workspace
 that never had a `[dependencies]` table until this merge introduces one
 is a legitimate starting point, not a malformed file.
 
+### N-agent-one-file benchmark as a regression test (issue #276)
+
+Issue #268's real benchmark (5 Copilot agents, 4 editing the same root
+`package.json` in disjoint regions, 1 editing a second manifest -- 13/13
+expected changes, 0 conflicts) existed only as a one-off manual
+verification in an issue comment, not something that runs again on the
+next change. `merge_all_correctly_merges_four_agents_disjoint_edits_to_one_package_json_plus_a_second_manifest`
+(`pact-vcs/tests/merge_all.rs`) reconstructs the same *shape*
+deterministically -- 5 simulated workspaces via direct
+`create_workspace` + file writes, no real agent CLI needed, since what's
+actually under test is `merge_all`'s own correctness, not how a
+workspace's changes got there.
+
+**Placed in the fast default suite, not the `#[ignore]`d slow-integration
+tier the issue suggested** (issue #240's tier exists for tests needing a
+real dependency install or real concurrency contention -- this needs
+neither, it's the same fast/deterministic shape as every other
+JSON-merge test in the file, just scaled from 2 workspaces to 5).
+Deliberately uses `PackageJsonResolver`'s 4 already-supported keys
+(`dependencies`/`devDependencies`/`peerDependencies`/
+`optionalDependencies`), not the real report's `overrides` key --
+`overrides` was never one of `PACKAGE_JSON_DEP_KEYS`, so building the
+scenario around it would either fall through to a real conflict or pass
+by accident via a clean plain-git merge, neither of which would actually
+prove the thing this test exists to prove. Asserts what the 2-workspace
+tests above can't: more than one workspace needing JSON-aware
+auto-resolution in the same batch, not just the "exactly one" case those
+already cover.
+
 ### Sentinel-marker union-merge insertion (issue #87)
 
 Plain append-at-end (above) is wrong for a barrel file whose
