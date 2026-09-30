@@ -1513,6 +1513,7 @@ mod tests {
             strategy: "npm-ci".to_string(),
             success,
             warnings: Vec::new(),
+            linked_paths: Vec::new(),
         }
     }
 
