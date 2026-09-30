@@ -849,6 +849,40 @@ fn lean_copilot_dry_run_previews_env_and_leaves_no_home_behind() {
     cleanup(&shim);
 }
 
+/// Issue #290: a relative `--repo` used to create the worktree *inside*
+/// the repository (git resolved the relative worktree path against its
+/// own cwd, the repo) while pact's metadata pointed at the sibling state
+/// directory, so dependency prep looked at nothing and the agent launch
+/// failed with an invalid working directory. The repo root is absolutized
+/// once at the CLI boundary now; this drives the real binary with a
+/// relative `--repo` from the repo's parent directory.
+#[test]
+fn relative_repo_path_creates_the_worktree_beside_the_repo_and_runs() {
+    let repo = init_repo("relative-repo");
+    let shim = shim_dir();
+    let parent = repo.parent().unwrap();
+    let relative = PathBuf::from(repo.file_name().unwrap());
+
+    let task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let spawn = Command::new(env!("CARGO_BIN_EXE_pact"))
+        .args(["--repo", relative.to_str().unwrap(), "spawn", &task, "--agent", "claude", "--name", "relative"])
+        .current_dir(parent)
+        .env("PATH", path_with_shim_first(&shim))
+        .output()
+        .unwrap();
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+
+    let beside = state_dir_for(&repo).join("workspaces").join("relative");
+    assert!(beside.join("hello.txt").exists(), "the worktree must be beside the repo, at {}", beside.display());
+    assert!(!repo.join(state_dir_for(&repo).file_name().unwrap()).exists(), "nothing may be created inside the repository");
+    let text = stdout(&spawn);
+    let path_line = text.lines().find(|l| l.trim_start().starts_with("path: ")).unwrap_or_else(|| panic!("no path line in:\n{text}"));
+    assert!(PathBuf::from(path_line.trim().trim_start_matches("path: ")).is_absolute(), "got: {path_line}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
