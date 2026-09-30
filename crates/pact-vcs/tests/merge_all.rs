@@ -240,6 +240,17 @@ fn merge_all_dry_run_touches_no_git_state() {
     assert!(report.merged.is_empty(), "dry run must not actually merge anything");
     assert_eq!(report.planned.len(), 1);
     assert_eq!(report.planned[0].id, a.id);
+    assert!(report.planned[0].would_auto_commit, "the preview must say the dirty workspace would be committed first");
+
+    // Issue #286: the auto-commit loop used to run before the dry-run
+    // check, so a "preview" committed every dirty workspace. The working
+    // tree must still be dirty and the branch must still sit on the base.
+    assert!(manager.is_dirty(&a.id).unwrap(), "dry run must not commit the workspace's changes");
+    let tip = String::from_utf8(
+        Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&a.path).output().unwrap().stdout,
+    )
+    .unwrap();
+    assert_eq!(tip.trim(), a.base_commit, "dry run must not move the workspace branch off its base commit");
 
     let branches_after = String::from_utf8(
         Command::new("git").args(["branch"]).current_dir(&repo).output().unwrap().stdout,

@@ -178,6 +178,12 @@ pub struct MergeReport {
 pub struct PlannedWorkspace {
     pub id: String,
     pub risk_score: usize,
+    /// The workspace had uncommitted changes at preview time, so a real
+    /// run would auto-commit them before merging (issue #286). Only a
+    /// dry run reports this; a real run has already committed by the
+    /// time it could.
+    #[serde(default)]
+    pub would_auto_commit: bool,
 }
 
 enum MergeOutcome {
@@ -771,7 +777,18 @@ impl WorkspaceManager {
 
         let mut skipped = Vec::new();
         let mut auto_commit_failed = std::collections::HashSet::new();
+        // A dry run must not change git state (issue #286: before this
+        // check, `--dry-run` still auto-committed every dirty workspace on
+        // its way to the preview). It records which workspaces *would* be
+        // committed instead, so the preview says so.
+        let mut would_auto_commit = std::collections::HashSet::new();
         for workspace in &selected {
+            if dry_run {
+                if self.is_dirty(&workspace.id).unwrap_or(false) {
+                    would_auto_commit.insert(workspace.id.clone());
+                }
+                continue;
+            }
             if let Err(err) = self.commit_all(&workspace.id) {
                 tracing::warn!(
                     "workspace {}: failed to auto-commit before merge, leaving it out: {err:#}",
@@ -879,7 +896,11 @@ impl WorkspaceManager {
                 conflicted: Vec::new(),
                 planned: sized
                     .into_iter()
-                    .map(|(risk_score, w)| PlannedWorkspace { id: w.id, risk_score })
+                    .map(|(risk_score, w)| PlannedWorkspace {
+                        would_auto_commit: would_auto_commit.contains(&w.id),
+                        id: w.id,
+                        risk_score,
+                    })
                     .collect(),
                 dry_run: true,
             });
