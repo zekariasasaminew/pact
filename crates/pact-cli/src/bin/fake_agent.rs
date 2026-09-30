@@ -39,6 +39,11 @@ struct Script {
     /// (issue #284's per-agent `COPILOT_HOME`).
     #[serde(default)]
     dump_env: Vec<String>,
+    /// A file created (with this process's pid) the moment the agent
+    /// starts and removed just before it exits, so a test can count how
+    /// many fake agents are alive at once (issue #285's concurrency cap).
+    #[serde(default)]
+    presence_file: Option<String>,
 }
 
 fn default_summary() -> String {
@@ -57,6 +62,7 @@ fn default_script() -> Script {
         success: true,
         exit_code: 0,
         dump_env: Vec::new(),
+        presence_file: None,
     }
 }
 
@@ -101,6 +107,9 @@ fn main() {
 
     let script = parse_script(&task);
     let copilot = impersonates_copilot();
+    if let Some(presence) = &script.presence_file {
+        let _ = std::fs::write(presence, std::process::id().to_string());
+    }
 
     if copilot {
         print_line(&serde_json::json!({
@@ -133,6 +142,10 @@ fn main() {
     for name in &script.dump_env {
         let value = std::env::var(name).unwrap_or_else(|_| "<unset>".to_string());
         let _ = std::fs::write(format!("env-{name}.txt"), value);
+    }
+
+    if let Some(presence) = &script.presence_file {
+        let _ = std::fs::remove_file(presence);
     }
 
     if copilot {
