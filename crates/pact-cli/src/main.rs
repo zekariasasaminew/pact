@@ -145,6 +145,15 @@ enum Command {
         #[arg(long)]
         no_deps: bool,
 
+        /// Launch the agent CLI exactly as pact did before issue #284:
+        /// with the user's full config (every user-level MCP server,
+        /// auto-update, the shared config home) instead of the lean
+        /// profile. The lean profile is the default because those
+        /// integrations dominate startup (measured: Copilot CLI 57 s and
+        /// 1.4 GB with them, 6 s and 0.3 GB without).
+        #[arg(long)]
+        no_lean: bool,
+
         /// Explicit workspace name -- drives the workspace id/branch
         /// directly (slugified, e.g. "Add Pagination" -> "add-pagination")
         /// instead of the default task-text-slug-plus-random-suffix
@@ -225,6 +234,11 @@ enum Command {
         /// touch dependencies at all (issue #233).
         #[arg(long)]
         no_deps: bool,
+
+        /// Same as `spawn --no-lean`, applied to every task in this batch
+        /// (issue #284).
+        #[arg(long)]
+        no_lean: bool,
 
         /// Explicit workspace name for the Nth --task, repeatable in the
         /// same order as --task -- same fix as `spawn --name` (issue
@@ -558,6 +572,7 @@ fn main() -> Result<()> {
             dry_run,
             deps,
             no_deps,
+            no_lean,
             name,
         } => {
             if let Some(n) = &name {
@@ -579,8 +594,14 @@ fn main() -> Result<()> {
             });
 
             if dry_run {
-                let preview =
-                    orchestrator.spawn_preview(kind, &task, name.as_deref(), safety.as_deref(), coord_override.as_ref())?;
+                let preview = orchestrator.spawn_preview(
+                    kind,
+                    &task,
+                    name.as_deref(),
+                    safety.as_deref(),
+                    coord_override.as_ref(),
+                    !no_lean,
+                )?;
                 print_spawn_preview(&preview, deps);
                 return Ok(());
             }
@@ -602,6 +623,7 @@ fn main() -> Result<()> {
                 safety_override: safety.as_deref(),
                 coord_override: coord_override.as_ref(),
                 deps,
+                lean: !no_lean,
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -625,6 +647,7 @@ fn main() -> Result<()> {
             estimate_cost,
             deps,
             no_deps,
+            no_lean,
             names,
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
@@ -723,6 +746,7 @@ fn main() -> Result<()> {
                         task.name.as_deref(),
                         safety.as_deref(),
                         coord_override.as_ref(),
+                        !no_lean,
                     )?;
                     println!("task #{index} ({}):", agent_label(task.agent));
                     print_spawn_preview(&preview, deps);
@@ -738,6 +762,7 @@ fn main() -> Result<()> {
                 safety_override: safety.as_deref(),
                 coord_override: coord_override.as_ref(),
                 deps,
+                lean: !no_lean,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -1949,6 +1974,9 @@ fn print_spawn_preview(preview: &pact_core::SpawnPreview, deps: pact_core::DepsM
         println!("  deps: {deps}");
     } else {
         println!("  deps: {deps} (resolves to {effective})");
+    }
+    for (key, value) in &preview.env {
+        println!("  env: {key}={value}");
     }
     println!("  command: {} {}", preview.program, preview.args.join(" "));
 }

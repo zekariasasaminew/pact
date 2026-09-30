@@ -20,7 +20,9 @@ mod supervisor;
 #[cfg(windows)]
 mod windows_shim;
 
-pub use adapter::{adapter, resolve_safety_profile, AgentAdapter, AgentKind, CoordConfig, SafetyProfile};
+pub use adapter::{
+    adapter, resolve_safety_profile, AgentAdapter, AgentKind, CoordConfig, LaunchRequest, LaunchSpec, SafetyProfile,
+};
 pub use event::AgentEvent;
 pub use process::{run_and_stream, RunOutcome};
 pub use supervisor::Supervisor;
