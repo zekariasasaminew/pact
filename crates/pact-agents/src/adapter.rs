@@ -20,6 +20,41 @@ pub struct CoordConfig {
     pub config_path: std::path::PathBuf,
 }
 
+/// Everything an adapter can draw on to build one headless launch --
+/// issue #284. `build_command`'s four positional parameters cover what
+/// every adapter needs; the rest here (a per-workspace scratch home, a
+/// fixed session id, the lean switch) only matters to adapters that
+/// relocate their CLI's config or pin a resumable session, so they arrive
+/// as one struct rather than widening every adapter's signature.
+pub struct LaunchRequest<'a> {
+    pub task: &'a str,
+    pub safety_override: Option<&'a str>,
+    pub coord: Option<&'a CoordConfig>,
+    pub workspace_path: &'a Path,
+    /// A pact-owned, per-workspace directory (`<state>/homes/<id>`) an
+    /// adapter may use as its CLI's relocated config home. Not created
+    /// unless an adapter needs it.
+    pub agent_home: &'a Path,
+    /// The session id pact assigns and persists so a later `resume` can
+    /// find this run's conversation.
+    pub session_id: &'a str,
+    /// Boot with the fewest integrations the CLI allows (no user-level MCP
+    /// servers, no auto-update, an isolated config home where the CLI
+    /// supports one) -- measured 57 s / 1.4 GB -> 6 s / 0.3 GB for Copilot
+    /// CLI on the same trivial prompt. `false` reproduces the pre-#284
+    /// launch exactly.
+    pub lean: bool,
+}
+
+/// One concrete headless launch: what to run, with which arguments, and
+/// which environment variables to set on top of pact's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
 /// One agent CLI's integration: how to launch it headlessly and how to
 /// make sense of what it prints. `parse_line` returns a `Vec` rather than
 /// a single event because not every CLI's schema is one-event-per-line
@@ -54,6 +89,17 @@ pub trait AgentAdapter {
         coord: Option<&CoordConfig>,
         workspace_path: &Path,
     ) -> (String, Vec<String>);
+
+    /// Builds the full launch for `request` -- issue #284. The default is
+    /// exactly `build_command` with no extra environment, so an adapter
+    /// that has nothing lean-specific to do needs no override; one that
+    /// does (Copilot CLI's relocated `COPILOT_HOME`) overrides this and
+    /// leaves `build_command` as its non-lean path.
+    fn build_launch(&self, request: &LaunchRequest<'_>) -> LaunchSpec {
+        let (program, args) =
+            self.build_command(request.task, request.safety_override, request.coord, request.workspace_path);
+        LaunchSpec { program, args, env: Vec::new() }
+    }
 
     /// Parses one raw output line into zero or more normalized events.
     fn parse_line(&self, line: &str) -> Vec<AgentEvent>;

@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
+use pact_agents::{AgentEvent, AgentKind, CoordConfig, LaunchRequest, RunOutcome, Supervisor};
 pub use pact_deps::DepsMode;
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
 use anyhow::{bail, Context, Result};
+use uuid::Uuid;
 
 pub use pact_vcs::{
     agent_process_alive, ArbiterResolver, ConflictedWorkspace, MergedWorkspace, MergeReport, ResolveOutcome,
@@ -39,6 +40,16 @@ pub struct RunMetadata {
     pub agent: String,
     pub program: String,
     pub args: Vec<String>,
+    /// Environment variables pact set on the agent process on top of its
+    /// own (issue #284: a relocated `COPILOT_HOME`, say). Empty before
+    /// lean launch profiles existed, hence the default.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// The session id pact assigned to this run (`--session-id`), so a
+    /// follow-up can resume the same conversation -- issue #284. `None`
+    /// for runs recorded before this field existed.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub cwd: PathBuf,
     pub started_at: u64,
     pub ended_at: u64,
@@ -102,6 +113,9 @@ pub struct SpawnPreview {
     pub shareable_node_modules: bool,
     pub program: String,
     pub args: Vec<String>,
+    /// Environment variables the launch would set on top of pact's own
+    /// (issue #284).
+    pub env: Vec<(String, String)>,
 }
 
 impl SpawnPreview {
@@ -132,7 +146,6 @@ pub struct CoordServerOverride {
 /// struct rather than 3+ positional parameters on those functions (clippy's
 /// `too_many_arguments`, and every call site was already passing these as
 /// one logical group).
-#[derive(Default)]
 pub struct SpawnOptions<'a> {
     pub safety_override: Option<&'a str>,
     pub coord_override: Option<&'a CoordServerOverride>,
@@ -141,6 +154,21 @@ pub struct SpawnOptions<'a> {
     /// (issue #233's `--no-deps`): a task that never touches dependencies
     /// shouldn't pay prep's cost for zero benefit.
     pub deps: DepsMode,
+    /// Launch each agent CLI with the fewest integrations it allows -- see
+    /// `pact_agents::LaunchRequest::lean` (issue #284). On by default;
+    /// `--no-lean` reproduces the pre-#284 launch exactly.
+    pub lean: bool,
+}
+
+impl Default for SpawnOptions<'_> {
+    fn default() -> Self {
+        Self {
+            safety_override: None,
+            coord_override: None,
+            deps: DepsMode::default(),
+            lean: true,
+        }
+    }
 }
 
 /// The outcome of one task within a `spawn_many` batch. `result` is `Err`
@@ -388,6 +416,13 @@ impl Orchestrator {
         })
     }
 
+    /// Where an adapter may put a relocated CLI config home for this
+    /// workspace (`<state>/homes/<id>`) -- issue #284. Only created by an
+    /// adapter that actually uses it.
+    fn agent_home_path(&self, workspace_id: &str) -> PathBuf {
+        self.workspaces.state_dir().join("homes").join(workspace_id)
+    }
+
     /// Builds the (adapter-agnostic) description of the coordination
     /// server for the agent CLI to launch. Defaults to `pact mcp-serve`;
     /// `coord_override`, if given, points at an alternative command/args
@@ -533,6 +568,7 @@ impl Orchestrator {
         name: Option<&str>,
         safety_override: Option<&str>,
         coord_override: Option<&CoordServerOverride>,
+        lean: bool,
     ) -> Result<SpawnPreview> {
         let (workspace_id, branch, path) = self.workspaces.preview_workspace_location(task, name);
         let package_managers = pact_deps::detect(&self.repo_root);
@@ -548,6 +584,7 @@ impl Orchestrator {
             agent_pid: None,
             base_commit: String::new(),
             linked_paths: Vec::new(),
+            session_id: None,
         };
         let coord_name = adapter.coord_server_name();
         let coord = self
@@ -555,10 +592,23 @@ impl Orchestrator {
             .ok();
 
         let safety = pact_agents::resolve_safety_profile(agent, safety_override);
-        let (program, args) = adapter.build_command(task, safety.as_deref(), coord.as_ref(), &path);
+        // A preview must leave no trace: the MCP config file
+        // `build_command` writes, and any relocated config home a lean
+        // adapter materializes (issue #284), are both removed again here.
+        let agent_home = self.agent_home_path(&workspace_id);
+        let launch = adapter.build_launch(&LaunchRequest {
+            task,
+            safety_override: safety.as_deref(),
+            coord: coord.as_ref(),
+            workspace_path: &path,
+            agent_home: &agent_home,
+            session_id: "<session-id assigned at spawn>",
+            lean,
+        });
         if let Some(coord) = &coord {
             let _ = std::fs::remove_file(&coord.config_path);
         }
+        let _ = std::fs::remove_dir_all(&agent_home);
 
         Ok(SpawnPreview {
             workspace_id,
@@ -566,8 +616,9 @@ impl Orchestrator {
             path,
             package_managers,
             shareable_node_modules,
-            program,
-            args,
+            program: launch.program,
+            args: launch.args,
+            env: launch.env,
         })
     }
 
@@ -637,8 +688,20 @@ impl Orchestrator {
         };
 
         let safety = pact_agents::resolve_safety_profile(agent, options.safety_override);
-        let (program, args) =
-            adapter.build_command(task, safety.as_deref(), coord.as_ref(), &workspace.path);
+        let session_id = Uuid::new_v4().to_string();
+        if let Err(err) = self.workspaces.set_session_id(&workspace.id, &session_id) {
+            tracing::warn!("failed to record session id for workspace {}: {err:#}", workspace.id);
+        }
+        let agent_home = self.agent_home_path(&workspace.id);
+        let launch = adapter.build_launch(&LaunchRequest {
+            task,
+            safety_override: safety.as_deref(),
+            coord: coord.as_ref(),
+            workspace_path: &workspace.path,
+            agent_home: &agent_home,
+            session_id: &session_id,
+            lean: options.lean,
+        });
         let log_path = self
             .workspaces
             .state_dir()
@@ -661,8 +724,9 @@ impl Orchestrator {
         on_event(&AgentEvent::Phase("running agent".to_string()));
         let run_result = pact_agents::run_and_stream(
             supervisor,
-            &program,
-            &args,
+            &launch.program,
+            &launch.args,
+            &launch.env,
             &workspace.path,
             &log_path,
             |line| adapter.parse_line(line),
@@ -699,8 +763,10 @@ impl Orchestrator {
         let run_metadata = RunMetadata {
             workspace_id: workspace.id.clone(),
             agent: agent_kind_name(agent).to_string(),
-            program: program.clone(),
-            args: args.clone(),
+            program: launch.program.clone(),
+            args: launch.args.clone(),
+            env: launch.env.clone(),
+            session_id: Some(session_id.clone()),
             cwd: workspace.path.clone(),
             started_at,
             ended_at,
@@ -1331,6 +1397,7 @@ fn attempt_arbiter_resolution_inner(
         &supervisor,
         &program,
         &args,
+        &[],
         worktree_path,
         log_path,
         |line| adapter.parse_line(line),
@@ -1571,6 +1638,7 @@ mod tests {
             agent_pid: None,
             base_commit: "deadbeef".to_string(),
             linked_paths: Vec::new(),
+            session_id: None,
         }
     }
 
@@ -2013,6 +2081,8 @@ mod tests {
             agent: "claude".to_string(),
             program: "claude".to_string(),
             args: vec!["-p".to_string(), "do the thing".to_string()],
+            env: vec![("COPILOT_HOME".to_string(), "/tmp/state/homes/ws-1".to_string())],
+            session_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
             cwd: PathBuf::from("/tmp/ws-1"),
             started_at: 100,
             ended_at: 142,
@@ -2029,11 +2099,21 @@ mod tests {
         assert_eq!(round_tripped.workspace_id, "ws-1");
         assert_eq!(round_tripped.agent, "claude");
         assert_eq!(round_tripped.args, vec!["-p", "do the thing"]);
+        assert_eq!(round_tripped.env, metadata.env);
+        assert_eq!(round_tripped.session_id, metadata.session_id);
         assert_eq!(round_tripped.started_at, 100);
         assert_eq!(round_tripped.ended_at, 142);
         assert!(round_tripped.exit_success);
         assert_eq!(round_tripped.coord_status.as_deref(), Some("connected"));
         assert!(round_tripped.files_touched);
+    }
+
+    #[test]
+    fn run_metadata_written_before_env_and_session_id_existed_still_deserializes() {
+        let legacy = r#"{"workspace_id":"ws","agent":"claude","program":"claude","args":[],"cwd":"/x","started_at":1,"ended_at":2,"exit_success":true,"summary":"s","coord_status":null,"files_touched":false,"log_path":"/x.jsonl"}"#;
+        let metadata: RunMetadata = serde_json::from_str(legacy).unwrap();
+        assert!(metadata.env.is_empty());
+        assert_eq!(metadata.session_id, None);
     }
 
     #[test]
@@ -2045,6 +2125,8 @@ mod tests {
             agent: "copilot".to_string(),
             program: "copilot".to_string(),
             args: vec![],
+            env: Vec::new(),
+            session_id: None,
             cwd: PathBuf::from("/tmp/ws-2"),
             started_at: 0,
             ended_at: 5,

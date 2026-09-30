@@ -93,6 +93,7 @@ pub fn run_and_stream(
     supervisor: &Supervisor,
     program: &str,
     args: &[String],
+    env: &[(String, String)],
     cwd: &Path,
     log_path: &Path,
     parse_line: impl Fn(&str) -> Vec<AgentEvent>,
@@ -122,6 +123,7 @@ pub fn run_and_stream(
     // an empty task despite a real, non-empty `-p` value (issue #184).
     command
         .args(args)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

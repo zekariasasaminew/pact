@@ -115,6 +115,7 @@ fn run_and_stream_returns_promptly_despite_a_windows_grandchild_that_inherited_t
         &supervisor,
         program,
         &[],
+        &[],
         &std::env::temp_dir(),
         &log_path,
         |_line| Vec::new(),

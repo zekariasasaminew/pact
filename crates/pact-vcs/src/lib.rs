@@ -62,6 +62,11 @@ pub struct Workspace {
     /// explicit list in addition to its defensive top-level scan.
     #[serde(default)]
     pub linked_paths: Vec<String>,
+    /// The agent CLI session id pact assigned at spawn (`--session-id`),
+    /// recorded before the run starts so a later resume can find the
+    /// conversation even if pact itself died mid-run -- issue #284.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// What an agent has actually done in one workspace, split into the
@@ -411,6 +416,7 @@ impl WorkspaceManager {
             agent_pid: None,
             base_commit,
             linked_paths: Vec::new(),
+            session_id: None,
         };
 
         std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&workspace)?)
@@ -437,6 +443,16 @@ impl WorkspaceManager {
     pub fn set_linked_paths(&self, id: &str, linked_paths: Vec<String>) -> Result<()> {
         let mut workspace = self.get_workspace(id)?;
         workspace.linked_paths = linked_paths;
+        std::fs::write(self.meta_path(id), serde_json::to_vec_pretty(&workspace)?)
+            .context("writing workspace metadata")?;
+        Ok(())
+    }
+
+    /// Records the agent CLI session id assigned to this workspace's run
+    /// (issue #284). Best-effort like `set_agent_pid`.
+    pub fn set_session_id(&self, id: &str, session_id: &str) -> Result<()> {
+        let mut workspace = self.get_workspace(id)?;
+        workspace.session_id = Some(session_id.to_string());
         std::fs::write(self.meta_path(id), serde_json::to_vec_pretty(&workspace)?)
             .context("writing workspace metadata")?;
         Ok(())
@@ -2164,6 +2180,7 @@ mod tests {
         let legacy = r#"{"id":"w","path":"/x","branch":"pact/w","task":"t","created_at":1,"agent_pid":null,"base_commit":"abc"}"#;
         let workspace: Workspace = serde_json::from_str(legacy).unwrap();
         assert!(workspace.linked_paths.is_empty());
+        assert_eq!(workspace.session_id, None);
     }
 
     #[test]

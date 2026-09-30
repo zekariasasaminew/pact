@@ -33,6 +33,12 @@ struct Script {
     success: bool,
     #[serde(default)]
     exit_code: i32,
+    /// Environment variable names whose values (or `<unset>`) get written
+    /// to `env-<NAME>.txt` in the working directory -- lets an end-to-end
+    /// test prove what environment the launched agent actually saw
+    /// (issue #284's per-agent `COPILOT_HOME`).
+    #[serde(default)]
+    dump_env: Vec<String>,
 }
 
 fn default_summary() -> String {
@@ -50,7 +56,19 @@ fn default_script() -> Script {
         summary: default_summary(),
         success: true,
         exit_code: 0,
+        dump_env: Vec::new(),
     }
+}
+
+/// Which real CLI this binary was copied onto `PATH` as -- decides which
+/// output schema to print, since `pact` parses each adapter's real
+/// format. Claude Code's `stream-json` unless the executable is named
+/// `copilot`.
+fn impersonates_copilot() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().eq_ignore_ascii_case("copilot")))
+        .unwrap_or(false)
 }
 
 /// The `-p` value is the whole script for a direct `pact spawn`/`spawn-many`
@@ -82,13 +100,21 @@ fn main() {
         .unwrap_or_default();
 
     let script = parse_script(&task);
+    let copilot = impersonates_copilot();
 
-    print_line(&serde_json::json!({
-        "type": "system",
-        "subtype": "init",
-        "session_id": "fake-agent-session",
-        "mcp_servers": [{"name": "pact-coord", "status": "connected"}],
-    }));
+    if copilot {
+        print_line(&serde_json::json!({
+            "type": "session.mcp_servers_loaded",
+            "data": {"servers": [{"name": "pact-coord", "status": "connected"}]},
+        }));
+    } else {
+        print_line(&serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "fake-agent-session",
+            "mcp_servers": [{"name": "pact-coord", "status": "connected"}],
+        }));
+    }
 
     if script.sleep_ms > 0 {
         std::thread::sleep(Duration::from_millis(script.sleep_ms));
@@ -104,11 +130,23 @@ fn main() {
         let _ = std::fs::write(dest, content);
     }
 
-    print_line(&serde_json::json!({
-        "type": "result",
-        "is_error": !script.success,
-        "result": script.summary,
-    }));
+    for name in &script.dump_env {
+        let value = std::env::var(name).unwrap_or_else(|_| "<unset>".to_string());
+        let _ = std::fs::write(format!("env-{name}.txt"), value);
+    }
+
+    if copilot {
+        print_line(&serde_json::json!({
+            "type": "result",
+            "exitCode": if script.success { 0 } else { 1 },
+        }));
+    } else {
+        print_line(&serde_json::json!({
+            "type": "result",
+            "is_error": !script.success,
+            "result": script.summary,
+        }));
+    }
 
     std::process::exit(script.exit_code);
 }

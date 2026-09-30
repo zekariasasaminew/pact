@@ -53,10 +53,17 @@ fn cleanup(root: &Path) {
 /// launch the fake agent instead of trying (and failing) to find a real
 /// install.
 fn shim_dir() -> PathBuf {
+    shim_dir_for("claude")
+}
+
+/// Same as `shim_dir`, impersonating a different CLI: `fake_agent` picks
+/// its output schema from its own executable name (issue #284 needed a
+/// `copilot` impersonation to cover that adapter's lean launch).
+fn shim_dir_for(cli: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("pact-cli-fake-agent-shim-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let fake_agent = PathBuf::from(env!("CARGO_BIN_EXE_fake_agent"));
-    let dest = if cfg!(windows) { dir.join("claude.exe") } else { dir.join("claude") };
+    let dest = if cfg!(windows) { dir.join(format!("{cli}.exe")) } else { dir.join(cli) };
     std::fs::copy(&fake_agent, &dest).unwrap();
     #[cfg(unix)]
     {
@@ -86,10 +93,15 @@ fn script(writes: &[(&str, &str)], summary: &str) -> String {
 }
 
 fn pact(repo: &Path, shim: &Path, args: &[&str]) -> Output {
+    pact_with_env(repo, shim, args, &[])
+}
+
+fn pact_with_env(repo: &Path, shim: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pact"))
         .args(["--repo", repo.to_str().unwrap()])
         .args(args)
         .env("PATH", path_with_shim_first(shim))
+        .envs(env.iter().copied())
         .output()
         .unwrap_or_else(|err| panic!("failed to spawn `pact {}`: {err}", args.join(" ")))
 }
@@ -749,6 +761,90 @@ fn deps_install_opts_out_of_linking_and_conflicting_flags_are_rejected() {
     assert!(!unknown.status.success());
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown deps mode"), "stderr: {}", String::from_utf8_lossy(&unknown.stderr));
 
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// Issue #284: a lean Copilot launch runs the agent under a per-workspace
+/// `COPILOT_HOME` holding only the user's login pointer and settings plus
+/// an empty MCP config, so none of the user's own MCP servers load. The
+/// fake agent (impersonating `copilot`) dumps the `COPILOT_HOME` it saw,
+/// which must be pact's per-agent home, not the user's; `--no-lean` must
+/// leave the user's home in place and create nothing.
+#[test]
+fn lean_copilot_spawn_runs_the_agent_under_an_isolated_copilot_home() {
+    let repo = init_repo("lean-copilot");
+    let shim = shim_dir_for("copilot");
+    // Stands in for the user's real ~/.copilot: a login pointer, a default
+    // model, and an MCP server that must not carry over.
+    let user_home = std::env::temp_dir().join(format!("pact-cli-fake-copilot-home-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&user_home).unwrap();
+    std::fs::write(user_home.join("config.json"), "{\"loggedInUsers\":[{\"host\":\"https://github.com\",\"login\":\"me\"}]}").unwrap();
+    std::fs::write(user_home.join("settings.json"), "{\"model\":\"claude-opus-5\"}").unwrap();
+    std::fs::write(user_home.join("mcp-config.json"), "{\"mcpServers\":{\"chrome\":{\"command\":\"npx\"}}}").unwrap();
+    let user_home_str = user_home.to_str().unwrap();
+
+    let task = serde_json::json!({"dump_env": ["COPILOT_HOME"], "summary": "dumped env"}).to_string();
+    let spawn = pact_with_env(&repo, &shim, &["spawn", &task, "--agent", "copilot"], &[("COPILOT_HOME", user_home_str)]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+    let id = workspace_id_from_spawn_output(&spawn);
+
+    let agent_home = state_dir_for(&repo).join("homes").join(&id);
+    let seen = std::fs::read_to_string(state_dir_for(&repo).join("workspaces").join(&id).join("env-COPILOT_HOME.txt")).unwrap();
+    assert_eq!(PathBuf::from(seen.trim()), agent_home, "the agent must run under pact's per-workspace home");
+    assert_eq!(
+        std::fs::read_to_string(agent_home.join("config.json")).unwrap(),
+        std::fs::read_to_string(user_home.join("config.json")).unwrap()
+    );
+    assert_eq!(std::fs::read_to_string(agent_home.join("settings.json")).unwrap(), "{\"model\":\"claude-opus-5\"}");
+    let mcp: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(agent_home.join("mcp-config.json")).unwrap()).unwrap();
+    assert_eq!(mcp, serde_json::json!({"mcpServers": {}}));
+
+    let run: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join(format!("{id}-run.json"))).unwrap()).unwrap();
+    let args: Vec<&str> = run["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+    assert!(args.contains(&"--disable-builtin-mcps") && args.contains(&"--session-id"), "args: {args:?}");
+    assert!(args.contains(&"shell(npm install:*)"), "deny rules must be on the command line: {args:?}");
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join(format!("{id}.json"))).unwrap()).unwrap();
+    assert_eq!(run["session_id"], meta["session_id"], "workspace and run metadata must agree on the session id");
+    assert!(meta["session_id"].as_str().is_some_and(|s| s.len() == 36));
+
+    let plain = pact_with_env(&repo, &shim, &["spawn", &task, "--agent", "copilot", "--no-lean"], &[("COPILOT_HOME", user_home_str)]);
+    assert!(plain.status.success(), "stdout: {}\nstderr: {}", stdout(&plain), String::from_utf8_lossy(&plain.stderr));
+    let plain_id = workspace_id_from_spawn_output(&plain);
+    let seen = std::fs::read_to_string(state_dir_for(&repo).join("workspaces").join(&plain_id).join("env-COPILOT_HOME.txt")).unwrap();
+    assert_eq!(PathBuf::from(seen.trim()), user_home, "--no-lean must leave the user's own home in place");
+    assert!(!state_dir_for(&repo).join("homes").join(&plain_id).exists());
+
+    let _ = std::fs::remove_dir_all(&user_home);
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// `--dry-run` must preview the lean launch without leaving the per-agent
+/// home behind, the same way it already removes the MCP config file.
+#[test]
+fn lean_copilot_dry_run_previews_env_and_leaves_no_home_behind() {
+    let repo = init_repo("lean-copilot-dry-run");
+    let shim = shim_dir_for("copilot");
+    let user_home = std::env::temp_dir().join(format!("pact-cli-fake-copilot-home-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&user_home).unwrap();
+    std::fs::write(user_home.join("config.json"), "{}").unwrap();
+
+    let preview = pact_with_env(
+        &repo,
+        &shim,
+        &["spawn", "do the thing", "--agent", "copilot", "--dry-run", "--name", "preview"],
+        &[("COPILOT_HOME", user_home.to_str().unwrap())],
+    );
+    assert!(preview.status.success(), "stdout: {}\nstderr: {}", stdout(&preview), String::from_utf8_lossy(&preview.stderr));
+    let text = stdout(&preview);
+    assert!(text.contains("env: COPILOT_HOME="), "got: {text}");
+    assert!(text.contains("--deny-tool"), "got: {text}");
+    assert!(!state_dir_for(&repo).join("homes").join("preview").exists(), "dry-run must not leave a home behind");
+
+    let _ = std::fs::remove_dir_all(&user_home);
     cleanup(&repo);
     cleanup(&shim);
 }
