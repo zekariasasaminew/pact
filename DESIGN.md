@@ -2362,6 +2362,59 @@ connect under Copilot CLI 1.0.89 regardless of profile (issue #291,
 and `--no-lean` reproduces the pre-#284 command line exactly for anyone
 who needs their user-level MCP servers in a worker.
 
+### Claude lean profile (issue #288)
+
+Same problem, different CLI: every `claude -p` pact spawned loaded the
+user's 9 MCP servers (Playwright/Chrome bridges, claude.ai connectors)
+plus hooks, skills, plugins, and auto-memory. Measured 2026-09-29/30,
+Claude Code 2.1.284, haiku, trivial prompt:
+
+| Launch | To `init` | Wall | Cost | Peak RSS (real read task) |
+|---|---|---|---|---|
+| default config | 14-19 s | 25 s | $0.041 | 986 MB |
+| `--strict-mcp-config` + pact-coord config | 6.0 s | 13 s | $0.037 | 423 MB |
+| `--safe-mode` | 3.0 s | 7.5 s | $0.012 | |
+| `--bare` | 2 s | fails "Not logged in" | | |
+
+Through pact against the real Next.js repo (worktree + linked deps + a
+real Opus call): 15.6 s with `pact-coord: connected`.
+
+Three options were tried by hand before choosing. `--bare` is the
+fastest and is what Anthropic recommends for scripted use, but it
+requires an API key and the owner authenticates with OAuth, so it fails
+outright. `--safe-mode` keeps OAuth and is fastest after that, but it
+disables *every* MCP server, pact's own coordination server included
+(confirmed: `mcp=[]` even with an explicit `--mcp-config`), and drops
+CLAUDE.md, hooks, and skills. `--strict-mcp-config` drops only MCP
+servers not named in `--mcp-config`, so pact-coord still connects
+(confirmed, `status: connected`) and the repo's CLAUDE.md still loads.
+Since coordination is on by default today, the lean profile uses
+`--strict-mcp-config`; `--safe-mode` (with CLAUDE.md re-injected via
+`--append-system-prompt-file`) is the next step once coordination
+becomes opt-in, worth another ~5 s and two thirds of the per-call cost.
+
+The allowlist is tightened rather than a deny list added, because under
+`-p` an out-of-allowlist Bash command is denied cleanly (see "Claude
+Code safety default"). The blanket `Bash(npm *)`/`Bash(pnpm *)`/`Bash(yarn
+*)` entries, which allowed `npm install` into a linked `node_modules`
+(issue #283) and full `npm run build`s, are replaced by the JavaScript
+commands an editor workspace needs: `node`, `npx tsc`, `npx vitest`, `npx
+eslint`, `npx prettier`, `npm test`, `npm run lint/test/typecheck`, `npm
+ls`, `npm view`. Other ecosystems keep their blanket entries; their
+dependencies are not linked.
+
+`--session-id <uuid>` is passed and persisted the same way as for
+Copilot (verified by hand that a second process can `--resume` it with
+full context). Unlike Copilot there is nothing to relocate: Claude's
+per-project state under `~/.claude/projects/` is keyed by worktree path
+already, so each workspace gets its own transcript directory for free
+(anthropics/claude-code#34437 complains about exactly that
+fragmentation; for pact it is the desired behavior). Pre-writing
+`hasTrustDialogAccepted` into `~/.claude.json` was considered and
+rejected: `-p` skips the trust dialog anyway, and that file is already
+known to corrupt under concurrent instances (anthropics/claude-code#28847),
+so pact must not add another writer.
+
 ## pact-coord — MCP coordination server
 
 Advisory, glob-based, TTL-expiring file leases plus a threaded message log

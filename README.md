@@ -207,8 +207,12 @@ the same trivial prompt: 57 s and 1.4 GB with a full user home, 6 s and
 versus 81 s with `--no-lean`. The lean profile also denies dependency
 installs and full builds at Copilot's own tool gate (see "What can an
 agent actually do to my machine?" below). `--no-lean` reproduces the
-old launch exactly. Other adapters are unchanged for now (Claude Code's
-lean profile is issue #288).
+old launch exactly. Claude Code's lean profile passes
+`--strict-mcp-config` (your user-level MCP servers stay out of the
+worker; pact's own coordination server still connects), a fixed
+`--session-id`, and a tightened tool allowlist without the blanket
+`Bash(npm *)`; measured: `init` at 6 s instead of 14-19 s, and 15.6 s end
+to end through pact on the same repo.
 
 Dependency prep defaults to **linking**: when the repo root already has a
 `node_modules`, the workspace's `node_modules` becomes a junction (Windows)
@@ -444,10 +448,16 @@ actually do to my machine?" below.
 ### What can an agent actually do to my machine?
 
 - **Claude Code (default)**: read/write/edit files anywhere in its
-  workspace, and run `git`/`npm`/`pnpm`/`yarn`/`cargo`/`go`/`pip`/`uv`/
-  `mvn`/`gradle` commands. Anything else (an arbitrary shell command, a
-  tool outside that list) is denied automatically -- the agent will work
-  around the denial rather than stall.
+  workspace, and run `git`/`cargo`/`go`/`pip`/`uv`/`mvn`/`gradle`
+  commands plus, for JavaScript, `node`, `npx tsc`/`vitest`/`eslint`/
+  `prettier`, `npm test`, `npm run lint`/`test`/`typecheck`, `npm ls`,
+  `npm view`. Dependency installs and full builds (`npm install`, `npm
+  run build`, and the pnpm/yarn equivalents) are deliberately not on the
+  lean list, for the same reasons as Copilot's deny rules below; `--no-lean`
+  restores the blanket `npm`/`pnpm`/`yarn` entries. Anything else (an
+  arbitrary shell command, a tool outside that list) is denied
+  automatically -- the agent will work around the denial rather than
+  stall.
 - **Copilot CLI (default), Codex (default), Gemini CLI (default), and
   Antigravity (default)**: can run *any* shell command and edit *any*
   file the OS-level user running `pact` can reach, with no restriction.
