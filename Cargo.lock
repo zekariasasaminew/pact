@@ -811,6 +811,7 @@ dependencies = [
  "anyhow",
  "command-group",
  "ctrlc",
+ "dirs",
  "serde_json",
  "tracing",
 ]

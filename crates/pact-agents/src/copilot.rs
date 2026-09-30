@@ -1,9 +1,67 @@
+use std::path::Path;
+
 use serde_json::Value;
 
-use crate::adapter::{AgentAdapter, CoordConfig};
+use crate::adapter::{AgentAdapter, CoordConfig, LaunchRequest, LaunchSpec};
 use crate::event::AgentEvent;
 
 pub struct CopilotAdapter;
+
+/// Commands a lean Copilot launch denies at the CLI's own tool gate --
+/// see DESIGN.md ("pact-agents > Copilot lean profile", issue #284).
+/// Dependency mutation would write into a linked, shared `node_modules`
+/// (issue #283); full builds and dev servers are the verifier's job and
+/// the memory-heaviest thing an editor workspace can do (`next build`
+/// measured at 1.9 GB peak). Confirmed by hand: a denied rule produces
+/// `tool.execution_complete` with `error.code = "denied"` and the agent
+/// adapts, no hang; `shell(npm install:*)` matches the bare command too.
+pub const LEAN_DENY_RULES: &[&str] = &[
+    "shell(npm install:*)",
+    "shell(npm i:*)",
+    "shell(npm ci:*)",
+    "shell(npm add:*)",
+    "shell(npm uninstall:*)",
+    "shell(npm rm:*)",
+    "shell(npm update:*)",
+    "shell(pnpm install:*)",
+    "shell(pnpm i:*)",
+    "shell(pnpm add:*)",
+    "shell(pnpm remove:*)",
+    "shell(pnpm update:*)",
+    "shell(yarn install:*)",
+    "shell(yarn add:*)",
+    "shell(yarn remove:*)",
+    "shell(bun install:*)",
+    "shell(bun add:*)",
+    "shell(bun remove:*)",
+    "shell(npm run build:*)",
+    "shell(npm run dev:*)",
+    "shell(pnpm build:*)",
+    "shell(pnpm dev:*)",
+    "shell(pnpm run build:*)",
+    "shell(pnpm run dev:*)",
+    "shell(yarn build:*)",
+    "shell(yarn dev:*)",
+    "shell(next build:*)",
+    "shell(next dev:*)",
+    "shell(npx next build:*)",
+    "shell(npx next dev:*)",
+];
+
+/// Files copied verbatim from the user's own `COPILOT_HOME` into a lean
+/// per-agent home. `config.json` holds the login pointer (the token
+/// itself lives in the OS credential store; confirmed by hand that a home
+/// without it fails with "no authenticated GitHub host available" and a
+/// home with only it authenticates). `settings.json` holds the user's
+/// default model and similar preferences. Deliberately not copied:
+/// `mcp-config.json` (the point of the profile), `permissions-config.json`
+/// and the session store (isolating them per agent is what avoids the
+/// concurrent-write race in github/copilot-cli#3563), and
+/// `copilot-instructions.md` (a user's global instructions describe their
+/// own workflow, including pushing and opening PRs, which a worker must
+/// not do; the repo's own `.github/copilot-instructions.md` still loads
+/// from the worktree).
+const LEAN_HOME_FILES: &[&str] = &["config.json", "settings.json"];
 
 impl AgentAdapter for CopilotAdapter {
     fn coord_server_name(&self) -> &'static str {
@@ -45,9 +103,80 @@ impl AgentAdapter for CopilotAdapter {
         ("copilot".to_string(), args)
     }
 
+    /// The lean profile -- see DESIGN.md ("pact-agents > Copilot lean
+    /// profile", issue #284). Measured on the same trivial prompt: the
+    /// user's full home with 7 MCP servers took 57 s and 1.37 GB peak; a
+    /// per-agent home holding only `config.json` took 6.3 s and 326 MB.
+    fn build_launch(&self, request: &LaunchRequest<'_>) -> LaunchSpec {
+        let (program, mut args) =
+            self.build_command(request.task, request.safety_override, request.coord, request.workspace_path);
+        if !request.lean {
+            return LaunchSpec { program, args, env: Vec::new() };
+        }
+        args.extend(
+            ["--disable-builtin-mcps", "--no-auto-update", "--session-id", request.session_id].map(str::to_string),
+        );
+        for rule in LEAN_DENY_RULES {
+            args.push("--deny-tool".to_string());
+            args.push(rule.to_string());
+        }
+        let env = match user_copilot_home()
+            .ok_or_else(|| anyhow::anyhow!("could not determine the user's Copilot home"))
+            .and_then(|source| prepare_lean_home(&source, request.agent_home))
+        {
+            Ok(()) => vec![("COPILOT_HOME".to_string(), request.agent_home.to_string_lossy().to_string())],
+            Err(err) => {
+                tracing::warn!(
+                    "could not prepare a lean COPILOT_HOME at {}: {err:#}; launching with the user's own \
+                     home (every user-level MCP server will load)",
+                    request.agent_home.display()
+                );
+                Vec::new()
+            }
+        };
+        LaunchSpec { program, args, env }
+    }
+
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         parse_line(line)
     }
+}
+
+/// The user's real Copilot home: `$COPILOT_HOME` if set, else `~/.copilot`
+/// (Copilot CLI's own default).
+fn user_copilot_home() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("COPILOT_HOME").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(home));
+    }
+    dirs::home_dir().map(|h| h.join(".copilot"))
+}
+
+/// Materializes `agent_home` as a minimal Copilot config home: the
+/// `LEAN_HOME_FILES` copied from `source` (the user's real home), plus an
+/// empty `mcp-config.json`. Fails (so the caller falls back to the user's
+/// home) when `source` has no `config.json`, since a home without it
+/// cannot authenticate.
+fn prepare_lean_home(source: &Path, agent_home: &Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let source_config = source.join("config.json");
+    if !source_config.is_file() {
+        anyhow::bail!(
+            "{} does not exist; Copilot CLI's login pointer lives there and a home without it \
+             cannot authenticate",
+            source_config.display()
+        );
+    }
+    std::fs::create_dir_all(agent_home).with_context(|| format!("creating {}", agent_home.display()))?;
+    for name in LEAN_HOME_FILES {
+        let from = source.join(name);
+        if from.is_file() {
+            std::fs::copy(&from, agent_home.join(name))
+                .with_context(|| format!("copying {} into {}", from.display(), agent_home.display()))?;
+        }
+    }
+    std::fs::write(agent_home.join("mcp-config.json"), "{\"mcpServers\":{}}\n")
+        .with_context(|| format!("writing mcp-config.json into {}", agent_home.display()))?;
+    Ok(())
 }
 
 /// Schema modeled against real captured output -- see DESIGN.md
@@ -132,4 +261,110 @@ fn parse_assistant_message(value: &Value) -> Vec<AgentEvent> {
         events.push(AgentEvent::Other(value.clone()));
     }
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pact-agents-copilot-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn request<'a>(agent_home: &'a Path, lean: bool) -> LaunchRequest<'a> {
+        LaunchRequest {
+            task: "do the thing",
+            safety_override: None,
+            coord: None,
+            workspace_path: Path::new("/tmp/workspace"),
+            agent_home,
+            session_id: "11111111-2222-3333-4444-555555555555",
+            lean,
+        }
+    }
+
+    #[test]
+    fn non_lean_launch_is_exactly_build_command_with_no_env() {
+        let home = scratch("non-lean");
+        let launch = CopilotAdapter.build_launch(&request(&home, false));
+        let (program, args) = CopilotAdapter.build_command("do the thing", None, None, Path::new("/tmp/workspace"));
+        assert_eq!(launch.program, program);
+        assert_eq!(launch.args, args);
+        assert!(launch.env.is_empty());
+        assert!(!home.join("mcp-config.json").exists(), "a non-lean launch must not touch the agent home");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn lean_launch_adds_isolation_flags_session_id_and_every_deny_rule() {
+        let home = scratch("lean-args");
+        let launch = CopilotAdapter.build_launch(&request(&home, true));
+        assert_eq!(launch.program, "copilot");
+        for flag in ["--allow-all-tools", "--disable-builtin-mcps", "--no-auto-update"] {
+            assert!(launch.args.iter().any(|a| a == flag), "missing {flag} in {:?}", launch.args);
+        }
+        let sid = launch.args.iter().position(|a| a == "--session-id").expect("--session-id");
+        assert_eq!(launch.args[sid + 1], "11111111-2222-3333-4444-555555555555");
+        let denied: Vec<&String> = launch
+            .args
+            .windows(2)
+            .filter(|w| w[0] == "--deny-tool")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(denied.len(), LEAN_DENY_RULES.len());
+        for rule in LEAN_DENY_RULES {
+            assert!(denied.iter().any(|d| d.as_str() == *rule), "missing deny rule {rule}");
+        }
+        // Whether COPILOT_HOME is set depends on the machine running the
+        // tests having a real Copilot home to copy config.json from; when
+        // it is set, it must point at the per-agent home.
+        for (key, value) in &launch.env {
+            assert_eq!(key, "COPILOT_HOME");
+            assert_eq!(std::path::Path::new(value), home);
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn prepare_lean_home_copies_login_pointer_and_settings_but_not_mcp_servers() {
+        let source = scratch("source-home");
+        std::fs::write(source.join("config.json"), "{\"loggedInUsers\":[{\"host\":\"https://github.com\",\"login\":\"me\"}]}").unwrap();
+        std::fs::write(source.join("settings.json"), "{\"model\":\"claude-opus-5\"}").unwrap();
+        std::fs::write(source.join("mcp-config.json"), "{\"mcpServers\":{\"chrome\":{\"command\":\"npx\"}}}").unwrap();
+        std::fs::write(source.join("permissions-config.json"), "{\"locations\":{}}").unwrap();
+        std::fs::write(source.join("copilot-instructions.md"), "always open a PR").unwrap();
+        let home = scratch("agent-home");
+
+        prepare_lean_home(&source, &home).unwrap();
+
+        assert_eq!(std::fs::read_to_string(home.join("config.json")).unwrap(), std::fs::read_to_string(source.join("config.json")).unwrap());
+        assert_eq!(std::fs::read_to_string(home.join("settings.json")).unwrap(), "{\"model\":\"claude-opus-5\"}");
+        let mcp: Value = serde_json::from_str(&std::fs::read_to_string(home.join("mcp-config.json")).unwrap()).unwrap();
+        assert_eq!(mcp, serde_json::json!({"mcpServers": {}}), "the user's MCP servers must not carry over");
+        assert!(!home.join("permissions-config.json").exists());
+        assert!(!home.join("copilot-instructions.md").exists());
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn prepare_lean_home_refuses_without_a_login_pointer_to_copy() {
+        let source = scratch("source-no-config");
+        let home = scratch("agent-home-no-config");
+        let err = prepare_lean_home(&source, &home).unwrap_err();
+        assert!(err.to_string().contains("config.json"), "got: {err:#}");
+        assert!(!home.join("mcp-config.json").exists(), "nothing should be written on failure");
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn lean_deny_rules_cover_every_javascript_installer_and_full_builds() {
+        for needle in ["npm install", "pnpm add", "yarn add", "bun install", "next build", "npm run build", "next dev"] {
+            assert!(LEAN_DENY_RULES.iter().any(|r| r.contains(needle)), "no deny rule mentions {needle}");
+        }
+    }
 }
