@@ -1113,7 +1113,8 @@ fn print_merge_report(report: &MergeReport) {
              files/lockfiles/files shared with another workspace in this batch, see DESIGN.md):"
         );
         for workspace in &report.planned {
-            println!("    {} (risk: {})", workspace.id, workspace.risk_score);
+            let commit_note = if workspace.would_auto_commit { ", uncommitted changes would be committed first" } else { "" };
+            println!("    {} (risk: {}{commit_note})", workspace.id, workspace.risk_score);
         }
         // Issue #236: don't present a tied score as if it were a real
         // decision -- with 2+ workspaces this heuristic can still tie
