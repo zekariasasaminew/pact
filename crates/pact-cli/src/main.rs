@@ -240,6 +240,31 @@ enum Command {
         #[arg(long)]
         no_lean: bool,
 
+        /// Most agents in their running phase at once (issue #285).
+        /// Workspace creation and dependency prep for every task still
+        /// happen up front (cheap in link mode), so a queued task launches
+        /// the moment a slot frees. Default 2: measured on a 14 GB laptop,
+        /// a lean agent peaks at 0.3-0.45 GB but a test run or build it
+        /// triggers peaks at 1.5-1.9 GB, and two editors plus one verifier
+        /// is what fits with a browser open. Falls back to `pact.toml`'s
+        /// `defaults.max_concurrent`.
+        #[arg(long)]
+        max_concurrent: Option<usize>,
+
+        /// Minimum available memory, in MiB, before another agent is
+        /// admitted (issue #285); queued tasks wait, with a message every
+        /// 15 s, rather than launch into paging. 0 disables the check.
+        /// Default 1500. Falls back to `pact.toml`'s `defaults.min_free_mem_mb`.
+        #[arg(long)]
+        min_free_mem_mb: Option<u64>,
+
+        /// Minimum gap, in milliseconds, between two agent launches
+        /// (issue #285): providers reject bursts of new sessions
+        /// (anthropics/claude-code#53922). Default 2000. Falls back to
+        /// `pact.toml`'s `defaults.stagger_ms`.
+        #[arg(long)]
+        stagger_ms: Option<u64>,
+
         /// Explicit workspace name for the Nth --task, repeatable in the
         /// same order as --task -- same fix as `spawn --name` (issue
         /// #234), applied per task. Either give one --name per --task, or
@@ -632,6 +657,7 @@ fn main() -> Result<()> {
                 coord_override: coord_override.as_ref(),
                 deps,
                 lean: !no_lean,
+                admission: pact_core::AdmissionPolicy::default(),
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -656,9 +682,17 @@ fn main() -> Result<()> {
             deps,
             no_deps,
             no_lean,
+            max_concurrent,
+            min_free_mem_mb,
+            stagger_ms,
             names,
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
+            let admission = pact_core::AdmissionPolicy {
+                max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
+                min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
+                stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
+            };
             if !names.is_empty() && names.len() != tasks.len() {
                 bail!(
                     "--name given {} time(s) but --task given {} time(s) -- give exactly one \
@@ -747,6 +781,13 @@ fn main() -> Result<()> {
             });
 
             if dry_run {
+                println!(
+                    "admission: at most {} agent{} running at once, {} MB free memory required before each launch, {} ms between launches",
+                    admission.max_concurrent,
+                    if admission.max_concurrent == 1 { "" } else { "s" },
+                    admission.min_free_mem_mb,
+                    admission.stagger.as_millis()
+                );
                 for (index, task) in batch.iter().enumerate() {
                     let preview = orchestrator.spawn_preview(
                         task.agent,
@@ -771,6 +812,7 @@ fn main() -> Result<()> {
                 coord_override: coord_override.as_ref(),
                 deps,
                 lean: !no_lean,
+                admission,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -1910,7 +1952,10 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          [defaults]\n\
          {agent_line}\n\
          # safety = \"acceptEdits\"  # uncomment to stop the unattended-run warning on every spawn\n\
-         # deps = \"auto\"  # auto (link node_modules to the repo root's when present), link, install, none\n"
+         # deps = \"auto\"  # auto (link node_modules to the repo root's when present), link, install, none\n\
+         # max_concurrent = 2  # spawn-many: agents running at once (workspace prep is not counted)\n\
+         # min_free_mem_mb = 1500  # spawn-many: wait for this much free memory before each launch; 0 disables\n\
+         # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n"
     );
 
     std::fs::write(&config_path, contents)

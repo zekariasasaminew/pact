@@ -966,6 +966,70 @@ task's closure return value specifically so a panic (which loses whatever
 the closure would have returned) still leaves enough to attribute the
 failure to the right task afterward.
 
+### Admission control (issue #285)
+
+Until #285, `spawn_many` started one OS thread per task and launched
+every agent at once: no cap, no memory check, no gap between launches.
+Measured per-process footprints on the owner's 13.7 GB laptop
+(2026-09-29/30, 0.6 GB free at the time with a browser open): a lean
+Copilot agent 326 MB, a lean Claude agent 423 MB, a default-config agent
+1.0-1.4 GB; `vitest run` 1.5 GB, `next build` 1.9 GB, `eslint` 0.7 GB.
+Five default agents each running a test suite is more than the machine
+has, which is exactly the "my computer slows down and doesn't handle
+running multiple agents" the owner described and why they ran one agent
+at a time. Providers add their own reason to spread launches out:
+bulk-starting ~10 Claude Code sessions makes the 4th onward fail on the
+server side (anthropics/claude-code#53922), and Copilot CLI hard-caps
+subagent concurrency at 2 for non-usage-based accounts
+(github/copilot-cli#4940).
+
+`Admission` (`crates/pact-core/src/admission.rs`) is shared by every
+task thread in one batch, the way `Supervisor` already is. It bounds the
+*running* phase only: worktree creation, dependency prep, and building
+the launch spec all happen up front for every task (about a second each
+in link mode), so a queued task launches the instant a slot frees rather
+than paying its setup then. A slot is taken right before
+`run_and_stream` and released as soon as the process is gone, before
+metadata is written.
+
+The decision is a pure function (`decide`): a slot must be free first,
+then available memory (per `sysinfo`) must be at or above the floor.
+The pure function is what the unit tests pin; `acquire` wraps it in a
+mutex/condvar loop that re-checks every 5 s (sooner when a slot is
+released) and repeats a "queued: ..." `Phase` event at most every 15 s
+so the live stream says why nothing new is starting. **Zero admissions
+is a valid state**: a machine below the floor keeps every task queued
+rather than launching into paging, and the user's Ctrl-C is the escape.
+`--min-free-mem-mb 0` disables the memory check entirely (the
+end-to-end tests use it so a CI runner's free memory can't decide
+whether they pass). The stagger is a reservation, not an observation:
+claiming a slot records `next_allowed = max(now, next_allowed) +
+stagger` under the lock, so two waiters that both see room still launch
+`stagger` apart.
+
+Defaults (`max_concurrent = 2`, `min_free_mem_mb = 1500`, `stagger_ms =
+2000`) were chosen for this laptop and are deliberately conservative;
+the review that shaped this ("prove two lean agents beat one lean agent
+before adding concurrency machinery", 2026-09-29) argued for exactly
+that. All three are `spawn-many` flags and `pact.toml` `[defaults]`
+keys. Single `spawn` is not subject to admission.
+
+What this does *not* do, on purpose for now: it counts agent processes,
+not the memory they will grow into (a lean agent that runs a test suite
+briefly needs 1.5 GB, and only the floor check at admission time sees
+that); it does not cap a test runner's own parallelism (a separate
+change sets `VITEST_MAX_FORKS`); and it does not coordinate across two
+concurrent `pact` invocations against different repos (each batch has
+its own `Admission`).
+
+The end-to-end test runs four fake agents under `--max-concurrent 2`,
+counts presence files they hold open while alive, and fails without the
+cap (observed 3 alive at once). It asserts only the upper bound: that
+the cap still lets two run together, and that a waiter says "queued",
+are asserted deterministically in the unit tests instead, because on a
+loaded CI runner two 1.5-second fake agents can finish before the next
+two are even spawned.
+
 ### Coordination config wiring
 
 `coord_config` builds the adapter-agnostic description of the

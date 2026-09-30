@@ -18,6 +18,9 @@ struct Defaults {
     agent: Option<String>,
     safety: Option<String>,
     deps: Option<String>,
+    max_concurrent: Option<usize>,
+    min_free_mem_mb: Option<u64>,
+    stagger_ms: Option<u64>,
 }
 
 impl PactConfig {
@@ -52,6 +55,21 @@ impl PactConfig {
     pub fn default_deps(&self) -> Option<&str> {
         self.defaults.deps.as_deref()
     }
+
+    /// `defaults.max_concurrent`/`min_free_mem_mb`/`stagger_ms`: the
+    /// `spawn-many` admission policy when the flags are omitted (issue
+    /// #285).
+    pub fn default_max_concurrent(&self) -> Option<usize> {
+        self.defaults.max_concurrent
+    }
+
+    pub fn default_min_free_mem_mb(&self) -> Option<u64> {
+        self.defaults.min_free_mem_mb
+    }
+
+    pub fn default_stagger_ms(&self) -> Option<u64> {
+        self.defaults.stagger_ms
+    }
 }
 
 #[cfg(test)]
@@ -78,13 +96,16 @@ mod tests {
         let dir = scratch_dir();
         std::fs::write(
             dir.join(PactConfig::FILE_NAME),
-            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\ndeps = \"link\"\n",
+            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\ndeps = \"link\"\nmax_concurrent = 3\nmin_free_mem_mb = 0\nstagger_ms = 500\n",
         )
         .unwrap();
         let config = PactConfig::load(&dir).unwrap();
         assert_eq!(config.default_agent(), Some("copilot"));
         assert_eq!(config.default_safety(), Some("acceptEdits"));
         assert_eq!(config.default_deps(), Some("link"));
+        assert_eq!(config.default_max_concurrent(), Some(3));
+        assert_eq!(config.default_min_free_mem_mb(), Some(0));
+        assert_eq!(config.default_stagger_ms(), Some(500));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

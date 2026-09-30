@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod admission;
+pub use admission::{available_memory_mb, decide, Admission, AdmissionDecision, AdmissionPolicy};
+
 use pact_agents::{AgentEvent, AgentKind, CoordConfig, LaunchRequest, RunOutcome, Supervisor};
 pub use pact_deps::DepsMode;
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
@@ -158,6 +161,10 @@ pub struct SpawnOptions<'a> {
     /// `pact_agents::LaunchRequest::lean` (issue #284). On by default;
     /// `--no-lean` reproduces the pre-#284 launch exactly.
     pub lean: bool,
+    /// How many agents `spawn_many` lets run at once, and on how much
+    /// free memory -- see `AdmissionPolicy` (issue #285). Ignored by
+    /// single `spawn`.
+    pub admission: AdmissionPolicy,
 }
 
 impl Default for SpawnOptions<'_> {
@@ -167,6 +174,7 @@ impl Default for SpawnOptions<'_> {
             coord_override: None,
             deps: DepsMode::default(),
             lean: true,
+            admission: AdmissionPolicy::default(),
         }
     }
 }
@@ -482,12 +490,14 @@ impl Orchestrator {
         on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let supervisor = Supervisor::new();
-        self.spawn_with_supervisor(&supervisor, agent, task, name, options, on_event)
+        self.spawn_with_supervisor(&supervisor, agent, task, name, options, None, on_event)
     }
 
     /// Runs every `(agent, task)` pair in `tasks` concurrently, one
     /// `std::thread` each, sharing one `Supervisor` so a single Ctrl-C
-    /// kills every still-running child at once. `on_event` receives each
+    /// kills every still-running child at once, and one `Admission` so no
+    /// more than `options.admission.max_concurrent` are in their running
+    /// phase at a time (issue #285). `on_event` receives each
     /// task's batch index alongside its event so the caller can attribute
     /// interleaved output back to its source; it's called from whichever
     /// task's thread produced the event, so it must be `Sync`. See
@@ -500,6 +510,7 @@ impl Orchestrator {
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Vec<SpawnManyOutcome> {
         let supervisor = Supervisor::new();
+        let admission = Admission::new(options.admission);
         std::thread::scope(|scope| {
             // Index and agent are captured here, outside the closure's
             // return value, specifically so a panic (which loses whatever
@@ -510,6 +521,7 @@ impl Orchestrator {
                 .enumerate()
                 .map(|(index, spec)| {
                     let supervisor = &supervisor;
+                    let admission = &admission;
                     let on_event = &on_event;
                     let handle = scope.spawn(move || {
                         self.spawn_with_supervisor(
@@ -518,6 +530,7 @@ impl Orchestrator {
                             &spec.task,
                             spec.name.as_deref(),
                             options,
+                            Some(admission),
                             |event| on_event(index, &spec.agent, event),
                         )
                     });
@@ -622,6 +635,7 @@ impl Orchestrator {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_with_supervisor(
         &self,
         supervisor: &Supervisor,
@@ -629,6 +643,7 @@ impl Orchestrator {
         task: &str,
         name: Option<&str>,
         options: &SpawnOptions<'_>,
+        admission: Option<&Admission>,
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         on_event(&AgentEvent::Phase("creating workspace".to_string()));
@@ -720,6 +735,11 @@ impl Orchestrator {
         // almost identically to normal. Only what the server had settled
         // on by the time the process actually exited matters here.
         let mut coord_last_status: Option<String> = None;
+        // Everything above (worktree, deps, launch spec) is cheap and done;
+        // the slot is taken only for the expensive part, and released as
+        // soon as the process is gone so the next queued task launches
+        // immediately (issue #285).
+        let slot = admission.map(|a| a.acquire(|why| on_event(&AgentEvent::Phase(why.to_string()))));
         let started_at = unix_now();
         on_event(&AgentEvent::Phase("running agent".to_string()));
         let run_result = pact_agents::run_and_stream(
@@ -744,6 +764,7 @@ impl Orchestrator {
                 }
             },
         );
+        drop(slot);
         let ended_at = unix_now();
 
         if let Some(message) = coord_warning(coord.is_some(), coord_last_status.as_deref(), coord_name) {

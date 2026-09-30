@@ -253,6 +253,24 @@ child (whole process group, not just the immediate process) before `pact`
 exits. `--safety` applies to every task in the batch uniformly -- see
 Known limitations for why that's not per-task yet.
 
+`spawn-many` also **paces the batch to the machine**. Every task's
+worktree and dependencies are prepared up front (cheap in link mode), but
+at most `--max-concurrent` agents (default 2) are running at once, a new
+one launches only when at least `--min-free-mem-mb` (default 1500) of
+memory is available, and launches are at least `--stagger-ms` (default
+2000) apart so a provider never sees a burst of new sessions. A task that
+can't launch yet says `queued: ...` in the stream every 15 s and waits;
+on a machine short of memory that can mean zero agents running until
+something frees up, which is the point (measured per-process peaks on a
+14 GB laptop: a lean agent 0.3-0.45 GB, but `vitest` 1.5 GB and `next
+build` 1.9 GB). All three have `pact.toml` `[defaults]` keys; `--dry-run`
+prints the effective policy. Raise the cap when you have the memory for
+it, or `--min-free-mem-mb 0` to disable the memory check.
+
+```sh
+pact spawn-many --agent copilot --task "..." --task "..." --task "..." --max-concurrent 3
+```
+
 **Neither `spawn` nor `spawn-many` commits anything.** An agent's changes
 land in its workspace's working tree; `pact list` shows it as `[dirty]`
 once the agent is done, which is expected, not a sign anything needs your

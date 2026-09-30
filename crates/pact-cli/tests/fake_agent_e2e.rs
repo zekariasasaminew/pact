@@ -883,6 +883,90 @@ fn relative_repo_path_creates_the_worktree_beside_the_repo_and_runs() {
     cleanup(&shim);
 }
 
+/// Issue #285: `spawn-many --max-concurrent 2` must never have more than
+/// two agents alive at once. Each fake agent drops a presence file (its
+/// pid) the moment it starts and removes it before exiting; a poller
+/// counts them while the batch runs. Every workspace still gets created
+/// and every task still completes -- the cap queues, it never drops.
+#[test]
+fn spawn_many_never_runs_more_agents_than_max_concurrent() {
+    let repo = init_repo("admission-cap");
+    let shim = shim_dir();
+    let presence_dir = std::env::temp_dir().join(format!("pact-cli-presence-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&presence_dir).unwrap();
+
+    let mut args: Vec<String> = vec!["spawn-many".into(), "--agent".into(), "claude".into()];
+    for i in 0..4 {
+        let script = serde_json::json!({
+            "sleep_ms": 1500,
+            "presence_file": presence_dir.join(format!("agent-{i}")).to_str().unwrap(),
+            "writes": {format!("out-{i}.txt"): "done"},
+            "summary": format!("task {i} done"),
+        })
+        .to_string();
+        args.push("--task".into());
+        args.push(script);
+    }
+    // No stagger and no memory floor: this test is about the slot cap,
+    // and a CI runner's free memory must not decide whether it passes.
+    args.extend(["--max-concurrent", "2", "--stagger-ms", "0", "--min-free-mem-mb", "0"].map(String::from));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pact"))
+        .args(["--repo", repo.to_str().unwrap()])
+        .args(&arg_refs)
+        .env("PATH", path_with_shim_first(&shim))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut peak = 0usize;
+    let started = Instant::now();
+    loop {
+        let alive = std::fs::read_dir(&presence_dir).map(|d| d.filter_map(|e| e.ok()).count()).unwrap_or(0);
+        peak = peak.max(alive);
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(120), "spawn-many did not finish in time");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "stdout: {}\nstderr: {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    // The upper bound is the guarantee. That the cap still lets two run
+    // together is covered deterministically by the `Admission` unit test
+    // (`acquire_never_lets_more_than_max_concurrent_run_at_once`); asserting
+    // it here would depend on how fast a loaded CI runner launches
+    // processes.
+    assert!(peak <= 2, "observed {peak} agents alive at once with --max-concurrent 2");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("4 tasks requested, 4 workspaces created, 0 failed"), "got: {text}");
+
+    let _ = std::fs::remove_dir_all(&presence_dir);
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// `--dry-run` prints the effective admission policy so a user can see
+/// what a batch would be held to before spending anything.
+#[test]
+fn spawn_many_dry_run_prints_the_admission_policy() {
+    let repo = init_repo("admission-dry-run");
+    let shim = shim_dir();
+    let task = script(&[], "noop");
+    let preview = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--task", &task, "--dry-run", "--max-concurrent", "3", "--min-free-mem-mb", "0", "--stagger-ms", "10"]);
+    assert!(preview.status.success(), "stderr: {}", String::from_utf8_lossy(&preview.stderr));
+    assert!(
+        stdout(&preview).contains("admission: at most 3 agents running at once, 0 MB free memory required before each launch, 10 ms between launches"),
+        "got: {}",
+        stdout(&preview)
+    );
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {

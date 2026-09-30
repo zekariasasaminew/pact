@@ -868,6 +868,7 @@ dependencies = [
  "pact-vcs",
  "serde",
  "serde_json",
+ "sysinfo",
  "tracing",
  "uuid",
 ]
