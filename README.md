@@ -197,6 +197,19 @@ generated coordination config giving it `claim_files`/`release_files`/
 blocks until it finishes, streaming `[init]`/`[coord]`/`[assistant]`/
 `[tool]`/`[other]` lines live and printing a final done/failed summary.
 
+Agents launch **lean** by default: Copilot CLI runs under a per-workspace
+`COPILOT_HOME` (`.pact-<repo>/homes/<id>`) holding only your login
+pointer and `settings.json`, so none of your own MCP servers load into a
+worker, auto-update is off, the built-in GitHub MCP server is disabled,
+and a fixed `--session-id` is recorded for a later resume. Measured on
+the same trivial prompt: 57 s and 1.4 GB with a full user home, 6 s and
+0.3 GB lean; end to end through pact on a real Next.js repo, 12 s lean
+versus 81 s with `--no-lean`. The lean profile also denies dependency
+installs and full builds at Copilot's own tool gate (see "What can an
+agent actually do to my machine?" below). `--no-lean` reproduces the
+old launch exactly. Other adapters are unchanged for now (Claude Code's
+lean profile is issue #288).
+
 Dependency prep defaults to **linking**: when the repo root already has a
 `node_modules`, the workspace's `node_modules` becomes a junction (Windows)
 or symlink to it in about 0.1 s, instead of a full per-workspace install
@@ -428,6 +441,15 @@ actually do to my machine?" below.
   (see the Gemini adapter section in Design decisions). Treat any of
   these four with the same trust you'd give a script you ran with your
   own full user permissions, because that's effectively what it has.
+  One carve-out for Copilot CLI: its default **lean launch profile** adds
+  explicit `--deny-tool` rules for dependency installs (`npm install`,
+  `pnpm add`, `yarn add`, `bun install`, and the rest) and for full
+  builds and dev servers (`npm run build`, `next build`, `next dev`, ...),
+  because a workspace's `node_modules` is by default a link into the repo
+  root's own install and a full build is the verifier's job, not an
+  editor agent's. A denied command comes back to the agent as a clean
+  "denied" result (confirmed by hand, no hang) and it works around it.
+  `--no-lean` drops those rules along with the rest of the profile.
 - All five: `--safety <value>` overrides the default in that adapter's
   own vocabulary (Claude Code's `--permission-mode` values, Codex's
   `--sandbox` values, Gemini CLI's `--approval-mode` values, Antigravity's

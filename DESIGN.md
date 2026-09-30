@@ -2236,6 +2236,68 @@ a profile name actually resolves to for the chosen agent (e.g. `strict
 -> plan`), since that mapping isn't obvious from the profile name alone
 -- a raw, non-profile value still just echoes back unchanged.
 
+### Copilot lean profile (issue #284)
+
+Every `copilot -p` pact spawned inherited the user's whole `COPILOT_HOME`:
+seven user-level MCP servers on the owner's machine (three of them
+Playwright/Chrome bridges), the built-in `github-mcp-server`, an
+auto-update check, and the shared `permissions-config.json` and session
+store. Measured 2026-09-29/30 with Copilot CLI 1.0.89 on the same trivial
+prompt:
+
+| Launch | Wall | Peak process-tree RSS |
+|---|---|---|
+| user's `COPILOT_HOME` | 57.0 s | 1,372 MB |
+| `--disable-mcp-server` x7 `--disable-builtin-mcps` | 9.0 s | 461 MB |
+| per-agent `COPILOT_HOME` = {`config.json`, empty `mcp-config.json`} | 6.3 s | 326 MB |
+| fresh `COPILOT_HOME` with no `config.json` | fails | "no authenticated GitHub host available" |
+
+End to end through pact against a real Next.js repo (worktree + linked
+`node_modules` + a real model call + result): 11.7 s lean versus 81.0 s
+with `--no-lean`.
+
+The last table row is the load-bearing fact: Copilot's *login pointer*
+(`loggedInUsers`/`lastLoggedInUser`) lives in `config.json`, while the
+token itself lives in the OS credential store, so copying `config.json`
+alone authenticates a fresh home and copies no secret. `settings.json`
+is copied too, because it carries the user's default model (dropping it
+would silently change which model runs). Not copied, deliberately:
+`mcp-config.json` (the whole point), `permissions-config.json` and the
+session store (isolating them per agent is what avoids the concurrent
+overwrite race in github/copilot-cli#3563), and the user's global
+`copilot-instructions.md` (it describes the *user's* workflow, including
+pushing and opening PRs, which a worker must not do; the repo's own
+`.github/copilot-instructions.md` still loads from the worktree). The
+per-agent home lives at `<state>/homes/<id>`, so `pact teardown`'s state
+directory is still the one place everything about a workspace lives.
+
+If the user's `config.json` cannot be found, the launch falls back to
+the user's own home with a warning rather than failing: a slow start is
+recoverable, a refused spawn is not.
+
+`--disable-builtin-mcps`, `--no-auto-update`, and `--session-id <uuid>`
+go on the command line; the uuid is persisted on the workspace before
+launch (and in the run metadata after) so a follow-up can resume that
+exact conversation. The `--deny-tool` rules are the enforcement half of
+issue #283's link mode and of the "agents edit, one verifier verifies"
+split the owner chose on 2026-09-29: dependency mutation (`npm install`
+and friends across npm/pnpm/yarn/bun) would write into a linked, shared
+`node_modules`; `npm run build`/`next build`/`next dev` and their
+pnpm/yarn spellings are the memory-heaviest thing an editor workspace can
+do (`next build` peaks at 1.9 GB) and Turbopack refuses a linked
+`node_modules` anyway. Confirmed by hand before relying on it: a denied
+command produces `tool.execution_complete` with `error.code = "denied"`
+and the agent adapts, no hang -- the hang this file documents under
+"Copilot CLI safety default" is for a command with *no* matching
+`--allow-tool` rule, which is a different mechanism from an explicit
+deny. `shell(npm install:*)` matches the bare `npm install` as well.
+
+What the lean profile does *not* fix: `pact-coord` itself fails to
+connect under Copilot CLI 1.0.89 regardless of profile (issue #291,
+`rmcp` rejects Copilot's pre-`initialized` `server/discover` request),
+and `--no-lean` reproduces the pre-#284 command line exactly for anyone
+who needs their user-level MCP servers in a worker.
+
 ## pact-coord — MCP coordination server
 
 Advisory, glob-based, TTL-expiring file leases plus a threaded message log
