@@ -1271,6 +1271,9 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
             workspace.linked_paths.join(", ")
         );
     }
+    if let Some(session_id) = &workspace.session_id {
+        println!("  agent session id: {session_id}");
+    }
     match orchestrator.is_dirty(id) {
         Ok(true) => println!("  status: dirty"),
         Ok(false) => println!("  status: clean"),
@@ -2393,6 +2396,7 @@ mod tests {
                 agent_pid: None,
                 base_commit: "deadbeef".to_string(),
                 linked_paths: Vec::new(),
+                session_id: None,
             },
             dirty: Some(false),
             agent_alive,

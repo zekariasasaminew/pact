@@ -584,6 +584,7 @@ impl Orchestrator {
             agent_pid: None,
             base_commit: String::new(),
             linked_paths: Vec::new(),
+            session_id: None,
         };
         let coord_name = adapter.coord_server_name();
         let coord = self
@@ -688,6 +689,9 @@ impl Orchestrator {
 
         let safety = pact_agents::resolve_safety_profile(agent, options.safety_override);
         let session_id = Uuid::new_v4().to_string();
+        if let Err(err) = self.workspaces.set_session_id(&workspace.id, &session_id) {
+            tracing::warn!("failed to record session id for workspace {}: {err:#}", workspace.id);
+        }
         let agent_home = self.agent_home_path(&workspace.id);
         let launch = adapter.build_launch(&LaunchRequest {
             task,
@@ -1634,6 +1638,7 @@ mod tests {
             agent_pid: None,
             base_commit: "deadbeef".to_string(),
             linked_paths: Vec::new(),
+            session_id: None,
         }
     }
 
