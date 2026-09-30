@@ -657,6 +657,102 @@ fn spawn_with_no_deps_skips_dependency_prep_entirely() {
     cleanup(&shim);
 }
 
+/// Issue #283: with a `node_modules` already installed at the repo root,
+/// the default (`auto`) deps mode links the workspace's `node_modules` to
+/// it instead of running a 99-second `npm ci`, records the link in the
+/// workspace metadata, shows it in `list`, and -- the safety half --
+/// `teardown` removes the link without deleting the repo root's install
+/// through it (`git worktree remove` on its own would). The fake agent
+/// writes nothing, so the workspace must read as `[clean]` with the link
+/// in place (a trailing-slash `node_modules/` ignore pattern does not
+/// match a Unix symlink on its own; pact adds an exclude) and a plain
+/// `teardown`, no `--force`, must succeed.
+#[test]
+fn spawn_links_node_modules_to_the_repo_root_and_teardown_leaves_it_intact() {
+    let repo = init_repo("deps-link");
+    std::fs::write(repo.join("package.json"), "{\"name\":\"scratch\",\"version\":\"1.0.0\"}").unwrap();
+    std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add package.json"]);
+    let installed = repo.join("node_modules").join("left-pad");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(installed.join("index.js"), "module.exports = (s) => s;").unwrap();
+    let shim = shim_dir();
+
+    let task = script(&[], "inspected the workspace, changed nothing");
+    let spawn = pact(&repo, &shim, &["spawn", &task, "--agent", "claude"]);
+    assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
+    let id = workspace_id_from_spawn_output(&spawn);
+
+    let workspace_dir = state_dir_for(&repo).join("workspaces").join(&id);
+    let linked = workspace_dir.join("node_modules");
+    assert!(
+        std::fs::symlink_metadata(&linked).unwrap().file_type().is_symlink(),
+        "expected node_modules to be a link, not a real directory"
+    );
+    assert!(linked.join("left-pad").join("index.js").exists(), "the link must resolve to the repo root's install");
+
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join(format!("{id}.json"))).unwrap())
+            .unwrap();
+    assert_eq!(meta["linked_paths"], serde_json::json!(["node_modules"]));
+
+    let deps: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join(format!("{id}-deps.json"))).unwrap())
+            .unwrap();
+    assert_eq!(deps[0]["strategy"], "link", "deps report: {deps}");
+
+    let list = pact(&repo, &shim, &["list"]);
+    let list_text = stdout(&list);
+    assert!(list_text.contains("linked (shared with repo root): node_modules"), "got: {list_text}");
+    let workspace_line = list_text.lines().find(|l| l.starts_with(&id)).unwrap_or_else(|| panic!("no line for {id} in:\n{list_text}"));
+    assert!(
+        workspace_line.contains("[clean"),
+        "a linked node_modules must not make the workspace dirty (git must ignore the link); got: {workspace_line}"
+    );
+
+    let teardown = pact(&repo, &shim, &["teardown", &id]);
+    assert!(teardown.status.success(), "stdout: {}\nstderr: {}", stdout(&teardown), String::from_utf8_lossy(&teardown.stderr));
+    assert!(!workspace_dir.exists(), "the worktree must be gone");
+    assert!(
+        installed.join("index.js").exists(),
+        "teardown deleted the repo root's node_modules through the link -- issue #283's data-loss hazard"
+    );
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// `--deps install` opts out of linking even when the repo root has a
+/// `node_modules` to share, and `--deps` and `--no-deps` together are
+/// rejected rather than silently picking one.
+#[test]
+fn deps_install_opts_out_of_linking_and_conflicting_flags_are_rejected() {
+    let repo = init_repo("deps-install");
+    std::fs::write(repo.join("package.json"), "{\"name\":\"scratch\",\"version\":\"1.0.0\"}").unwrap();
+    std::fs::write(repo.join(".gitignore"), "node_modules/\n").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add package.json"]);
+    std::fs::create_dir_all(repo.join("node_modules")).unwrap();
+    let shim = shim_dir();
+
+    let task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let preview = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--dry-run"]);
+    assert!(stdout(&preview).contains("deps: auto (resolves to link)"), "got: {}", stdout(&preview));
+    let preview = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--dry-run", "--deps", "install"]);
+    assert!(stdout(&preview).contains("deps: install"), "got: {}", stdout(&preview));
+
+    let conflicting = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--deps", "link", "--no-deps"]);
+    assert!(!conflicting.status.success(), "--deps and --no-deps together must be rejected");
+
+    let unknown = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--deps", "hardlink"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown deps mode"), "stderr: {}", String::from_utf8_lossy(&unknown.stderr));
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {

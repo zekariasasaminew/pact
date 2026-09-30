@@ -236,6 +236,34 @@ is still sitting there orphaned. In that case it falls back to removing
 the directory directly, also with retries, since it's the same underlying
 handle-release race, just past the point where git itself can help.
 
+### Reparse points and worktree removal (issue #283)
+
+`git worktree remove` -- plain *and* `--force`, git 2.46 on Windows --
+follows a junction or directory symlink inside the worktree and deletes
+the **target's** contents, not just the link. Found while building
+link-mode dependency prep (see "pact-deps > Link mode"), where
+`<workspace>/node_modules` is a junction to the repo root's real install:
+without a fix, every `pact teardown` would have wiped the user's own
+`node_modules`. Confirmed by hand three ways before any code changed: a
+marker file inside the link target was gone after `git worktree remove`
+with the link present; it survived when the link was removed first with
+`rmdir` (cmd); and Rust's `std::fs::symlink_metadata` reports a junction
+as `is_symlink() == true` while `std::fs::remove_dir` on it removes only
+the link.
+
+`remove_worktree_retrying` therefore unlinks every top-level reparse
+point in the worktree (`unlink_top_level_reparse_points`) before the
+first `git worktree remove` call. It lives on that path, not only in
+`remove_workspace`, so the integration and resolve worktrees are covered
+by the same line of code. Top-level only, deliberately: that is the only
+place pact itself ever creates a link today, and the worktree is about to
+be deleted anyway, so a leftover nested link is the lesser risk versus a
+recursive walk of a 32,000-file tree on every teardown. The workspace's
+recorded `linked_paths` exist alongside this scan so a future nested
+link (a monorepo package's `node_modules`, say) has an explicit list to
+work from. `crates/pact-vcs/tests/reparse_point_teardown.rs` reproduces
+the exact hazard with a marker file and fails without the unlink.
+
 ### A crashed `pact` orphans its agent process tree (issue #108)
 
 Found during the 2026-07-23 Claude Code stress-testing campaign, then
@@ -2932,7 +2960,86 @@ and npm) already has a good global shared cache, so `prepare` just runs
 each one's normal install/fetch command (`passthrough` for most; `npm ci`
 directly for npm) and lets that cache do the sharing. Plain pip/venv is
 intentionally left as passthrough-only (see "Passthrough caching strategy"
-below).
+below). For JavaScript, `prepare_with_mode` can instead *link* the
+workspace's `node_modules` to the repo root's existing install -- see
+"Link mode" next.
+
+### Link mode (issue #283)
+
+The cache-backed `npm ci` above still writes every file of `node_modules`
+into every workspace. Measured 2026-09-29 on the owner's machine (Windows
+11, NTFS, Defender real-time on, NVMe) against a 287-file Next.js 16 repo
+with a warm npm cache:
+
+| Strategy | Wall | Notes |
+|---|---|---|
+| `npm ci` per worktree | 99.2 s | 32,104 files, 540 MB written |
+| robocopy /MT:32 | 29.1 s | +540 MB disk per workspace |
+| hardlink clone, 16 threads | 29.8 s | NTFS + Defender make link creation ~1-2 ms each; and hardlinks are not copy-on-write, so an in-place write through one clone changes every clone |
+| junction (`mklink /J`) | 0.12 s | one reparse point |
+
+With several concurrent workspaces the installs saturate the disk before
+any agent starts. This was the single largest startup cost after the
+agent CLI's own boot, and the concrete reason the owner ran one agent at
+a time on a 14 GB laptop instead of several.
+
+`DepsMode::Link` creates `<workspace>/node_modules` as a junction (Windows;
+no privilege needed, unlike a directory symlink) or symlink (Unix) to
+`<repo_root>/node_modules`. `Auto` (the default) links when the repo root
+has a `node_modules` directory and installs otherwise; `Install` is the
+pre-#283 behavior; `None` skips prep (the old `--no-deps`). Non-JavaScript
+managers keep their cheap, cache-backed passthrough in every mode. A
+`Link` request against a repo root with nothing to share falls back to a
+real install and says so as the first warning in the report, rather than
+leaving the workspace without dependencies. Reports carry `linked_paths`,
+which `pact-core` persists into the workspace's metadata for `list`/
+`inspect` and for teardown (see "pact-vcs > Reparse points and worktree
+removal").
+
+**What was verified through the link, by hand, on the benchmark repo:**
+`vitest run`, `eslint`, and `tsc --noEmit` all work unchanged. **What does
+not:** Turbopack (`next build`, `next dev` on Next.js 16) rejects it with
+`Symlink [project]/node_modules is invalid, it points out of the
+filesystem root` -- the repo's `next.config.ts` pins `turbopack.root:
+__dirname`, and pact must not edit a user's production config. Placing a
+real `node_modules` in the worktrees' parent directory (Node resolves
+upward) fails the same way. Turbopack needs a real directory; that is
+the integration/verifier worktree's job (which stays on `Install`), not
+the editor workspaces'.
+
+**A trailing-slash ignore pattern does not match the link on Unix.**
+Found by an independent code review of the first cut and confirmed by a
+red ubuntu/macOS CI run: git's `dir.c` only lets a `node_modules/`
+pattern (GitHub's own Node template) match `DT_DIR` entries, and a
+symlink is `DT_LNK`, so on Linux/macOS the freshly linked `node_modules`
+showed up as `?? node_modules` -- `pact list` called every linked
+workspace dirty, `teardown` refused without `--force`, and `commit_all`
+would have committed the link (an absolute path into the user's install)
+onto the workspace branch. Git for Windows treats a junction as a
+directory, so nothing showed locally. `ensure_git_ignores` runs `git
+check-ignore` after linking and, only when the link is not ignored,
+appends `/node_modules` (anchored, slash-free) to the repository's
+`info/exclude` -- the file git provides for exactly this, shared by every
+worktree of the repo and never committed -- and records that as a note in
+the prep report. A repo whose `.gitignore` already uses a slash-free
+`node_modules` needs nothing. The end-to-end test asserts a linked
+workspace whose agent wrote nothing reads `[clean]` and tears down
+without `--force`.
+
+**The shared install is mutable through the link.** An agent running
+`npm install` in a linked workspace writes into the repo root's real
+`node_modules`. pact does not try to make the link read-only (an ACL is
+not a security boundary, and it would break tools that write caches
+under `node_modules/.cache`). Instead the lean launch profiles (issue
+#284) deny dependency-mutating commands at the agent CLI's own tool
+gate, which was confirmed to deny cleanly rather than hang, and the
+`list`/`inspect` output names what is shared so a human never mistakes
+it for a private copy. Hardlink-cloning as an "unshare" step was
+considered and rejected: hardlinks alias the same bytes, so a mutating
+install through a hardlinked tree corrupts every consumer -- the same
+reason the deleted content store (see below) made its hardlinks
+read-only. A workspace that genuinely needs a private, writable install
+gets a real copy (`--deps install`), not a cleverer link.
 
 ### Content store removed in favor of npm's own cache (issue #233)
 

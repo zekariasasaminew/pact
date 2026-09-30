@@ -55,6 +55,13 @@ pub struct Workspace {
     /// treat an empty string as "unknown, can't check".
     #[serde(default)]
     pub base_commit: String,
+    /// Workspace-relative paths that dependency prep created as links
+    /// (junction/symlink) into a shared install rather than materializing
+    /// -- e.g. `node_modules` in link mode (issue #283). Recorded so
+    /// `list`/`inspect` can say what is shared, and so teardown has an
+    /// explicit list in addition to its defensive top-level scan.
+    #[serde(default)]
+    pub linked_paths: Vec<String>,
 }
 
 /// What an agent has actually done in one workspace, split into the
@@ -403,6 +410,7 @@ impl WorkspaceManager {
             created_at: now_unix(),
             agent_pid: None,
             base_commit,
+            linked_paths: Vec::new(),
         };
 
         std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&workspace)?)
@@ -418,6 +426,17 @@ impl WorkspaceManager {
     pub fn set_agent_pid(&self, id: &str, pid: Option<u32>) -> Result<()> {
         let mut workspace = self.get_workspace(id)?;
         workspace.agent_pid = pid;
+        std::fs::write(self.meta_path(id), serde_json::to_vec_pretty(&workspace)?)
+            .context("writing workspace metadata")?;
+        Ok(())
+    }
+
+    /// Records which workspace-relative paths dependency prep linked into
+    /// a shared install rather than materializing (issue #283). Best-effort
+    /// like `set_agent_pid`: callers log rather than propagate a failure.
+    pub fn set_linked_paths(&self, id: &str, linked_paths: Vec<String>) -> Result<()> {
+        let mut workspace = self.get_workspace(id)?;
+        workspace.linked_paths = linked_paths;
         std::fs::write(self.meta_path(id), serde_json::to_vec_pretty(&workspace)?)
             .context("writing workspace metadata")?;
         Ok(())
@@ -592,8 +611,16 @@ impl WorkspaceManager {
     }
 
     /// Removes a worktree directory, tolerating two Windows failure modes
-    /// -- see DESIGN.md ("pact-vcs > Workspace teardown").
+    /// -- see DESIGN.md ("pact-vcs > Workspace teardown"). Unlinks every
+    /// top-level reparse point (junction, directory symlink) first: `git
+    /// worktree remove` follows them and deletes the *target's* contents,
+    /// which for a linked `node_modules` means the repo's own install --
+    /// confirmed by hand, see DESIGN.md ("pact-vcs > Reparse points and
+    /// worktree removal", issue #283).
     fn remove_worktree_retrying(&self, path: &std::path::Path) -> Result<()> {
+        for unlinked in unlink_top_level_reparse_points(path) {
+            tracing::debug!("unlinked {} before removing worktree {}", unlinked.display(), path.display());
+        }
         let mut last_err = String::new();
         for attempt in 0..10 {
             if attempt > 0 {
@@ -1524,6 +1551,41 @@ fn kill_if_alive(workspace: &Workspace) {
     }
 }
 
+/// Removes the link (never the target) for every immediate child of
+/// `worktree` that is a reparse point -- an NTFS junction or a directory
+/// symlink on Windows, a symlink on Unix -- and returns the paths unlinked.
+/// `symlink_metadata` reports junctions as symlinks, and `remove_dir` on a
+/// junction removes only the link; both confirmed by hand (see DESIGN.md
+/// ("pact-vcs > Reparse points and worktree removal", issue #283)). Best-
+/// effort: an unreadable directory or a failed unlink is skipped, since
+/// the caller is about to remove the whole tree anyway and a leftover
+/// link is the lesser risk.
+pub fn unlink_top_level_reparse_points(worktree: &Path) -> Vec<PathBuf> {
+    let mut unlinked = Vec::new();
+    let Ok(entries) = std::fs::read_dir(worktree) else {
+        return unlinked;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_link = std::fs::symlink_metadata(&path)
+            .map(|md| md.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            continue;
+        }
+        let removed = if cfg!(windows) {
+            std::fs::remove_dir(&path).or_else(|_| std::fs::remove_file(&path))
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => unlinked.push(path),
+            Err(err) => tracing::warn!("could not unlink {} before worktree removal: {err}", path.display()),
+        }
+    }
+    unlinked
+}
+
 /// Runs `git <args>` in `dir` and returns stdout as text, tolerating a
 /// non-zero exit (e.g. `diff --stat` against a ref with no differences is
 /// still success, but callers here care about "no meaningful output" more
@@ -2095,6 +2157,13 @@ mod tests {
     fn is_workspace_meta_file_rejects_the_deps_and_run_sidecar_files() {
         assert!(!is_workspace_meta_file(Path::new("/state/meta/some-id-deps.json")));
         assert!(!is_workspace_meta_file(Path::new("/state/meta/some-id-run.json")));
+    }
+
+    #[test]
+    fn workspace_metadata_written_before_linked_paths_existed_still_deserializes() {
+        let legacy = r#"{"id":"w","path":"/x","branch":"pact/w","task":"t","created_at":1,"agent_pid":null,"base_commit":"abc"}"#;
+        let workspace: Workspace = serde_json::from_str(legacy).unwrap();
+        assert!(workspace.linked_paths.is_empty());
     }
 
     #[test]

@@ -126,12 +126,22 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Skip dependency prep entirely for this task -- no package
-        /// manager detection, no install. For tasks that don't need
-        /// dependencies at all (e.g. editing a version string in a
-        /// manifest file) -- issue #233: prep used to run unconditionally
-        /// even when a task explicitly said not to touch dependencies,
-        /// paying its full cost for nothing.
+        /// How this workspace gets its dependencies (issue #283): "auto"
+        /// (default: link when the repo root already has a node_modules
+        /// to share, otherwise install), "link" (junction/symlink
+        /// node_modules to the repo root's install -- 0.1 s instead of a
+        /// full install; the agent must not run installs in the
+        /// workspace, and Turbopack builds need a real directory), "install"
+        /// (each package manager's own install in the workspace, the
+        /// pre-#283 behavior), or "none" (skip prep entirely). Falls back
+        /// to `pact.toml`'s `defaults.deps` if omitted.
+        #[arg(long, conflicts_with = "no_deps")]
+        deps: Option<String>,
+
+        /// Alias for `--deps none`: skip dependency prep entirely for this
+        /// task -- no package manager detection, no install. For tasks
+        /// that don't need dependencies at all (e.g. editing a version
+        /// string in a manifest file) -- issue #233.
         #[arg(long)]
         no_deps: bool,
 
@@ -205,11 +215,14 @@ enum Command {
         #[arg(long, requires = "dry_run")]
         estimate_cost: bool,
 
-        /// Same as `spawn --no-deps`, applied to every task in this
-        /// batch -- skips dependency prep entirely, for a batch whose
-        /// tasks don't touch dependencies at all. Issue #233: a batch of
-        /// pure manifest-text-edit tasks used to pay full dependency-prep
-        /// cost for zero benefit.
+        /// Same as `spawn --deps`, applied to every task in this batch
+        /// (issue #283). Falls back to `pact.toml`'s `defaults.deps`.
+        #[arg(long, conflicts_with = "no_deps")]
+        deps: Option<String>,
+
+        /// Alias for `--deps none`, applied to every task in this batch --
+        /// skips dependency prep entirely, for a batch whose tasks don't
+        /// touch dependencies at all (issue #233).
         #[arg(long)]
         no_deps: bool,
 
@@ -543,12 +556,14 @@ fn main() -> Result<()> {
             coord_command,
             coord_args,
             dry_run,
+            deps,
             no_deps,
             name,
         } => {
             if let Some(n) = &name {
                 validate_workspace_name(n)?;
             }
+            let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
@@ -566,7 +581,7 @@ fn main() -> Result<()> {
             if dry_run {
                 let preview =
                     orchestrator.spawn_preview(kind, &task, name.as_deref(), safety.as_deref(), coord_override.as_ref())?;
-                print_spawn_preview(&preview);
+                print_spawn_preview(&preview, deps);
                 return Ok(());
             }
 
@@ -586,7 +601,7 @@ fn main() -> Result<()> {
             let spawn_options = pact_core::SpawnOptions {
                 safety_override: safety.as_deref(),
                 coord_override: coord_override.as_ref(),
-                no_deps,
+                deps,
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -608,9 +623,11 @@ fn main() -> Result<()> {
             coord_args,
             dry_run,
             estimate_cost,
+            deps,
             no_deps,
             names,
         } => {
+            let deps = resolve_deps_mode(deps, no_deps, &config)?;
             if !names.is_empty() && names.len() != tasks.len() {
                 bail!(
                     "--name given {} time(s) but --task given {} time(s) -- give exactly one \
@@ -708,7 +725,7 @@ fn main() -> Result<()> {
                         coord_override.as_ref(),
                     )?;
                     println!("task #{index} ({}):", agent_label(task.agent));
-                    print_spawn_preview(&preview);
+                    print_spawn_preview(&preview, deps);
                 }
                 if estimate_cost {
                     print_cost_estimate(&batch);
@@ -720,7 +737,7 @@ fn main() -> Result<()> {
             let spawn_options = pact_core::SpawnOptions {
                 safety_override: safety.as_deref(),
                 coord_override: coord_override.as_ref(),
-                no_deps,
+                deps,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -801,6 +818,9 @@ fn main() -> Result<()> {
                     workspace.path.display()
                 );
                 println!("    task: {}", workspace.task);
+                if !workspace.linked_paths.is_empty() {
+                    println!("    linked (shared with repo root): {}", workspace.linked_paths.join(", "));
+                }
                 // A recorded agent_pid that's still alive is either a
                 // normal in-progress spawn, or -- if the `pact` process
                 // that launched it crashed -- an orphan `teardown --force`
@@ -1220,6 +1240,12 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
     println!("  path: {}", workspace.path.display());
     println!("  task: {}", workspace.task);
     println!("  base commit: {}", short(&workspace.base_commit));
+    if !workspace.linked_paths.is_empty() {
+        println!(
+            "  linked (shared with repo root, not a private copy): {}",
+            workspace.linked_paths.join(", ")
+        );
+    }
     match orchestrator.is_dirty(id) {
         Ok(true) => println!("  status: dirty"),
         Ok(false) => println!("  status: clean"),
@@ -1840,14 +1866,15 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
     let contents = format!(
         "# pact.toml -- generated by `pact init`.\n\
          #\n\
-         # Sets defaults for --agent/--safety. A pact.toml value is only used\n\
-         # when the equivalent CLI flag is omitted -- passing the flag always\n\
-         # wins. Applies to `spawn`/`spawn-many`'s --agent/--safety and\n\
-         # merge-all/resolve's --arbiter-agent/--arbiter-safety.\n\
+         # Sets defaults for --agent/--safety/--deps. A pact.toml value is only\n\
+         # used when the equivalent CLI flag is omitted -- passing the flag\n\
+         # always wins. Applies to `spawn`/`spawn-many`'s --agent/--safety/--deps\n\
+         # and merge-all/resolve's --arbiter-agent/--arbiter-safety.\n\
          \n\
          [defaults]\n\
          {agent_line}\n\
-         # safety = \"acceptEdits\"  # uncomment to stop the unattended-run warning on every spawn\n"
+         # safety = \"acceptEdits\"  # uncomment to stop the unattended-run warning on every spawn\n\
+         # deps = \"auto\"  # auto (link node_modules to the repo root's when present), link, install, none\n"
     );
 
     std::fs::write(&config_path, contents)
@@ -1908,7 +1935,7 @@ fn register_skill_with_copilot(repo_root: &Path) {
     }
 }
 
-fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
+fn print_spawn_preview(preview: &pact_core::SpawnPreview, deps: pact_core::DepsMode) {
     println!("would create workspace {} ({})", preview.workspace_id, preview.branch);
     println!("  path: {}", preview.path.display());
     if preview.package_managers.is_empty() {
@@ -1917,7 +1944,33 @@ fn print_spawn_preview(preview: &pact_core::SpawnPreview) {
         let names: Vec<&str> = preview.package_managers.iter().map(|pm| package_manager_label(*pm)).collect();
         println!("  package managers: {}", names.join(", "));
     }
+    let effective = preview.effective_deps_mode(deps);
+    if effective == deps {
+        println!("  deps: {deps}");
+    } else {
+        println!("  deps: {deps} (resolves to {effective})");
+    }
     println!("  command: {} {}", preview.program, preview.args.join(" "));
+}
+
+/// `--deps`/`--no-deps`/`pact.toml`'s `defaults.deps` folded into one
+/// mode: an explicit flag wins, `--no-deps` is `none`, the config file
+/// fills in the default, and `auto` is the last resort (issue #283).
+fn resolve_deps_mode(
+    flag: Option<String>,
+    no_deps: bool,
+    config: &PactConfig,
+) -> Result<pact_core::DepsMode> {
+    if no_deps {
+        return Ok(pact_core::DepsMode::None);
+    }
+    let source = flag.as_deref().or_else(|| config.default_deps());
+    match source {
+        Some(value) => value
+            .parse::<pact_core::DepsMode>()
+            .map_err(|err| anyhow::anyhow!("--deps: {err}")),
+        None => Ok(pact_core::DepsMode::Auto),
+    }
 }
 
 /// One-line dependency-prep summary for the spawn-many end-of-run
@@ -2257,6 +2310,7 @@ mod tests {
             strategy: "npm-ci".to_string(),
             success,
             warnings: Vec::new(),
+            linked_paths: Vec::new(),
         }
     }
 
@@ -2310,6 +2364,7 @@ mod tests {
                 created_at: 0,
                 agent_pid: None,
                 base_commit: "deadbeef".to_string(),
+                linked_paths: Vec::new(),
             },
             dirty: Some(false),
             agent_alive,

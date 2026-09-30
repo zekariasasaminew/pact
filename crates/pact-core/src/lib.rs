@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pact_agents::{AgentEvent, AgentKind, CoordConfig, RunOutcome, Supervisor};
+pub use pact_deps::DepsMode;
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
 use anyhow::{bail, Context, Result};
 
@@ -96,8 +97,24 @@ pub struct SpawnPreview {
     pub branch: String,
     pub path: PathBuf,
     pub package_managers: Vec<pact_deps::PackageManager>,
+    /// Whether the repo root has a `node_modules` that link mode (or
+    /// `Auto`) would share with this workspace -- issue #283.
+    pub shareable_node_modules: bool,
     pub program: String,
     pub args: Vec<String>,
+}
+
+impl SpawnPreview {
+    /// The dependency strategy `mode` would actually take for this repo:
+    /// `Auto` resolves to `Link` or `Install` here, every other mode is
+    /// itself.
+    pub fn effective_deps_mode(&self, mode: DepsMode) -> DepsMode {
+        match mode {
+            DepsMode::Auto if self.shareable_node_modules => DepsMode::Link,
+            DepsMode::Auto => DepsMode::Install,
+            other => other,
+        }
+    }
 }
 
 /// Points the generated MCP coordination config at an alternative command
@@ -119,10 +136,11 @@ pub struct CoordServerOverride {
 pub struct SpawnOptions<'a> {
     pub safety_override: Option<&'a str>,
     pub coord_override: Option<&'a CoordServerOverride>,
-    /// Skip dependency prep entirely -- issue #233: a task that never
-    /// touches dependencies shouldn't pay prep's full cost for zero
-    /// benefit.
-    pub no_deps: bool,
+    /// How dependency prep gets each workspace its dependencies -- see
+    /// `pact_deps::DepsMode` (issue #283). `None` skips prep entirely
+    /// (issue #233's `--no-deps`): a task that never touches dependencies
+    /// shouldn't pay prep's cost for zero benefit.
+    pub deps: DepsMode,
 }
 
 /// The outcome of one task within a `spawn_many` batch. `result` is `Err`
@@ -518,6 +536,7 @@ impl Orchestrator {
     ) -> Result<SpawnPreview> {
         let (workspace_id, branch, path) = self.workspaces.preview_workspace_location(task, name);
         let package_managers = pact_deps::detect(&self.repo_root);
+        let shareable_node_modules = pact_deps::shareable_node_modules(&self.repo_root).is_some();
         let adapter = pact_agents::adapter(agent);
 
         let preview_workspace = Workspace {
@@ -528,6 +547,7 @@ impl Orchestrator {
             created_at: 0,
             agent_pid: None,
             base_commit: String::new(),
+            linked_paths: Vec::new(),
         };
         let coord_name = adapter.coord_server_name();
         let coord = self
@@ -545,6 +565,7 @@ impl Orchestrator {
             branch,
             path,
             package_managers,
+            shareable_node_modules,
             program,
             args,
         })
@@ -569,15 +590,15 @@ impl Orchestrator {
         // metadata (issue #12) so "what actually happened during prep" is
         // queryable later, not just a log line at spawn time.
         //
-        // Skipped entirely under --no-deps (issue #233): a task that
-        // doesn't touch dependencies at all shouldn't pay prep's full
-        // cost for zero benefit. No -deps.json sidecar is written either
-        // -- "prep was never attempted" is a different fact than "prep
-        // ran and found nothing to do", and the sidecar's absence says so
-        // honestly.
-        if !options.no_deps {
-            on_event(&AgentEvent::Phase("preparing dependencies".to_string()));
-            let dep_reports = pact_deps::prepare(&workspace.path);
+        // Skipped entirely under --deps none (issue #233's --no-deps): a
+        // task that doesn't touch dependencies at all shouldn't pay prep's
+        // full cost for zero benefit. No -deps.json sidecar is written
+        // either -- "prep was never attempted" is a different fact than
+        // "prep ran and found nothing to do", and the sidecar's absence
+        // says so honestly.
+        if options.deps != DepsMode::None {
+            on_event(&AgentEvent::Phase(format!("preparing dependencies ({})", options.deps)));
+            let dep_reports = pact_deps::prepare_with_mode(&workspace.path, &self.repo_root, options.deps);
             for report in &dep_reports {
                 if !report.success {
                     tracing::warn!(
@@ -592,6 +613,13 @@ impl Orchestrator {
             let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
             if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
                 tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
+            }
+            let linked_paths: Vec<String> =
+                dep_reports.iter().flat_map(|r| r.linked_paths.iter().cloned()).collect();
+            if !linked_paths.is_empty() {
+                if let Err(err) = self.workspaces.set_linked_paths(&workspace.id, linked_paths) {
+                    tracing::warn!("failed to record linked paths for workspace {}: {err:#}", workspace.id);
+                }
             }
         }
 
@@ -1512,6 +1540,7 @@ mod tests {
             strategy: "npm-ci".to_string(),
             success,
             warnings: Vec::new(),
+            linked_paths: Vec::new(),
         }
     }
 
@@ -1541,6 +1570,7 @@ mod tests {
             created_at: 0,
             agent_pid: None,
             base_commit: "deadbeef".to_string(),
+            linked_paths: Vec::new(),
         }
     }
 
