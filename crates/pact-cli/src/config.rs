@@ -17,6 +17,7 @@ pub struct PactConfig {
 struct Defaults {
     agent: Option<String>,
     safety: Option<String>,
+    deps: Option<String>,
 }
 
 impl PactConfig {
@@ -44,6 +45,13 @@ impl PactConfig {
     pub fn default_safety(&self) -> Option<&str> {
         self.defaults.safety.as_deref()
     }
+
+    /// `defaults.deps`: the `--deps` mode to use when the flag is omitted
+    /// (issue #283). Validated at use, not load, so an unknown value is
+    /// reported against the flag it stands in for.
+    pub fn default_deps(&self) -> Option<&str> {
+        self.defaults.deps.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -70,12 +78,13 @@ mod tests {
         let dir = scratch_dir();
         std::fs::write(
             dir.join(PactConfig::FILE_NAME),
-            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\n",
+            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\ndeps = \"link\"\n",
         )
         .unwrap();
         let config = PactConfig::load(&dir).unwrap();
         assert_eq!(config.default_agent(), Some("copilot"));
         assert_eq!(config.default_safety(), Some("acceptEdits"));
+        assert_eq!(config.default_deps(), Some("link"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
