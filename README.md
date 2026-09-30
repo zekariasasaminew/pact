@@ -184,19 +184,35 @@ pact spawn "implement the thing" --coord-command /path/to/alt-coord --coord-arg 
 pact spawn-many --task claude:"implement X" --task claude:"implement Y"
 pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
 pact spawn "implement the thing" --dry-run          # preview only, nothing created/launched
+pact spawn "implement the thing" --deps install     # private node_modules instead of the default link to the repo root's
 pact spawn-many --task claude:"X" --task copilot:"Y" --dry-run
 pact list                          # [dirty]/[clean] per workspace, plus agent pid liveness if recorded
 ```
 
-`spawn` creates the worktree, best-effort prepares dependencies for every
-package manager it detects (pass-through install for ecosystems with their
-own cache, including `npm ci` for npm), then launches the
+`spawn` creates the worktree, prepares dependencies, then launches the
 chosen agent CLI (`--agent claude` by default) headlessly -- with a
 generated coordination config giving it `claim_files`/`release_files`/
 `send_message`/`check_messages`/`request_handoff`/`check_handoffs`/
 `respond_handoff` tools automatically, no extra setup needed -- and
 blocks until it finishes, streaming `[init]`/`[coord]`/`[assistant]`/
-`[tool]`/`[other]` lines live and printing a final done/failed summary. A
+`[tool]`/`[other]` lines live and printing a final done/failed summary.
+
+Dependency prep defaults to **linking**: when the repo root already has a
+`node_modules`, the workspace's `node_modules` becomes a junction (Windows)
+or symlink to it in about 0.1 s, instead of a full per-workspace install
+(measured at 99 s and 32,000 file writes for one Next.js app, per
+workspace, even with a warm npm cache). The link is shared, not a private
+copy: `list`/`inspect` say so, teardown removes the link without touching
+the repo root's install (see "Reparse points and worktree removal" in
+DESIGN.md for the git behavior that made that a real hazard), and the
+agent must not run installs inside the workspace. Turbopack (`next build`
+on Next.js 16) refuses a linked `node_modules`, so a task that needs a
+real build should use `--deps install` (each detected package manager's
+own install, the previous behavior). `--deps none` (alias `--no-deps`)
+skips prep entirely; `--deps auto` is the default described above; and
+`pact.toml`'s `defaults.deps` sets the default for a repo. Every other
+ecosystem (Cargo, Go, uv, pnpm, ...) keeps its cheap, cache-backed
+passthrough install in every mode. A
 dependency-prepare failure is logged as a warning, not fatal; so is a
 coordination server that fails to connect (checked against the live
 event stream, not assumed). `--safety` overrides whichever adapter's own
@@ -733,6 +749,23 @@ ecosystem's own cache (`passthrough.rs`) — including npm, via `npm ci`
 relying on npm's own global cache (`~/.npm` or wherever `npm config get
 cache` points), shared automatically across concurrent `npm ci` calls
 with no pact-side coordination needed.
+
+A cache only saves the download, though; every workspace still pays the
+extraction. Issue #283 measured that at 99 s and 32,104 file writes per
+workspace for one Next.js app on Windows/NTFS with a warm cache, which is
+what actually stopped several agents from running at once on a 14 GB
+laptop. So the default is now to *link* `node_modules` to the repo root's
+existing install (a junction on Windows, a symlink elsewhere, 0.12 s)
+and only fall back to a real install when there is nothing to share, or
+when asked (`--deps install`). Two facts found by hand shaped this: `git
+worktree remove` follows such a link and deletes the target's contents,
+so teardown unlinks first (see DESIGN.md, "Reparse points and worktree
+removal"); and Turbopack rejects a linked `node_modules` outside its
+configured root, so full Next.js builds belong in a real-install
+worktree, not a linked editor workspace. Hardlinks were measured too (30
+s with 16 threads, no disk cost) and rejected as the sharing mechanism:
+they alias the same bytes, so a mutating install through one clone
+corrupts every other.
 
 That wasn't the original design. Through issue #233, npm was the one
 ecosystem pact built its own machinery for: a lockfile-hash-keyed content
