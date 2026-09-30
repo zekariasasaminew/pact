@@ -537,8 +537,16 @@ fn main() -> Result<()> {
         return demo::run();
     }
 
+    // Absolutized once, here, before anything derives a path from it
+    // (issue #290): `WorkspaceManager` builds the sibling state directory
+    // from this, and `git worktree add` resolves a relative worktree path
+    // against *its* cwd (the repo) while every later `Path::join` in pact
+    // resolves it against pact's cwd -- a relative `--repo` put the
+    // worktree inside the repository while pact's metadata pointed beside
+    // it. `std::path::absolute`, not `canonicalize`: the latter yields
+    // `\\?\`-prefixed verbatim paths on Windows that some tools mishandle.
     let repo_root = match cli.repo {
-        Some(p) => p,
+        Some(p) => std::path::absolute(&p).with_context(|| format!("resolving --repo {}", p.display()))?,
         None => find_repo_root(&std::env::current_dir()?)?,
     };
 
