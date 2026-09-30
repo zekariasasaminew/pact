@@ -592,8 +592,16 @@ impl WorkspaceManager {
     }
 
     /// Removes a worktree directory, tolerating two Windows failure modes
-    /// -- see DESIGN.md ("pact-vcs > Workspace teardown").
+    /// -- see DESIGN.md ("pact-vcs > Workspace teardown"). Unlinks every
+    /// top-level reparse point (junction, directory symlink) first: `git
+    /// worktree remove` follows them and deletes the *target's* contents,
+    /// which for a linked `node_modules` means the repo's own install --
+    /// confirmed by hand, see DESIGN.md ("pact-vcs > Reparse points and
+    /// worktree removal", issue #283).
     fn remove_worktree_retrying(&self, path: &std::path::Path) -> Result<()> {
+        for unlinked in unlink_top_level_reparse_points(path) {
+            tracing::debug!("unlinked {} before removing worktree {}", unlinked.display(), path.display());
+        }
         let mut last_err = String::new();
         for attempt in 0..10 {
             if attempt > 0 {
@@ -1522,6 +1530,41 @@ fn kill_if_alive(workspace: &Workspace) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Removes the link (never the target) for every immediate child of
+/// `worktree` that is a reparse point -- an NTFS junction or a directory
+/// symlink on Windows, a symlink on Unix -- and returns the paths unlinked.
+/// `symlink_metadata` reports junctions as symlinks, and `remove_dir` on a
+/// junction removes only the link; both confirmed by hand (see DESIGN.md
+/// ("pact-vcs > Reparse points and worktree removal", issue #283)). Best-
+/// effort: an unreadable directory or a failed unlink is skipped, since
+/// the caller is about to remove the whole tree anyway and a leftover
+/// link is the lesser risk.
+pub fn unlink_top_level_reparse_points(worktree: &Path) -> Vec<PathBuf> {
+    let mut unlinked = Vec::new();
+    let Ok(entries) = std::fs::read_dir(worktree) else {
+        return unlinked;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_link = std::fs::symlink_metadata(&path)
+            .map(|md| md.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            continue;
+        }
+        let removed = if cfg!(windows) {
+            std::fs::remove_dir(&path).or_else(|_| std::fs::remove_file(&path))
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => unlinked.push(path),
+            Err(err) => tracing::warn!("could not unlink {} before worktree removal: {err}", path.display()),
+        }
+    }
+    unlinked
 }
 
 /// Runs `git <args>` in `dir` and returns stdout as text, tolerating a
