@@ -103,6 +103,23 @@ fn remove_workspace_does_not_follow_a_node_modules_link_into_its_target() {
 }
 
 #[test]
+fn set_linked_paths_round_trips_through_workspace_metadata() {
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+    let workspace = manager.create_workspace("linked paths metadata", None).unwrap();
+    assert!(workspace.linked_paths.is_empty());
+
+    manager.set_linked_paths(&workspace.id, vec!["node_modules".to_string()]).unwrap();
+
+    let reloaded = manager.get_workspace(&workspace.id).unwrap();
+    assert_eq!(reloaded.linked_paths, vec!["node_modules".to_string()]);
+    assert_eq!(reloaded.base_commit, workspace.base_commit, "other fields must survive the rewrite");
+
+    manager.remove_workspace(&workspace.id, false, true).unwrap();
+    cleanup(&repo, &[]);
+}
+
+#[test]
 fn unlink_top_level_reparse_points_removes_only_the_link() {
     let base = std::env::temp_dir().join(format!("pact-vcs-unlink-{}", Uuid::new_v4()));
     let target = base.join("target");

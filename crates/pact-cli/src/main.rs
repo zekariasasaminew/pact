@@ -2310,6 +2310,7 @@ mod tests {
                 created_at: 0,
                 agent_pid: None,
                 base_commit: "deadbeef".to_string(),
+                linked_paths: Vec::new(),
             },
             dirty: Some(false),
             agent_alive,

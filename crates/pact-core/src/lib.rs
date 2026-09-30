@@ -528,6 +528,7 @@ impl Orchestrator {
             created_at: 0,
             agent_pid: None,
             base_commit: String::new(),
+            linked_paths: Vec::new(),
         };
         let coord_name = adapter.coord_server_name();
         let coord = self
@@ -1541,6 +1542,7 @@ mod tests {
             created_at: 0,
             agent_pid: None,
             base_commit: "deadbeef".to_string(),
+            linked_paths: Vec::new(),
         }
     }
 
