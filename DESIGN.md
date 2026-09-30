@@ -3007,6 +3007,25 @@ upward) fails the same way. Turbopack needs a real directory; that is
 the integration/verifier worktree's job (which stays on `Install`), not
 the editor workspaces'.
 
+**A trailing-slash ignore pattern does not match the link on Unix.**
+Found by an independent code review of the first cut and confirmed by a
+red ubuntu/macOS CI run: git's `dir.c` only lets a `node_modules/`
+pattern (GitHub's own Node template) match `DT_DIR` entries, and a
+symlink is `DT_LNK`, so on Linux/macOS the freshly linked `node_modules`
+showed up as `?? node_modules` -- `pact list` called every linked
+workspace dirty, `teardown` refused without `--force`, and `commit_all`
+would have committed the link (an absolute path into the user's install)
+onto the workspace branch. Git for Windows treats a junction as a
+directory, so nothing showed locally. `ensure_git_ignores` runs `git
+check-ignore` after linking and, only when the link is not ignored,
+appends `/node_modules` (anchored, slash-free) to the repository's
+`info/exclude` -- the file git provides for exactly this, shared by every
+worktree of the repo and never committed -- and records that as a note in
+the prep report. A repo whose `.gitignore` already uses a slash-free
+`node_modules` needs nothing. The end-to-end test asserts a linked
+workspace whose agent wrote nothing reads `[clean]` and tears down
+without `--force`.
+
 **The shared install is mutable through the link.** An agent running
 `npm install` in a linked workspace writes into the repo root's real
 `node_modules`. pact does not try to make the link read-only (an ACL is

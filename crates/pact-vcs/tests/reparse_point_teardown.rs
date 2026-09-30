@@ -32,7 +32,12 @@ fn init_repo() -> PathBuf {
     run_git(&root, &["config", "user.email", "test@test.com"]);
     run_git(&root, &["config", "user.name", "test"]);
     std::fs::write(root.join("README.md"), "# reparse\n").unwrap();
-    std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+    // Slash-free on purpose: this file tests teardown safety, not ignore
+    // semantics. A trailing-slash `node_modules/` pattern matches
+    // directories only, so a raw Unix symlink created below (bypassing
+    // pact-deps, which handles that case via `ensure_git_ignores`) would
+    // read as untracked and trip the dirty check before teardown ran.
+    std::fs::write(root.join(".gitignore"), "node_modules\n").unwrap();
     run_git(&root, &["add", "-A"]);
     run_git(&root, &["commit", "-q", "-m", "init"]);
     root

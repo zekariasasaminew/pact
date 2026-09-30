@@ -17,7 +17,7 @@ mod passthrough;
 
 pub use cmdutil::run as run_shimmed;
 pub use detect::{detect, PackageManager};
-pub use link::{link_dir, shareable_node_modules, NODE_MODULES};
+pub use link::{ensure_git_ignores, link_dir, shareable_node_modules, NODE_MODULES};
 
 use std::path::Path;
 use std::str::FromStr;
@@ -159,10 +159,15 @@ pub fn prepare_with_mode(workspace_path: &Path, repo_root: &Path, mode: DepsMode
 
 fn prepare_link(manager: PackageManager, workspace_path: &Path, target: &Path) -> ManagerPrepReport {
     let link_path = workspace_path.join(link::NODE_MODULES);
-    let (success, warnings, linked_paths) = match link::link_dir(target, &link_path) {
+    let (success, mut warnings, linked_paths) = match link::link_dir(target, &link_path) {
         Ok(()) => (true, Vec::new(), vec![link::NODE_MODULES.to_string()]),
         Err(err) => (false, vec![format!("{err:#}")], Vec::new()),
     };
+    if success {
+        if let Some(note) = link::ensure_git_ignores(workspace_path, link::NODE_MODULES) {
+            warnings.push(note);
+        }
+    }
     ManagerPrepReport {
         manager: manager.name().to_string(),
         strategy: "link".to_string(),

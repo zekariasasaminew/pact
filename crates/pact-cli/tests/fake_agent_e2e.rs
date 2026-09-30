@@ -662,7 +662,11 @@ fn spawn_with_no_deps_skips_dependency_prep_entirely() {
 /// it instead of running a 99-second `npm ci`, records the link in the
 /// workspace metadata, shows it in `list`, and -- the safety half --
 /// `teardown` removes the link without deleting the repo root's install
-/// through it (`git worktree remove` on its own would).
+/// through it (`git worktree remove` on its own would). The fake agent
+/// writes nothing, so the workspace must read as `[clean]` with the link
+/// in place (a trailing-slash `node_modules/` ignore pattern does not
+/// match a Unix symlink on its own; pact adds an exclude) and a plain
+/// `teardown`, no `--force`, must succeed.
 #[test]
 fn spawn_links_node_modules_to_the_repo_root_and_teardown_leaves_it_intact() {
     let repo = init_repo("deps-link");
@@ -675,7 +679,7 @@ fn spawn_links_node_modules_to_the_repo_root_and_teardown_leaves_it_intact() {
     std::fs::write(installed.join("index.js"), "module.exports = (s) => s;").unwrap();
     let shim = shim_dir();
 
-    let task = script(&[("hello.txt", "hello")], "created hello.txt");
+    let task = script(&[], "inspected the workspace, changed nothing");
     let spawn = pact(&repo, &shim, &["spawn", &task, "--agent", "claude"]);
     assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
     let id = workspace_id_from_spawn_output(&spawn);
@@ -699,9 +703,15 @@ fn spawn_links_node_modules_to_the_repo_root_and_teardown_leaves_it_intact() {
     assert_eq!(deps[0]["strategy"], "link", "deps report: {deps}");
 
     let list = pact(&repo, &shim, &["list"]);
-    assert!(stdout(&list).contains("linked (shared with repo root): node_modules"), "got: {}", stdout(&list));
+    let list_text = stdout(&list);
+    assert!(list_text.contains("linked (shared with repo root): node_modules"), "got: {list_text}");
+    let workspace_line = list_text.lines().find(|l| l.starts_with(&id)).unwrap_or_else(|| panic!("no line for {id} in:\n{list_text}"));
+    assert!(
+        workspace_line.contains("[clean"),
+        "a linked node_modules must not make the workspace dirty (git must ignore the link); got: {workspace_line}"
+    );
 
-    let teardown = pact(&repo, &shim, &["teardown", &id, "--force"]);
+    let teardown = pact(&repo, &shim, &["teardown", &id]);
     assert!(teardown.status.success(), "stdout: {}\nstderr: {}", stdout(&teardown), String::from_utf8_lossy(&teardown.stderr));
     assert!(!workspace_dir.exists(), "the worktree must be gone");
     assert!(
