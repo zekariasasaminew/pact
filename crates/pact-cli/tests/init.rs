@@ -104,11 +104,24 @@ fn init_force_overwrites_an_existing_pact_toml() {
 /// no-op on a machine without `copilot` on PATH and a real (fast, free,
 /// no-LLM-call) registration on one with it. Either way, `pact init`
 /// itself must still succeed and still write pact.toml.
+///
+/// Issue #294: that real registration is a durable edit to Copilot's
+/// `settings.json`, so it is pointed at a scratch `COPILOT_HOME` here --
+/// before this, every `cargo test` on a machine with `copilot` installed
+/// appended one more dead temp path to the developer's *real* settings.
 #[test]
 fn init_register_skill_never_fails_the_command_regardless_of_detected_agents() {
     let repo = init_repo("register-skill");
+    let scratch_home = std::env::temp_dir().join(format!("pact-cli-init-scratch-copilot-home-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch_home).unwrap();
 
-    let output = run_pact(&repo, &["init", "--register-skill"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_pact"))
+        .args(["--repo"])
+        .arg(&repo)
+        .args(["init", "--register-skill"])
+        .env("COPILOT_HOME", &scratch_home)
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "expected `pact init --register-skill` to succeed either way, stderr: {}",
@@ -116,6 +129,7 @@ fn init_register_skill_never_fails_the_command_regardless_of_detected_agents() {
     );
     assert!(repo.join("pact.toml").exists(), "expected pact.toml to still be written");
 
+    let _ = std::fs::remove_dir_all(&scratch_home);
     cleanup(&repo);
 }
 
