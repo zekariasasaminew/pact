@@ -956,10 +956,10 @@ fn spawn_many_dry_run_prints_the_admission_policy() {
     let repo = init_repo("admission-dry-run");
     let shim = shim_dir();
     let task = script(&[], "noop");
-    let preview = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--task", &task, "--dry-run", "--max-concurrent", "3", "--min-free-mem-mb", "0", "--stagger-ms", "10"]);
+    let preview = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--task", &task, "--dry-run", "--max-concurrent", "3", "--min-free-mem-mb", "0", "--stagger-ms", "10", "--per-lane-reserve-mb", "700"]);
     assert!(preview.status.success(), "stderr: {}", String::from_utf8_lossy(&preview.stderr));
     assert!(
-        stdout(&preview).contains("admission: at most 3 agents running at once, 0 MB free memory required before each launch, 10 ms between launches"),
+        stdout(&preview).contains("admission: at most 3 agents running at once, 0 MB free memory required before each launch (each running agent reserves 700 MB against that), 10 ms between launches"),
         "got: {}",
         stdout(&preview)
     );

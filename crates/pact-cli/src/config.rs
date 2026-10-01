@@ -21,6 +21,7 @@ struct Defaults {
     max_concurrent: Option<usize>,
     min_free_mem_mb: Option<u64>,
     stagger_ms: Option<u64>,
+    per_lane_reserve_mb: Option<u64>,
 }
 
 impl PactConfig {
@@ -70,6 +71,13 @@ impl PactConfig {
     pub fn default_stagger_ms(&self) -> Option<u64> {
         self.defaults.stagger_ms
     }
+
+    /// `defaults.per_lane_reserve_mb`: memory each running lane is
+    /// reserved to grow into when the next admission is decided (issue
+    /// #320).
+    pub fn default_per_lane_reserve_mb(&self) -> Option<u64> {
+        self.defaults.per_lane_reserve_mb
+    }
 }
 
 #[cfg(test)]
@@ -96,7 +104,7 @@ mod tests {
         let dir = scratch_dir();
         std::fs::write(
             dir.join(PactConfig::FILE_NAME),
-            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\ndeps = \"link\"\nmax_concurrent = 3\nmin_free_mem_mb = 0\nstagger_ms = 500\n",
+            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\ndeps = \"link\"\nmax_concurrent = 3\nmin_free_mem_mb = 0\nstagger_ms = 500\nper_lane_reserve_mb = 900\n",
         )
         .unwrap();
         let config = PactConfig::load(&dir).unwrap();
@@ -106,6 +114,7 @@ mod tests {
         assert_eq!(config.default_max_concurrent(), Some(3));
         assert_eq!(config.default_min_free_mem_mb(), Some(0));
         assert_eq!(config.default_stagger_ms(), Some(500));
+        assert_eq!(config.default_per_lane_reserve_mb(), Some(900));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

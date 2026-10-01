@@ -296,6 +296,19 @@ enum Command {
         #[arg(long)]
         stagger_ms: Option<u64>,
 
+        /// Memory, in MiB, each already-running agent is expected to grow
+        /// into but has not yet claimed when the next launch is decided
+        /// (issue #320). A lean agent sits at 0.3-0.45 GB while authoring
+        /// and then runs a 1.5-1.9 GB test suite or build; a gate reading
+        /// instantaneous free memory admits N agents against the same
+        /// headroom and they peak together (measured: 8 lanes into 5 GB
+        /// free drove the machine to 112 MB free). Each running agent
+        /// reserves this much against --min-free-mem-mb. Default 1200;
+        /// 0 disables the reservation. Falls back to `pact.toml`'s
+        /// `defaults.per_lane_reserve_mb`.
+        #[arg(long)]
+        per_lane_reserve_mb: Option<u64>,
+
         /// Run every lane in ONE shared worktree instead of one worktree
         /// per task (issue #315). For a batch whose tasks touch disjoint
         /// files this removes per-lane isolation and the entire merge
@@ -752,6 +765,7 @@ fn main() -> Result<()> {
             max_concurrent,
             min_free_mem_mb,
             stagger_ms,
+            per_lane_reserve_mb,
             shared_tree,
             allow_overlap,
             names,
@@ -761,6 +775,7 @@ fn main() -> Result<()> {
                 max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
                 min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
                 stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
+                per_lane_reserve_mb: per_lane_reserve_mb.or(config.default_per_lane_reserve_mb()).unwrap_or(1200),
             };
             if tasks.is_empty() && task_files.is_empty() {
                 bail!("at least one --task or --task-file is required");
@@ -867,10 +882,12 @@ fn main() -> Result<()> {
 
             if dry_run {
                 println!(
-                    "admission: at most {} agent{} running at once, {} MB free memory required before each launch, {} ms between launches",
+                    "admission: at most {} agent{} running at once, {} MB free memory required before each launch \
+                     (each running agent reserves {} MB against that), {} ms between launches",
                     admission.max_concurrent,
                     if admission.max_concurrent == 1 { "" } else { "s" },
                     admission.min_free_mem_mb,
+                    admission.per_lane_reserve_mb,
                     admission.stagger.as_millis()
                 );
                 for (index, task) in batch.iter().enumerate() {
@@ -2104,7 +2121,8 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # deps = \"auto\"  # auto (link node_modules to the repo root's when present), link, install, none\n\
          # max_concurrent = 2  # spawn-many: agents running at once (workspace prep is not counted)\n\
          # min_free_mem_mb = 1500  # spawn-many: wait for this much free memory before each launch; 0 disables\n\
-         # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n"
+         # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n\
+         # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; 0 disables\n"
     );
 
     std::fs::write(&config_path, contents)

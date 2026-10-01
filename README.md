@@ -261,15 +261,23 @@ Known limitations for why that's not per-task yet.
 worktree and dependencies are prepared up front (cheap in link mode), but
 at most `--max-concurrent` agents (default 2) are running at once, a new
 one launches only when at least `--min-free-mem-mb` (default 1500) of
-memory is available, and launches are at least `--stagger-ms` (default
-2000) apart so a provider never sees a burst of new sessions. A task that
+memory is available after subtracting `--per-lane-reserve-mb` (default
+1200) for every agent already running, and launches are at least
+`--stagger-ms` (default 2000) apart so a provider never sees a burst of
+new sessions. The reservation is what stops N agents being admitted
+against the same not-yet-consumed headroom: a lean agent sits at
+0.3-0.45 GB while authoring and then runs a 1.5-1.9 GB test suite, so a
+gate reading instantaneous free memory admits everyone and they peak
+together (measured: 8 lanes into 5 GB free drove a 14 GB laptop to 112 MB
+free). A task that
 can't launch yet says `queued: ...` in the stream every 15 s and waits;
 on a machine short of memory that can mean zero agents running until
 something frees up, which is the point (measured per-process peaks on a
 14 GB laptop: a lean agent 0.3-0.45 GB, but `vitest` 1.5 GB and `next
-build` 1.9 GB). All three have `pact.toml` `[defaults]` keys; `--dry-run`
+build` 1.9 GB). All four have `pact.toml` `[defaults]` keys; `--dry-run`
 prints the effective policy. Raise the cap when you have the memory for
-it, or `--min-free-mem-mb 0` to disable the memory check.
+it, `--per-lane-reserve-mb 0` to size purely on instantaneous free
+memory, or `--min-free-mem-mb 0` to disable the memory check.
 
 ```sh
 pact spawn-many --agent copilot --task "..." --task "..." --task "..." --max-concurrent 3
