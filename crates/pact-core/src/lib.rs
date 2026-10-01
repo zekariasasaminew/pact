@@ -1122,11 +1122,13 @@ impl Orchestrator {
                         std::thread::sleep(std::time::Duration::from_millis(300));
                     }
                 });
+                let mut coalescer = acp_runtime::ChunkCoalescer::new();
                 let outcome = runtime.prompt(&mut session, task, |update| {
                     let line = serde_json::json!({ "sessionId": update.session_id, "update": update.raw });
                     let _ = writeln!(log, "{line}");
-                    on_event(&acp_runtime::event_for_update(&update));
+                    coalescer.push(&update, on_event);
                 });
+                coalescer.flush(on_event);
                 stop_watching.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = watcher.join();
                 outcome

@@ -1220,6 +1220,21 @@ are known, sizes the memory reserve (#332) from the result, and says
 An explicit `--runtime` is passed through untouched; asking for `acp`
 with an agent that lacks it still fails up front with the agent named.
 
+The first long run also showed what the stream looked like (issue
+#339): every unmodelled `session/update` became an untyped `Other` that
+the CLI's suppression could not name, so thought fragments, tool
+progress, context-fill ticks and session metadata all printed, and
+`agent_message_chunk` fragments printed one `[assistant]` line each. Two
+small mechanisms, both keeping the rule that `Other` is never dropped:
+`event_for_update` tags its values `acp.<sessionUpdate>` so the existing
+`SUPPRESSED_OTHER_EVENT_TYPES` list can carry the seven kinds that run
+showed to be volume (an ACP kind pact has never seen still prints, and
+`--verbose` prints everything), and `ChunkCoalescer` joins consecutive
+message chunks into one `AssistantText`, flushed by the next update of
+any other kind or the end of the turn, so a lane's message reads as the
+process runtime's complete `assistant.message` does. The per-lane JSONL
+log is written before either and keeps every raw update.
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched
