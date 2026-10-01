@@ -1226,6 +1226,53 @@ false-positive tolerance was accepted: `predict_task_overlap` is
 advisory only, never blocks anything, and `pact conflicts`' real
 git-diff-based detection remains the mechanism that actually matters.
 
+### Weaver: negation lists, read-only verbs, member access (issue #317)
+
+"Advisory only, never blocks anything" stopped being true the moment
+`spawn-many --shared-tree` (issue #315) made an overlap a refusal, which
+is the right call for a mode with no isolation, and it exposed how the
+#239 negation fix actually behaved on real briefs. The 2026-10-01
+benchmark briefs each contained one well-written sentence: "Do not edit
+`vitest.config.mts`, `vitest.setup.ts`, `vitest.setup.dom.ts`,
+`package.json`, `package-lock.json`, `tsconfig.json` or
+`eslint.config.mjs`." Because `split_into_clauses` cuts at every comma
+and `clause_is_negated` is evaluated per clause, only the first filename
+sat in a clause containing "not"; the other six were each flagged as a
+file "mentioned by all 8 tasks". Ten false positives, zero true ones,
+and `--shared-tree` refused a perfectly disjoint batch, forcing
+`--allow-overlap` on exactly the batches the mode exists for.
+
+Three changes, all still in `extract_file_tokens`:
+
+- **Negation carries across a list.** A clause inherits its
+  predecessor's negation across `,`/`;` until a sentence-final delimiter
+  resets it, unless the clause opens with an affirmative pivot (`but`,
+  `then`, `instead`, `however`, `also`, `and then`, `while`). "Do not
+  touch b.ts, but edit a.ts" still flips at "but" (the existing #239
+  test for exactly that sentence still passes); "Do not edit a, b, c or
+  d." is one negated instruction. Only the clause's first two words can
+  pivot, so a "but" inside a list item does not.
+- **Read-only verbs.** A clause containing `read`, `preserve`,
+  `imitate`, `mirror`, `inspect`, `consult`, `study` or `reference` names
+  files the task must not change ("read `vitest.config.mts`", "preserve
+  the smoke tests `a.test.ts` and `b.test.tsx`"). Deliberately a short
+  list of verbs that cannot introduce a write; `use`/`see`/`check` are
+  excluded because "use `foo.ts` as the place to add X" is a write.
+- **Member access.** `global.fetch`, `process.env`, `window.location`
+  share a filename's shape. A dotless-directory candidate whose stem is
+  a well-known runtime global (`RUNTIME_GLOBALS`) is not a file; a path
+  with a `/` is never affected, so `src/global.css` still is.
+
+Measured against the trigger: the 8 real briefs went from 10 flagged
+tokens to 0 with no `--allow-overlap`, while all 6 prior heuristic tests
+still pass. Still a text heuristic with blind spots, now with one more
+known one recorded here: a negation *after* the mention in the same
+clause ("read these files, never edit them" with the negation in the
+next clause is handled; "edit nothing in `x.ts`" with "nothing" is not,
+since `nothing` is not a cue). The guard rail is worth keeping strict
+only while its false-positive rate on well-written briefs stays near
+zero; if that regresses, the fix is here, not in loosening the refusal.
+
 ### Arbiter — agent invocation
 
 `ArbiterConfig` is the "verified" half of pact's conflict story: a

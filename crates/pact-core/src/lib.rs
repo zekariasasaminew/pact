@@ -363,17 +363,63 @@ fn split_into_clauses(text: &str) -> Vec<&str> {
     clauses
 }
 
-/// Splits `task` into clauses, skips any clause containing a negation cue
-/// entirely (issue #239), and within the rest keeps whichever
-/// whitespace/punctuation-separated chunks look like a file path (see
-/// `looks_like_file_path`) and aren't a brand-name-shaped false positive
-/// (see `looks_like_brand_name` -- issue #239's other real finding:
-/// "Next.js", mentioned in every task's plain-English repo description,
-/// was flagged the same way "package.json" correctly was).
+/// Verbs that make a clause's file mentions read-only -- issue #317's
+/// second finding: "read `vitest.config.mts`", "preserve the smoke tests
+/// `a.test.ts` and `b.test.tsx`", "imitate `x.ts`" all name files the
+/// task must *not* change. Deliberately a short list of unambiguous
+/// read-only verbs; "use"/"see"/"check" are not here because "use
+/// `foo.ts` as the place to add X" is a write.
+const READ_ONLY_CUES: &[&str] = &["read", "preserve", "imitate", "mirror", "inspect", "consult", "study", "reference"];
+
+fn clause_is_read_only(clause: &str) -> bool {
+    let lower = clause.to_lowercase();
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| READ_ONLY_CUES.contains(&word))
+}
+
+/// Words that, at the start of a comma-continued clause, end a negation
+/// carried over from the previous clause: "do not touch b.ts, but edit
+/// a.ts" flips back to affirmative at "but". Without a pivot, a
+/// comma-continued clause inherits its predecessor's polarity -- issue
+/// #317: "Do not edit `a`, `b`, `c` or `d`." is one negated instruction,
+/// not one negated clause followed by three affirmative ones.
+const AFFIRMATIVE_PIVOTS: &[&str] = &["but", "then", "instead", "however", "also", "and then", "while"];
+
+fn clause_pivots_to_affirmative(clause: &str) -> bool {
+    let lower = clause.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    // Only the clause's leading words count as a pivot; "but" buried later
+    // in a list item is not a polarity change.
+    let head: Vec<&str> = words.iter().take(2).copied().collect();
+    AFFIRMATIVE_PIVOTS.iter().any(|p| {
+        let pw: Vec<&str> = p.split(' ').collect();
+        head.len() >= pw.len() && head[..pw.len()] == pw[..]
+    })
+}
+
+/// Whether `clause` ends a sentence (so polarity resets for whatever
+/// follows) rather than continuing one across a `,`/`;`.
+fn clause_ends_sentence(clause: &str) -> bool {
+    clause.trim_end().ends_with(['.', '!', '?'])
+}
+
+/// Splits `task` into clauses, skips any clause that is negated (issue
+/// #239) -- directly, or by inheriting a negation from the clause before
+/// it across a comma/semicolon within the same sentence (issue #317) --
+/// and within the rest keeps whichever whitespace/punctuation-separated
+/// chunks look like a file path (see `looks_like_file_path`) and aren't a
+/// brand-name-shaped false positive (see `looks_like_brand_name` --
+/// issue #239's other real finding: "Next.js", mentioned in every task's
+/// plain-English repo description, was flagged the same way
+/// "package.json" correctly was).
 fn extract_file_tokens(task: &str) -> std::collections::HashSet<String> {
     let mut tokens = std::collections::HashSet::new();
+    let mut carried_negation = false;
     for clause in split_into_clauses(task) {
-        if clause_is_negated(clause) {
+        let negated = clause_is_negated(clause) || (carried_negation && !clause_pivots_to_affirmative(clause));
+        carried_negation = negated && !clause_ends_sentence(clause);
+        if negated || clause_is_read_only(clause) {
             continue;
         }
         for word in clause.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | ':' | '`')) {
@@ -410,6 +456,25 @@ fn looks_like_brand_name(candidate: &str) -> bool {
     }
 }
 
+/// Bare `object.member` identifiers that share a filename's shape -- issue
+/// #317: `global.fetch` in "mock `global.fetch`" was flagged as a file
+/// mentioned by two tasks. A real path with a `/` is never affected; this
+/// only catches the dotless-directory case where the stem is a well-known
+/// runtime global rather than a file stem.
+const RUNTIME_GLOBALS: &[&str] = &[
+    "global", "globalthis", "window", "document", "process", "console", "math", "json", "object", "array",
+    "promise", "date", "navigator", "localstorage", "sessionstorage", "crypto", "performance", "self", "this",
+    "module", "exports", "require", "import", "vi", "jest", "expect", "cy",
+];
+
+fn looks_like_member_access(candidate: &str) -> bool {
+    if candidate.contains('/') {
+        return false;
+    }
+    let Some(dot) = candidate.find('.') else { return false };
+    RUNTIME_GLOBALS.contains(&candidate[..dot].to_ascii_lowercase().as_str())
+}
+
 /// A conservative, regex-free "does this look like a file path" check --
 /// see DESIGN.md ("pact-core > Weaver -- task overlap prediction").
 fn looks_like_file_path(s: &str) -> bool {
@@ -419,7 +484,9 @@ fn looks_like_file_path(s: &str) -> bool {
         return false;
     }
     let stem = &s[..dot];
-    !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
+    !stem.is_empty()
+        && stem.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
+        && !looks_like_member_access(s)
 }
 
 impl Orchestrator {
@@ -1931,6 +1998,78 @@ mod tests {
         let tokens = extract_file_tokens("don't touch config.yaml, but do update main.rs");
         assert!(!tokens.contains("config.yaml"));
         assert!(tokens.contains("main.rs"));
+    }
+
+    #[test]
+    fn extract_file_tokens_carries_negation_across_a_comma_separated_do_not_edit_list() {
+        // Regression test for issue #317: the exact sentence from the 2026-10-01
+        // benchmark briefs. Only the first comma-clause contains "not"; every
+        // later filename used to land in its own un-negated clause and get
+        // flagged, which made --shared-tree refuse a perfectly disjoint batch.
+        let tokens = extract_file_tokens(
+            "Do not edit `vitest.config.mts`, `vitest.setup.ts`, `vitest.setup.dom.ts`, `package.json`, \
+             `package-lock.json`, `tsconfig.json` or `eslint.config.mjs`. Write tests in lib/items/search.test.ts.",
+        );
+        for forbidden in ["vitest.config.mts", "vitest.setup.ts", "vitest.setup.dom.ts", "package.json", "package-lock.json", "tsconfig.json", "eslint.config.mjs"] {
+            assert!(!tokens.contains(forbidden), "{forbidden} is in a 'do not edit' list and must not be flagged; got {tokens:?}");
+        }
+        assert!(tokens.contains("lib/items/search.test.ts"), "the affirmative mention in the next sentence must still be caught; got {tokens:?}");
+    }
+
+    #[test]
+    fn extract_file_tokens_negation_does_not_leak_past_the_end_of_the_sentence() {
+        let tokens = extract_file_tokens("Do not touch a.ts, b.ts. Then edit c.ts, d.ts.");
+        assert!(!tokens.contains("a.ts") && !tokens.contains("b.ts"), "got {tokens:?}");
+        assert!(tokens.contains("c.ts") && tokens.contains("d.ts"), "a new sentence resets polarity; got {tokens:?}");
+    }
+
+    #[test]
+    fn extract_file_tokens_negation_stops_at_an_affirmative_pivot_mid_sentence() {
+        // Mixed polarity in one sentence: the pivot word flips back.
+        let tokens = extract_file_tokens("Avoid editing shared.ts, utils.ts, instead add your code in feature.ts, feature.test.ts");
+        assert!(!tokens.contains("shared.ts") && !tokens.contains("utils.ts"), "got {tokens:?}");
+        assert!(tokens.contains("feature.ts") && tokens.contains("feature.test.ts"), "after 'instead' the list is affirmative; got {tokens:?}");
+    }
+
+    #[test]
+    fn extract_file_tokens_semicolon_list_after_negation_is_negated_too() {
+        let tokens = extract_file_tokens("Never modify migrations/001.sql; migrations/002.sql; or schema.prisma. Add seed.ts.");
+        assert!(!tokens.contains("migrations/001.sql") && !tokens.contains("migrations/002.sql") && !tokens.contains("schema.prisma"), "got {tokens:?}");
+        assert!(tokens.contains("seed.ts"), "got {tokens:?}");
+    }
+
+    #[test]
+    fn extract_file_tokens_treats_read_only_verbs_as_not_a_write() {
+        // Issue #317's second finding, from the same benchmark briefs: files
+        // named as things to read or preserve are not files the task edits.
+        let tokens = extract_file_tokens(
+            "Vitest is already set up: read `vitest.config.mts` and `vitest.setup.ts`. \
+             Imitate and preserve the smoke tests `lib/items/serialize.test.ts` and `app/(app)/hub/skeleton.test.tsx`. \
+             Write lib/items/search.test.ts beside the source.",
+        );
+        for read_only in ["vitest.config.mts", "vitest.setup.ts", "lib/items/serialize.test.ts", "app/(app)/hub/skeleton.test.tsx"] {
+            assert!(!tokens.contains(read_only), "{read_only} is only read/preserved; got {tokens:?}");
+        }
+        assert!(tokens.contains("lib/items/search.test.ts"), "got {tokens:?}");
+    }
+
+    #[test]
+    fn extract_file_tokens_read_only_cue_does_not_hide_a_file_in_a_separate_write_clause() {
+        // "read X, then edit Y": the pivot plus the clause split keep Y visible.
+        let tokens = extract_file_tokens("Read docs/spec.md, then edit src/handler.ts to match.");
+        assert!(!tokens.contains("docs/spec.md"), "got {tokens:?}");
+        assert!(tokens.contains("src/handler.ts"), "got {tokens:?}");
+    }
+
+    #[test]
+    fn extract_file_tokens_ignores_runtime_member_access_shaped_like_a_file() {
+        // Issue #317's third finding: `global.fetch` flagged as a shared file.
+        let tokens = extract_file_tokens("Mock global.fetch and process.env in hooks; write app/hub/use-items.test.ts");
+        assert!(!tokens.contains("global.fetch") && !tokens.contains("process.env"), "got {tokens:?}");
+        assert!(tokens.contains("app/hub/use-items.test.ts"), "got {tokens:?}");
+        // A real file whose stem happens to be a word in the list but with a path is untouched.
+        let tokens = extract_file_tokens("edit src/global.css and lib/date.ts");
+        assert!(tokens.contains("src/global.css") && tokens.contains("lib/date.ts"), "got {tokens:?}");
     }
 
     #[test]
