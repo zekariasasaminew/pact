@@ -1370,6 +1370,27 @@ planning fails the prepared tree is removed; if preparation fails the
 plan is persisted and the error says how to rerun it with `--plan`.
 The `--plan` path stays sequential, since it has nothing to overlap.
 
+How many units to ask for was the last number a human still set
+(issue #356): `--max-units` defaulted to 8 and `run`'s
+`--max-concurrent` to 2, so an eight-unit plan ran four lanes deep
+unless the caller knew to raise both, and neither default looked at
+the machine. Arm R2's lane phase was 73% of the run with the slowest
+lane deciding it, while the eight ACP lanes peaked at 3.2 GB with
+3.1 GB still free and a sixth of the cores busy. Admission already
+knows how many lanes fit, so `lanes_that_fit` asks it the way `decide`
+will answer at launch time (the lanes whose reserves fit above the
+floor, plus one, so a plan sized this way is admitted in one go), and
+`suggested_units` caps that by logical cores (a lane's test run or
+build is a process of its own) and clamps it to 2..16: below two there
+is nothing to run in parallel, above sixteen the planner is splitting
+single files and every lane re-reads the same task for a smaller share
+of the work. `run`'s `--max-concurrent` then falls back to the unit
+count, so what was planned can run at once, with admission still the
+governor if the machine has changed by launch time. The sizing is
+printed, and both flags remain overrides. On the owner's 12-core
+13.7 GB laptop with 5.6 GB free this picks 12 ACP lanes against the
+kit's 500 MB floor and 11 against the default 1500.
+
 Not here: dependent units (waves, #282), gap-closing lanes after a
 failed verification, balancing beyond an advisory warning when the
 heaviest unit's existing lines exceed four times the lightest (new-file

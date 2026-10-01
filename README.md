@@ -190,25 +190,32 @@ pact run --agent copilot --plan .pact-<repo>/meta/plans/<stamp>-<slug>.json "...
 `pact run` (issue #305) is the whole loop with no briefs to write: a
 planner session reads the repository and splits the task into
 file-disjoint units; pact validates the plan mechanically (no file owned
-by two units, repo-relative paths, unique names, at most `--max-units`)
+by two units, repo-relative paths, unique names, at most `--max-units`,
+which defaults to what this machine can run at once: the lanes that fit
+by memory under the admission policy, capped by logical cores, 2 to 16)
 and sends violations back to the planner up to `--plan-retries` times;
-renders one self-contained brief per unit (its files, what to produce,
-the plan's shared conventions, and the rules workers kept breaking when
-humans wrote briefs: no installs or builds, no commits, touch nothing
-outside your files); runs the units as lanes in one shared tree (disjoint
-by construction, so no isolation and no merge, under the default ACP
-runtime); commits once; then runs the verification command in the result
+renders one brief per unit (the task verbatim, its files, the planner's
+few sentences, the plan's shared conventions, and the rules workers kept
+breaking when humans wrote briefs: no installs or builds, no commits,
+touch nothing outside your files); runs the units as lanes in one shared
+tree (disjoint by construction, so no isolation and no merge, under the
+default ACP runtime, as many at once as were planned unless
+`--max-concurrent` says otherwise); commits once; then runs the
+verification command in the result
 and reports a verdict that knows the baseline: the same command is run
 on the untouched tree first, so a check that already fails on the base
 commit (generated files missing from a fresh worktree, say) reads as
 `INCONCLUSIVE` (exit 3), a check the run broke reads as a regression,
-and a check the run made pass reads as fixed. Plans and briefs are
-persisted under the state dir (`meta/plans/`, `briefs/`); the result is
+and a check the run made pass reads as fixed. The shared tree, its
+dependencies and that baseline are prepared while the planner works.
+Plans and briefs are
+persisted under the state dir (`meta/plans/`, `briefs/`), the planner's
+session under `logs/planner-*.jsonl`; the result is
 a branch to review with `pact diff`, land with `pact merge-all`, or push.
-Measured on the benchmark (arm R, issue #308): `pact run` on a 39-file
-test-writing task finished in 16.3 min against 15.8 for Copilot's own
-in-process sub-agents, 8% cheaper, with 9% more tests, 57% less mean
-memory and 25% less CPU, and nobody wrote a brief. One wave only for
+Measured on the benchmark (arm R2, issue #308): `pact run` on a 39-file
+test-writing task finished in 12.5 min against 15.8 for Copilot's own
+in-process sub-agents, 21% cheaper, with higher coverage, 26% less peak
+and 49% less mean memory, and nobody wrote a brief. One wave only for
 now: units that depend on each other are #282.
 
 ### Running agents in parallel by hand

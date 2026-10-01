@@ -206,8 +206,16 @@ fn run_dry_run_plans_and_persists_but_spawns_nothing() {
     let text = stdout(&out);
     assert!(text.contains("dry run: nothing spawned. Edit the plan and run it with `pact run --plan"), "{text}");
     assert!(text.contains("      alpha.txt") && text.contains("      src.ts"), "files are listed per unit:\n{text}");
+    // Issue #356: no --max-units given, so the count is sized to the machine and said so.
+    let sizing = text.lines().find(|l| l.starts_with("sizing: up to ")).unwrap_or_else(|| panic!("no sizing line in:\n{text}"));
+    let units: usize = sizing.trim_start_matches("sizing: up to ").split_whitespace().next().unwrap().parse().unwrap();
+    assert!((pact_core::MIN_AUTO_UNITS..=pact_core::MAX_AUTO_UNITS).contains(&units), "{sizing}");
+    assert!(sizing.contains("pass --max-units to override"), "{sizing}");
     assert!(pact_vcs::WorkspaceManager::open(&repo).unwrap().list_workspaces().unwrap().is_empty());
     assert_eq!(std::fs::read_dir(state_dir(&repo).join("meta").join("plans")).unwrap().count(), 1, "the plan is persisted even on a dry run");
+    let explicit = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run", "--max-units", "3", "Add two text files"]);
+    assert!(explicit.status.success(), "{}", stderr(&explicit));
+    assert!(!stdout(&explicit).contains("sizing:"), "an explicit --max-units is not second-guessed:\n{}", stdout(&explicit));
 
     cleanup(&repo);
     cleanup(&shim);

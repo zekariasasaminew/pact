@@ -113,6 +113,41 @@ pub fn projected_free_mb(running: usize, policy: &AdmissionPolicy, available_mb:
     available_mb.saturating_sub(reserved)
 }
 
+/// How many lanes `available_mb` holds at once under `policy`: the lanes
+/// whose reserves fit above the memory floor, counted the way `decide`
+/// will count them, so a plan sized this way is admitted in one go.
+/// At least one, since `decide` admits the first lane whenever the floor
+/// itself is met. A zero reserve or a zero floor means "unbounded by
+/// memory", reported as `usize::MAX`.
+pub fn lanes_that_fit(policy: &AdmissionPolicy, available_mb: u64) -> usize {
+    if policy.per_lane_reserve_mb == 0 || policy.min_free_mem_mb == 0 {
+        return usize::MAX;
+    }
+    let headroom = available_mb.saturating_sub(policy.min_free_mem_mb);
+    // `decide` for lane n checks `available - n * reserve >= floor`, so
+    // n lanes are admitted when (n - 1) reserves fit in the headroom.
+    (headroom / policy.per_lane_reserve_mb).saturating_add(1).clamp(1, usize::MAX as u64) as usize
+}
+
+/// Fewest units `suggested_units` ever asks for: below two there is
+/// nothing to run in parallel.
+pub const MIN_AUTO_UNITS: usize = 2;
+/// Most units `suggested_units` ever asks for. Past this the planner is
+/// splitting single files and every lane re-reads the same task for a
+/// smaller share of the work.
+pub const MAX_AUTO_UNITS: usize = 16;
+
+/// The unit count `pact run` asks the planner for when the user did not
+/// say (issue #356): as many lanes as the machine holds by memory under
+/// `policy`, capped by its logical cores (a lane's test run or build is
+/// a process of its own), between `MIN_AUTO_UNITS` and `MAX_AUTO_UNITS`.
+/// The slowest unit decides a run's wall-clock, so this errs towards
+/// more, smaller units; admission still governs at launch time if the
+/// machine has changed by then.
+pub fn suggested_units(policy: &AdmissionPolicy, available_mb: u64, cores: usize) -> usize {
+    lanes_that_fit(policy, available_mb).min(cores.max(1)).clamp(MIN_AUTO_UNITS, MAX_AUTO_UNITS)
+}
+
 struct State {
     running: usize,
     /// When the most recent admission became effective -- the next one
@@ -303,6 +338,35 @@ mod tests {
         assert_eq!(projected_free_mb(10, &p, 5000), 0);
         assert_eq!(projected_free_mb(0, &p, 5000), 5000);
         assert_eq!(projected_free_mb(2, &p, 5000), 2600);
+    }
+
+    /// Issue #356: the count `lanes_that_fit` returns is exactly the
+    /// number of consecutive admissions `decide` grants against the same
+    /// available figure, so a plan sized by it starts in one go.
+    #[test]
+    fn lanes_that_fit_agrees_with_decide_and_treats_zero_reserve_or_floor_as_unbounded() {
+        for (floor, reserve, available) in [(500, 1200, 5000), (500, 400, 5700), (1500, 400, 5600), (500, 1200, 600), (500, 1200, 100)] {
+            let p = policy_with_reserve(usize::MAX, floor, reserve);
+            let admitted = (0..64).take_while(|running| decide(*running, &p, available) == AdmissionDecision::Admit).count();
+            assert_eq!(lanes_that_fit(&p, available), admitted.max(1), "floor={floor} reserve={reserve} available={available}");
+        }
+        assert_eq!(lanes_that_fit(&policy_with_reserve(8, 500, 1200), 5000), 4);
+        assert_eq!(lanes_that_fit(&policy_with_reserve(8, 500, 400), 5700), 14);
+        assert_eq!(lanes_that_fit(&policy_with_reserve(8, 500, 0), 5000), usize::MAX);
+        assert_eq!(lanes_that_fit(&policy_with_reserve(8, 0, 1200), 5000), usize::MAX);
+    }
+
+    /// Issue #356: memory-bound, then core-bound, then clamped to 2..16.
+    #[test]
+    fn suggested_units_is_memory_bound_core_bound_and_clamped() {
+        let acp = policy_with_reserve(8, 500, 400);
+        assert_eq!(suggested_units(&acp, 5700, 12), 12, "14 fit by memory, 12 cores cap it");
+        assert_eq!(suggested_units(&acp, 5700, 32), 14, "memory is the bound on a wide machine");
+        assert_eq!(suggested_units(&acp, 2000, 12), 4, "2000 - 500 = 1500 headroom holds 3 reserves: 4 lanes");
+        assert_eq!(suggested_units(&acp, 300, 12), MIN_AUTO_UNITS, "a starved machine still gets two units");
+        assert_eq!(suggested_units(&acp, 64_000, 64), MAX_AUTO_UNITS, "a huge machine stops at the cap");
+        assert_eq!(suggested_units(&policy_with_reserve(8, 0, 0), 64_000, 4), 4, "no memory bound: cores decide");
+        assert_eq!(suggested_units(&acp, 64_000, 0), MIN_AUTO_UNITS, "zero cores reported is treated as one, then clamped up");
     }
 
     #[test]
