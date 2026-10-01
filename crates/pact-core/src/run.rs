@@ -1,0 +1,752 @@
+//! `pact run` (issue #305): pact owns decomposition, briefing, execution
+//! and verification from one big task.
+//!
+//! Until now every piece of judgement lived outside pact: a human or an
+//! orchestrating agent split the work into `--task` units, wrote the
+//! briefs, picked the lane count, ran `commit-all`/`merge-all`, verified.
+//! The benchmark kit needed a 2.4 KB header just to get a Copilot session
+//! to do that acceptably, and the lessons it encoded (disjoint file
+//! ownership, verbatim conventions in every brief, "do not commit",
+//! "you cannot install or build") are things pact already knows.
+//!
+//! The MVP here is one wave: a planner session returns units with the
+//! files each owns; pact validates the plan mechanically (disjoint,
+//! well-formed, roughly balanced), sends violations back to the planner
+//! up to a few times, renders one self-contained brief per unit, runs
+//! the batch as a shared tree (disjoint by construction, so no isolation
+//! and no merge), commits once, runs the task-level verification in the
+//! batch worktree and reports. Dependent units (waves, #282) and
+//! gap-closing after a failed verification are deliberately not here.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use pact_agents::{AgentEvent, AgentKind, LaunchRequest, Supervisor};
+use pact_vcs::Workspace;
+use serde::{Deserialize, Serialize};
+
+use crate::{agent_kind_name, effective_runtime, unix_now, LaneRuntime, Orchestrator, SpawnManyOutcome, SpawnManyTask, SpawnOptions};
+
+/// What the planner returns and pact executes. Persisted under
+/// `meta/plans/` so a human can edit it and re-run with `--plan`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Plan {
+    #[serde(default)]
+    pub task: String,
+    /// Conventions every unit must follow, rendered verbatim into every
+    /// brief: the thing orchestrator headers always had to repeat.
+    #[serde(default)]
+    pub shared_context: String,
+    pub units: Vec<PlanUnit>,
+    /// Task-level acceptance command, run once in the batch worktree
+    /// after `commit-all`. `--verify` on the command line overrides it.
+    #[serde(default)]
+    pub verify: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanUnit {
+    pub name: String,
+    /// Repo-relative paths this unit owns: the files it creates or
+    /// edits. No two units may own the same path.
+    pub files: Vec<String>,
+    /// What the unit must produce, in the planner's words.
+    pub brief: String,
+    /// A unit-scoped check the worker runs on its own work.
+    #[serde(default)]
+    pub verify: Option<String>,
+}
+
+/// Mechanical plan checks, pure so they are unit-testable. Empty means
+/// the plan can run. Each entry is one violation in words the planner
+/// can act on.
+pub fn validate_plan(plan: &Plan, max_units: usize) -> Vec<String> {
+    let mut problems = Vec::new();
+    if plan.units.is_empty() {
+        problems.push("the plan has no units".to_string());
+        return problems;
+    }
+    if plan.units.len() > max_units {
+        problems.push(format!("the plan has {} units; at most {max_units} are allowed", plan.units.len()));
+    }
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut owners: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for unit in &plan.units {
+        let name = unit.name.trim();
+        if !name.chars().any(|c| c.is_ascii_alphanumeric()) {
+            problems.push(format!("unit name {:?} must contain at least one ASCII letter or digit", unit.name));
+        }
+        if !seen_names.insert(name.to_ascii_lowercase()) {
+            problems.push(format!("unit name {name:?} is used more than once"));
+        }
+        if unit.files.is_empty() {
+            problems.push(format!("unit {name:?} owns no files"));
+        }
+        if unit.brief.trim().is_empty() {
+            problems.push(format!("unit {name:?} has an empty brief"));
+        }
+        for file in &unit.files {
+            let normalized = file.replace('\\', "/");
+            if normalized.starts_with('/') || normalized.contains(':') || normalized.split('/').any(|seg| seg == "..") {
+                problems.push(format!("unit {name:?} file {file:?} must be a repo-relative path without `..`"));
+            }
+            owners.entry(normalized).or_default().push(name.to_string());
+        }
+    }
+    let mut overlaps: Vec<(String, Vec<String>)> = owners.into_iter().filter(|(_, units)| units.len() > 1).collect();
+    overlaps.sort();
+    for (file, units) in overlaps {
+        problems.push(format!("file {file:?} is owned by more than one unit ({}); give it to exactly one", units.join(", ")));
+    }
+    problems
+}
+
+/// Line counts of the files each unit owns that already exist, as a
+/// rough weight. New files count zero, so a plan that only creates files
+/// weighs nothing; the balance warning is advisory for that reason.
+pub fn unit_weights(plan: &Plan, repo_root: &Path) -> Vec<(String, usize)> {
+    plan.units
+        .iter()
+        .map(|unit| {
+            let lines = unit
+                .files
+                .iter()
+                .filter_map(|f| std::fs::read_to_string(repo_root.join(f)).ok())
+                .map(|text| text.lines().count())
+                .sum();
+            (unit.name.clone(), lines)
+        })
+        .collect()
+}
+
+/// `Some(warning)` when the heaviest unit (by existing lines) is more
+/// than four times the lightest, both non-zero. Never a rejection: the
+/// planner's split may be right for reasons line counts cannot see.
+pub fn balance_warning(weights: &[(String, usize)]) -> Option<String> {
+    let nonzero: Vec<&(String, usize)> = weights.iter().filter(|(_, w)| *w > 0).collect();
+    if nonzero.len() < 2 {
+        return None;
+    }
+    let heaviest = nonzero.iter().max_by_key(|(_, w)| *w).unwrap();
+    let lightest = nonzero.iter().min_by_key(|(_, w)| *w).unwrap();
+    if heaviest.1 > lightest.1.saturating_mul(4) {
+        Some(format!(
+            "unit {:?} owns {} existing lines and {:?} owns {}; the heaviest unit sets the batch's wall-clock, so consider splitting it",
+            heaviest.0, heaviest.1, lightest.0, lightest.1
+        ))
+    } else {
+        None
+    }
+}
+
+/// The JSON object in a planner reply: the last ```json fenced block if
+/// there is one, else the span from the first `{` to the last `}`.
+pub fn extract_plan_json(text: &str) -> Option<String> {
+    let mut last_fenced: Option<String> = None;
+    let mut rest = text;
+    while let Some(start) = rest.find("```json") {
+        let after = &rest[start + "```json".len()..];
+        match after.find("```") {
+            Some(end) => {
+                last_fenced = Some(after[..end].trim().to_string());
+                rest = &after[end + 3..];
+            }
+            None => break,
+        }
+    }
+    if last_fenced.is_some() {
+        return last_fenced;
+    }
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end > start).then(|| text[start..=end].to_string())
+}
+
+/// Parses a planner reply into a `Plan`, filling in `task` when the
+/// planner left it out.
+pub fn parse_plan(reply: &str, task: &str) -> Result<Plan> {
+    let json = extract_plan_json(reply).ok_or_else(|| anyhow::anyhow!("the planner's reply contains no JSON object"))?;
+    let mut plan: Plan = serde_json::from_str(&json).with_context(|| format!("the planner's JSON does not match the plan schema:\n{json}"))?;
+    if plan.task.trim().is_empty() {
+        plan.task = task.to_string();
+    }
+    Ok(plan)
+}
+
+const PLAN_SCHEMA: &str = r#"{
+  "shared_context": "conventions every unit must follow verbatim (test framework, mocking style, what never to edit)",
+  "verify": "one shell command that checks the whole task once everything is merged, e.g. npm test",
+  "units": [
+    {
+      "name": "short-kebab-case-name",
+      "files": ["repo/relative/path/this/unit/creates-or-edits.ts"],
+      "brief": "exactly what this unit must produce, self-contained, naming the source files to read",
+      "verify": "optional shell command scoped to this unit's files"
+    }
+  ]
+}"#;
+
+/// The planner's instructions. The planner works in the repo root with
+/// its own tools, so pact does not inline the tree; it inlines the rules
+/// the benchmark headers had to carry.
+pub fn planner_prompt(task: &str, max_units: usize) -> String {
+    format!(
+        "You are planning parallel work for pact, a tool that runs several coding agents at once, each in its \
+         own lane, all writing into one shared checkout of this repository. Read the repository as needed, \
+         then decompose the task below into independent units that can run at the same time.\n\n\
+         TASK:\n{task}\n\n\
+         RULES:\n\
+         - Between 1 and {max_units} units. Prefer more, smaller units when the work allows; the slowest unit \
+         decides how long the whole batch takes, so balance them.\n\
+         - Each unit lists every file it will create or edit under `files`, repo-relative. No file may appear \
+         in two units. Files a unit only reads are not listed.\n\
+         - Shared files that several units would need to edit (barrels, setup, config, lockfiles) go to exactly \
+         one unit, or the task is restructured so nobody edits them.\n\
+         - Each `brief` must be self-contained: a worker sees only its brief, this repository, and \
+         `shared_context`. Name the source files to read, the behaviour to cover, and the acceptance criteria.\n\
+         - Workers cannot install packages, run builds or start dev servers, and must not commit; pact \
+         commits. Do not ask them to.\n\
+         - Do not create, modify or delete any file yourself. Plan only.\n\n\
+         Reply with one JSON object in a ```json fenced block and nothing after it, in this shape:\n\
+         ```json\n{PLAN_SCHEMA}\n```"
+    )
+}
+
+/// The retry prompt: the previous plan and what was wrong with it.
+pub fn repair_prompt(previous_json: &str, problems: &[String]) -> String {
+    format!(
+        "Your plan could not be executed. Problems:\n{}\n\nPrevious plan:\n```json\n{previous_json}\n```\n\n\
+         Fix every problem and reply again with one complete JSON plan in a ```json fenced block and nothing after it.",
+        problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n")
+    )
+}
+
+/// One unit's self-contained worker brief. The shared-tree preamble
+/// (claim your files, touch nothing else) is added by `spawn_many`.
+pub fn render_brief(plan: &Plan, unit: &PlanUnit) -> String {
+    let mut brief = format!(
+        "# Unit `{}`\n\nPart of a larger task pact has split across parallel workers:\n> {}\n\n\
+         ## Your files\n\nYou own these paths and nothing else. Create or edit only them.\n",
+        unit.name,
+        plan.task.lines().collect::<Vec<_>>().join("\n> ")
+    );
+    for file in &unit.files {
+        brief.push_str(&format!("- `{file}`\n"));
+    }
+    brief.push_str(&format!("\n## What to produce\n\n{}\n", unit.brief.trim()));
+    if !plan.shared_context.trim().is_empty() {
+        brief.push_str(&format!("\n## Conventions (shared by every unit)\n\n{}\n", plan.shared_context.trim()));
+    }
+    brief.push_str(
+        "\n## Rules\n\n\
+         - Dependencies are already installed. Do not install packages, run full builds, or start dev servers.\n\
+         - Do not commit, stage, or run any `git` command; pact commits your work.\n\
+         - Other workers are editing other files in this same checkout right now. Do not touch files outside your list, and do not revert or reformat anything you did not write.\n",
+    );
+    if let Some(verify) = unit.verify.as_deref().filter(|v| !v.trim().is_empty()) {
+        brief.push_str(&format!("- Check your own work before finishing with: `{}`\n", verify.trim()));
+    }
+    brief.push_str("- When finished, reply DONE followed by two lines: what you produced and anything left undone.\n");
+    brief
+}
+
+/// Everything `pact run` decided and did, for the CLI to print and for
+/// tests to assert on.
+pub struct RunReport {
+    pub plan: Plan,
+    pub plan_path: PathBuf,
+    pub planner_attempts: usize,
+    pub balance_warning: Option<String>,
+    pub brief_paths: Vec<PathBuf>,
+    pub dry_run: bool,
+    pub outcomes: Vec<SpawnManyOutcome>,
+    pub batch: Option<Workspace>,
+    pub committed: Option<bool>,
+    pub verify: Option<VerifyOutcome>,
+}
+
+impl RunReport {
+    /// True when every lane ran to success, the commit landed (or there
+    /// was nothing to commit) and verification (if any) passed.
+    pub fn succeeded(&self) -> bool {
+        if self.dry_run {
+            return true;
+        }
+        let lanes_ok = !self.outcomes.is_empty()
+            && self.outcomes.iter().all(|o| matches!(&o.result, Ok((_, run)) if run.success));
+        // An inconclusive verification is not a success: the user has to
+        // judge the result some other way, and the exit code says so.
+        lanes_ok && self.verify.as_ref().map(|v| v.success).unwrap_or(true)
+    }
+}
+
+pub struct VerifyOutcome {
+    pub command: String,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub output_tail: String,
+    pub duration: Duration,
+    /// Whether the same command passed on the untouched tree before any
+    /// lane ran. `None` when no baseline was taken.
+    pub baseline_success: Option<bool>,
+}
+
+/// How a verification result reads once the baseline is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Passed,
+    /// Passed now, failed on the base: the run fixed it.
+    Fixed,
+    /// Failed now, passed on the base: the run broke it.
+    Regressed,
+    /// Fails on the base too, so this command cannot judge the run.
+    Inconclusive,
+    /// Failed with no baseline to compare against.
+    Failed,
+}
+
+impl VerifyOutcome {
+    pub fn verdict(&self) -> Verdict {
+        match (self.success, self.baseline_success) {
+            (true, Some(false)) => Verdict::Fixed,
+            (true, _) => Verdict::Passed,
+            (false, Some(true)) => Verdict::Regressed,
+            (false, Some(false)) => Verdict::Inconclusive,
+            (false, None) => Verdict::Failed,
+        }
+    }
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Verdict::Passed => "passed",
+            Verdict::Fixed => "passed (it failed on the base commit, so this run fixed it)",
+            Verdict::Regressed => "FAILED (it passed on the base commit, so this run broke it)",
+            Verdict::Inconclusive => "INCONCLUSIVE (it already fails on the base commit, so it cannot judge this run)",
+            Verdict::Failed => "FAILED",
+        })
+    }
+}
+
+pub struct RunOptions<'a> {
+    pub agent: AgentKind,
+    pub max_units: usize,
+    /// Overrides the plan's own `verify`.
+    pub verify: Option<&'a str>,
+    /// Reuse a persisted plan instead of calling the planner.
+    pub plan_path: Option<&'a Path>,
+    pub dry_run: bool,
+    /// How many times a rejected plan is sent back to the planner.
+    pub plan_retries: usize,
+    pub spawn: SpawnOptions<'a>,
+}
+
+const PLANNER_LABEL: usize = usize::MAX;
+
+impl Orchestrator {
+    /// Plans, briefs, executes, commits and verifies `task`. Events are
+    /// labelled by lane index; the planner's own events use
+    /// `usize::MAX` as the index.
+    pub fn run_task(
+        &self,
+        task: &str,
+        options: &RunOptions<'_>,
+        on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
+    ) -> Result<RunReport> {
+        let (plan, planner_attempts) = match options.plan_path {
+            Some(path) => {
+                let text = std::fs::read_to_string(path).with_context(|| format!("reading plan {}", path.display()))?;
+                let mut plan: Plan = serde_json::from_str(&text).with_context(|| format!("parsing plan {}", path.display()))?;
+                if plan.task.trim().is_empty() {
+                    plan.task = task.to_string();
+                }
+                let problems = validate_plan(&plan, options.max_units);
+                if !problems.is_empty() {
+                    bail!("plan {} cannot run:\n{}", path.display(), problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"));
+                }
+                (plan, 0)
+            }
+            None => self.plan_task(task, options, &mut |event| on_event(PLANNER_LABEL, &options.agent, event))?,
+        };
+        if let Some(verify) = options.verify {
+            // Recorded on the plan so the persisted file is the whole truth.
+            let mut plan = plan;
+            plan.verify = Some(verify.to_string());
+            return self.run_plan(plan, planner_attempts, options, on_event);
+        }
+        self.run_plan(plan, planner_attempts, options, on_event)
+    }
+
+    fn run_plan(
+        &self,
+        plan: Plan,
+        planner_attempts: usize,
+        options: &RunOptions<'_>,
+        on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
+    ) -> Result<RunReport> {
+        let plans_dir = self.workspaces.state_dir().join("meta").join("plans");
+        std::fs::create_dir_all(&plans_dir)?;
+        let stamp = unix_now();
+        let plan_path = plans_dir.join(format!("{stamp}-{}.json", short_slug(&plan.task)));
+        std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan)?).with_context(|| format!("writing {}", plan_path.display()))?;
+
+        let weights = unit_weights(&plan, &self.repo_root);
+        let balance = balance_warning(&weights);
+
+        let briefs_dir = self.workspaces.state_dir().join("briefs").join(stamp.to_string());
+        std::fs::create_dir_all(&briefs_dir)?;
+        let mut brief_paths = Vec::new();
+        let mut tasks = Vec::new();
+        for unit in &plan.units {
+            let brief = render_brief(&plan, unit);
+            let path = briefs_dir.join(format!("{}.md", unit.name));
+            std::fs::write(&path, &brief).with_context(|| format!("writing {}", path.display()))?;
+            brief_paths.push(path);
+            tasks.push(SpawnManyTask { agent: options.agent, task: brief, name: Some(unit.name.clone()) });
+        }
+
+        if options.dry_run {
+            return Ok(RunReport {
+                plan,
+                plan_path,
+                planner_attempts,
+                balance_warning: balance,
+                brief_paths,
+                dry_run: true,
+                outcomes: Vec::new(),
+                batch: None,
+                committed: None,
+                verify: None,
+            });
+        }
+
+        // Disjoint by validation, so the shared tree is the right shape:
+        // no per-lane isolation to pay for and no merge afterwards. The
+        // batch is created here rather than inside `spawn_many` so the
+        // verification command can be run once on the untouched tree: a
+        // command that already fails on the base (generated files missing
+        // from a fresh worktree, say) must not be read as this run's doing.
+        let spawn_options = SpawnOptions { shared_tree: true, ..options.spawn };
+        let planner_events = |event: &AgentEvent| on_event(PLANNER_LABEL, &options.agent, event);
+        let batch = self
+            .create_shared_batch_workspace(&tasks, &spawn_options, planner_events)
+            .context("creating the shared tree for the plan")?;
+        let verify_command = plan.verify.clone().filter(|v| !v.trim().is_empty());
+        let baseline = match &verify_command {
+            Some(command) => {
+                planner_events(&AgentEvent::Phase(format!("verification baseline on the untouched tree: {command}")));
+                let outcome = run_shell_captured(&batch.path, command)?;
+                planner_events(&AgentEvent::Phase(format!(
+                    "baseline {} in {:.1}s",
+                    if outcome.success { "passes" } else { "already FAILS before any lane runs" },
+                    outcome.duration.as_secs_f32()
+                )));
+                Some(outcome)
+            }
+            None => None,
+        };
+        let outcomes = self.spawn_many_in(tasks, &spawn_options, Some(batch.clone()), &on_event);
+        let batch = self.workspaces.get_workspace(&batch.id).ok();
+
+        let mut committed = None;
+        let mut verify = None;
+        if let Some(batch) = &batch {
+            planner_events(&AgentEvent::Phase(format!("committing the shared tree {}", batch.id)));
+            committed = Some(self.workspaces.commit_all(&batch.id).context("committing the batch")?);
+            if let Some(command) = &verify_command {
+                planner_events(&AgentEvent::Phase(format!("verifying in the batch worktree: {command}")));
+                let mut outcome = run_shell_captured(&batch.path, command)?;
+                outcome.baseline_success = baseline.as_ref().map(|b| b.success);
+                planner_events(&AgentEvent::Phase(format!("verification {} in {:.1}s", outcome.verdict(), outcome.duration.as_secs_f32())));
+                verify = Some(outcome);
+            }
+        }
+
+        Ok(RunReport {
+            plan,
+            plan_path,
+            planner_attempts,
+            balance_warning: balance,
+            brief_paths,
+            dry_run: false,
+            outcomes,
+            batch,
+            committed,
+            verify,
+        })
+    }
+
+    /// Asks the planner for a plan, validates it, and sends violations
+    /// back up to `plan_retries` times. Refuses a planner that modified
+    /// the repository: planning is read-only by contract.
+    fn plan_task(
+        &self,
+        task: &str,
+        options: &RunOptions<'_>,
+        on_event: &mut impl FnMut(&AgentEvent),
+    ) -> Result<(Plan, usize)> {
+        let before = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
+        let mut prompt = planner_prompt(task, options.max_units);
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            on_event(&AgentEvent::Phase(format!("planning (attempt {attempts})")));
+            let reply = self.ask_agent(options.agent, &self.repo_root, &prompt, &options.spawn, on_event)?;
+            let after = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
+            let touched: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
+            if !touched.is_empty() {
+                bail!(
+                    "the planner modified the repository, which planning must never do: {}. Inspect with `git status` and revert before running again",
+                    touched.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+            let plan = match parse_plan(&reply, task) {
+                Ok(plan) => plan,
+                Err(err) if attempts <= options.plan_retries => {
+                    on_event(&AgentEvent::Phase(format!("plan rejected: {err:#}")));
+                    prompt = repair_prompt(&extract_plan_json(&reply).unwrap_or_else(|| reply.clone()), &[format!("{err:#}")]);
+                    continue;
+                }
+                Err(err) => return Err(err.context(format!("the planner produced no usable plan in {attempts} attempt(s)"))),
+            };
+            let problems = validate_plan(&plan, options.max_units);
+            if problems.is_empty() {
+                return Ok((plan, attempts));
+            }
+            on_event(&AgentEvent::Phase(format!("plan rejected: {}", problems.join("; "))));
+            if attempts > options.plan_retries {
+                bail!(
+                    "the planner's plan still cannot run after {attempts} attempt(s):\n{}",
+                    problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n")
+                );
+            }
+            prompt = repair_prompt(&serde_json::to_string_pretty(&plan)?, &problems);
+        }
+    }
+
+    /// Runs one agent turn in `cwd` with no workspace and returns the
+    /// assistant's text: the planner's call. Uses the ACP runtime when the
+    /// agent has one (one session in a throwaway process), else a
+    /// headless process run; either way the events stream to `on_event`
+    /// like a lane's would.
+    pub fn ask_agent(
+        &self,
+        agent: AgentKind,
+        cwd: &Path,
+        prompt: &str,
+        spawn: &SpawnOptions<'_>,
+        on_event: &mut impl FnMut(&AgentEvent),
+    ) -> Result<String> {
+        let mut text = String::new();
+        let mut forward = |event: &AgentEvent| {
+            if let AgentEvent::AssistantText(t) = event {
+                text.push_str(t);
+                text.push('\n');
+            }
+            on_event(event);
+        };
+        match effective_runtime(spawn.runtime, &[agent]) {
+            LaneRuntime::Acp => {
+                let batch = self.start_acp_batch(&[agent], spawn, &mut forward)?;
+                let runtime = batch.runtime(agent).ok_or_else(|| anyhow::anyhow!("no ACP process for {}", agent_kind_name(agent)))?;
+                let outcome = (|| -> Result<()> {
+                    let mut session = runtime.new_session(cwd, Vec::new()).map_err(|err| anyhow::anyhow!("opening the planner session: {err}"))?;
+                    let mut coalescer = crate::acp_runtime::ChunkCoalescer::new();
+                    let stop = runtime
+                        .prompt(&mut session, prompt, |update| coalescer.push(&update, &mut forward))
+                        .map_err(|err| anyhow::anyhow!("planner turn: {err}"))?;
+                    coalescer.flush(&mut forward);
+                    let _ = runtime.close(&session);
+                    if !stop.is_success() {
+                        bail!("the planner's turn ended with stop reason {}", stop.as_str());
+                    }
+                    Ok(())
+                })();
+                batch.shutdown();
+                outcome?;
+            }
+            _ => {
+                let adapter = pact_agents::adapter(agent);
+                let session_id = uuid::Uuid::new_v4().to_string();
+                let agent_home = self.workspaces.state_dir().join("homes").join(format!("planner-{session_id}"));
+                let launch = adapter.build_launch(&LaunchRequest {
+                    task: prompt,
+                    safety_override: pact_agents::resolve_safety_profile(agent, spawn.safety_override).as_deref(),
+                    coord: None,
+                    workspace_path: cwd,
+                    agent_home: &agent_home,
+                    session_id: &session_id,
+                    lean: spawn.lean,
+                });
+                let log_path = self.workspaces.state_dir().join("logs").join(format!("planner-{session_id}.jsonl"));
+                let supervisor = Supervisor::new();
+                let run = pact_agents::run_and_stream(
+                    &supervisor,
+                    &launch.program,
+                    &launch.args,
+                    &launch.env,
+                    cwd,
+                    &log_path,
+                    |line| adapter.parse_line(line),
+                    &mut forward,
+                    |_| {},
+                )?;
+                if !run.success {
+                    bail!("the planner run failed: {}", run.summary);
+                }
+            }
+        }
+        Ok(text)
+    }
+}
+
+fn short_slug(text: &str) -> String {
+    let slug: String = text
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "task".to_string()
+    } else {
+        slug
+    }
+}
+
+/// `cmd /C` on Windows, `sh -c` elsewhere, with the tail of the combined
+/// output kept for the report.
+fn run_shell_captured(dir: &Path, cmd: &str) -> Result<VerifyOutcome> {
+    let mut command = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    let start = std::time::Instant::now();
+    let output = command.current_dir(dir).output().with_context(|| format!("failed to spawn verification command '{cmd}'"))?;
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let lines: Vec<&str> = combined.lines().collect();
+    let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+    Ok(VerifyOutcome {
+        command: cmd.to_string(),
+        success: output.status.success(),
+        exit_code: output.status.code(),
+        output_tail: tail,
+        duration: start.elapsed(),
+        baseline_success: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit(name: &str, files: &[&str]) -> PlanUnit {
+        PlanUnit { name: name.into(), files: files.iter().map(|f| f.to_string()).collect(), brief: format!("do {name}"), verify: None }
+    }
+
+    fn plan(units: Vec<PlanUnit>) -> Plan {
+        Plan { task: "big task".into(), shared_context: "use vitest".into(), units, verify: Some("npm test".into()) }
+    }
+
+    #[test]
+    fn a_disjoint_well_formed_plan_validates() {
+        let p = plan(vec![unit("a", &["src/a.ts", "src/a.test.ts"]), unit("b", &["src/b.ts"])]);
+        assert!(validate_plan(&p, 8).is_empty());
+    }
+
+    #[test]
+    fn overlapping_ownership_duplicate_names_and_bad_paths_are_each_named() {
+        let p = plan(vec![
+            unit("a", &["src/shared.ts", "src/a.ts"]),
+            unit("A", &["src/shared.ts", "../outside.ts", "C:/abs.ts"]),
+            PlanUnit { name: "---".into(), files: vec![], brief: "  ".into(), verify: None },
+        ]);
+        let problems = validate_plan(&p, 8);
+        let joined = problems.join("\n");
+        assert!(joined.contains("\"src/shared.ts\" is owned by more than one unit (a, A)"), "{joined}");
+        assert!(joined.contains("used more than once"), "{joined}");
+        assert!(joined.contains("\"../outside.ts\" must be a repo-relative path"), "{joined}");
+        assert!(joined.contains("\"C:/abs.ts\" must be a repo-relative path"), "{joined}");
+        assert!(joined.contains("must contain at least one ASCII letter or digit"), "{joined}");
+        assert!(joined.contains("owns no files"), "{joined}");
+        assert!(joined.contains("has an empty brief"), "{joined}");
+    }
+
+    #[test]
+    fn too_many_units_and_no_units_are_rejected() {
+        assert_eq!(validate_plan(&plan(vec![]), 8), vec!["the plan has no units".to_string()]);
+        let p = plan(vec![unit("a", &["a"]), unit("b", &["b"]), unit("c", &["c"])]);
+        assert!(validate_plan(&p, 2).iter().any(|m| m.contains("has 3 units; at most 2")));
+    }
+
+    #[test]
+    fn plan_json_is_taken_from_the_last_fenced_block_or_the_outermost_braces() {
+        let reply = "Here is a draft:\n```json\n{\"units\": []}\n```\nActually, final:\n```json\n{\"units\": [{\"name\": \"a\", \"files\": [\"a\"], \"brief\": \"x\"}]}\n```\nDone.";
+        let plan = parse_plan(reply, "t").unwrap();
+        assert_eq!(plan.units.len(), 1, "the last fenced block wins");
+        assert_eq!(plan.task, "t", "a missing task is filled from the request");
+        let bare = "plan: {\"task\": \"given\", \"units\": [{\"name\": \"a\", \"files\": [\"a\"], \"brief\": \"x\"}]} end";
+        assert_eq!(parse_plan(bare, "t").unwrap().task, "given");
+        assert!(parse_plan("no json here", "t").is_err());
+        assert!(parse_plan("```json\n{\"units\": \"not a list\"}\n```", "t").unwrap_err().to_string().contains("plan schema"));
+    }
+
+    #[test]
+    fn briefs_carry_files_brief_shared_context_and_the_rules_workers_kept_breaking() {
+        let p = plan(vec![PlanUnit { name: "parser".into(), files: vec!["lib/parse.test.ts".into()], brief: "Cover parse()".into(), verify: Some("npx vitest run lib".into()) }]);
+        let brief = render_brief(&p, &p.units[0]);
+        for expected in ["# Unit `parser`", "> big task", "- `lib/parse.test.ts`", "Cover parse()", "use vitest", "Do not install packages", "Do not commit", "`npx vitest run lib`", "reply DONE"] {
+            assert!(brief.contains(expected), "missing {expected:?} in:\n{brief}");
+        }
+    }
+
+    #[test]
+    fn balance_warning_fires_only_for_a_wide_spread_of_existing_lines() {
+        assert!(balance_warning(&[("a".into(), 100), ("b".into(), 90)]).is_none());
+        assert!(balance_warning(&[("a".into(), 500), ("b".into(), 100)]).unwrap().contains("\"a\" owns 500"));
+        assert!(balance_warning(&[("a".into(), 500), ("b".into(), 0)]).is_none(), "new-file units weigh nothing and are not compared");
+    }
+
+    #[test]
+    fn repair_prompt_lists_every_problem_and_the_previous_plan() {
+        let text = repair_prompt("{\"units\": []}", &["the plan has no units".into(), "x".into()]);
+        assert!(text.contains("- the plan has no units\n- x"));
+        assert!(text.contains("{\"units\": []}"));
+    }
+
+    #[test]
+    fn short_slug_keeps_five_words() {
+        assert_eq!(short_slug("Add Vitest tests for every file in lib and app"), "add-vitest-tests-for-every");
+        assert_eq!(short_slug("!!!"), "task");
+    }
+
+    #[test]
+    fn the_verdict_reads_the_result_against_the_baseline() {
+        let outcome = |success: bool, baseline: Option<bool>| VerifyOutcome {
+            command: "x".into(),
+            success,
+            exit_code: Some(if success { 0 } else { 1 }),
+            output_tail: String::new(),
+            duration: Duration::ZERO,
+            baseline_success: baseline,
+        };
+        assert_eq!(outcome(true, Some(true)).verdict(), Verdict::Passed);
+        assert_eq!(outcome(true, None).verdict(), Verdict::Passed);
+        assert_eq!(outcome(true, Some(false)).verdict(), Verdict::Fixed);
+        assert_eq!(outcome(false, Some(true)).verdict(), Verdict::Regressed);
+        assert_eq!(outcome(false, Some(false)).verdict(), Verdict::Inconclusive);
+        assert_eq!(outcome(false, None).verdict(), Verdict::Failed);
+        assert!(Verdict::Inconclusive.to_string().contains("cannot judge"));
+    }
+}

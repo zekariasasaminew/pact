@@ -177,7 +177,36 @@ Assumes `pact` is on your `PATH` (from a downloaded release) or you're
 running `./target/release/pact` after building from source -- see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### Running agents in parallel
+### One task, pact does the rest: `pact run`
+
+```sh
+pact run --agent copilot --verify "npm test" \
+  "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
+pact run --agent copilot --dry-run "..."          # plan only: print and persist the plan, spawn nothing
+pact run --agent copilot --plan .pact-<repo>/meta/plans/<stamp>-<slug>.json "..."   # re-run an edited plan
+```
+
+`pact run` (issue #305) is the whole loop with no briefs to write: a
+planner session reads the repository and splits the task into
+file-disjoint units; pact validates the plan mechanically (no file owned
+by two units, repo-relative paths, unique names, at most `--max-units`)
+and sends violations back to the planner up to `--plan-retries` times;
+renders one self-contained brief per unit (its files, what to produce,
+the plan's shared conventions, and the rules workers kept breaking when
+humans wrote briefs: no installs or builds, no commits, touch nothing
+outside your files); runs the units as lanes in one shared tree (disjoint
+by construction, so no isolation and no merge, under the default ACP
+runtime); commits once; then runs the verification command in the result
+and reports a verdict that knows the baseline: the same command is run
+on the untouched tree first, so a check that already fails on the base
+commit (generated files missing from a fresh worktree, say) reads as
+`INCONCLUSIVE` (exit 3), a check the run broke reads as a regression,
+and a check the run made pass reads as fixed. Plans and briefs are
+persisted under the state dir (`meta/plans/`, `briefs/`); the result is
+a branch to review with `pact diff`, land with `pact merge-all`, or push.
+One wave only for now: units that depend on each other are #282.
+
+### Running agents in parallel by hand
 
 ```sh
 # from inside (or pass --repo to) a git repository:

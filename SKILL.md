@@ -40,6 +40,14 @@ agent CLI just means that adapter isn't usable yet, not that pact is broken.
 ## Core CLI grammar
 
 ```
+# One big task, pact does the whole loop: a planner session splits it into
+# file-disjoint units, pact validates the plan, writes every brief, runs the
+# units as lanes in one shared tree, commits once, verifies, reports.
+pact run --agent copilot --verify "npm test" \
+  "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
+pact run --agent copilot --dry-run "..."     # see and persist the plan without spawning
+pact run --agent copilot --plan <meta/plans/...json> "..."   # re-run an edited plan
+
 pact spawn --agent claude "Add input validation to the signup form"
 
 pact spawn-many \
@@ -73,6 +81,15 @@ pact teardown <workspace-id>
 
 Key things that surprise people:
 
+- **Reach for `pact run` before hand-splitting.** If the user hands you one
+  large task, do not write the briefs yourself: `pact run` plans with its
+  own planner session, validates the split mechanically (no file in two
+  units), renders every brief with the rules workers kept breaking, runs
+  the lanes, commits and verifies with a baseline-aware verdict. Use
+  `--dry-run` to show the user the plan first, and `--plan` to re-run one
+  they edited. Fall back to `spawn-many` only when the units are already
+  decided or must edit the same files (then isolated worktrees and
+  `merge-all` are the right shape).
 - **`--task` is repeatable; `--task-file` is how you pass a real brief.**
   Each `--task` is either `<agent>:"<text>"` (mixing agents in one batch) or
   bare text using `--agent`'s default. A worker only ever sees its own task
