@@ -41,10 +41,28 @@ impl PidLock {
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
+                Err(e) if is_transient_contention(&e) => {
+                    if start.elapsed() > timeout {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "timed out after {:?} waiting for lock at {} (last error was a transient \
+                                 sharing/delete-pending condition from another holder releasing or probing it)",
+                                timeout,
+                                lock_path.display()
+                            )
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 Err(e) => {
+                    let kind = e.kind();
+                    let raw = e.raw_os_error();
                     return Err(e).with_context(|| {
-                        format!("failed to create lock file at {}", lock_path.display())
-                    })
+                        format!(
+                            "failed to create lock file at {} (io kind {kind:?}, os error {raw:?})",
+                            lock_path.display()
+                        )
+                    });
                 }
             }
         }
@@ -88,6 +106,27 @@ impl PidLock {
         }
         Ok(false)
     }
+}
+
+/// Issue #318: errors from `create_new` that mean "another holder is
+/// releasing or probing the lock right now", so the right move is to wait
+/// and retry within the timeout rather than fail. On Windows, deleting a
+/// file another handle still has open does not fail the deleter; it marks
+/// the file delete-pending, and the *next* `CreateFile` on that name
+/// fails with ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32) or
+/// ERROR_LOCK_VIOLATION (33), which Rust maps to PermissionDenied or
+/// Uncategorized. `steal_if_stale`'s read on a contended lock produces
+/// the same sharing violation. None of that happens on Unix, where
+/// unlinking an open file simply succeeds, which is why this only ever
+/// showed up on the Windows CI runner under 8-thread contention.
+fn is_transient_contention(e: &std::io::Error) -> bool {
+    if matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Interrupted) {
+        return true;
+    }
+    if cfg!(windows) {
+        return matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33));
+    }
+    false
 }
 
 impl Drop for PidLock {
@@ -268,6 +307,50 @@ mod tests {
                             .expect("every worker must eventually acquire the lock");
                         std::thread::sleep(HOLD);
                         drop(lock);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("worker thread must not panic");
+            }
+        });
+
+        assert!(!lock_path.exists(), "the last holder must release the lock");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #318: the acquire/release race that failed CI on Windows.
+    /// `acquire_waits_out_contention_instead_of_giving_up_early` holds each
+    /// lock for 120 ms, so acquire and drop rarely collide; this variant
+    /// holds for zero time and spins many rounds per thread, which is what
+    /// makes `create_new` land on a file another thread is mid-`remove_file`
+    /// on. On Windows that surfaces as PermissionDenied; before the fix the
+    /// lock treated that as fatal. Deterministic enough to fail reliably
+    /// before and pass after on a Windows machine; a no-op on Unix, where
+    /// unlink of an open file simply succeeds.
+    #[test]
+    fn rapid_acquire_release_races_retry_instead_of_failing() {
+        // 8 threads each taking the lock 12 times with zero hold time. Each
+        // contended acquire costs a 50 ms back-off, so the worst-case total
+        // is roughly 8 * 12 * 50 ms = 4.8 s; the 30 s budget is generous so
+        // the only way to fail is the fatal path this test guards against,
+        // not scheduler starvation.
+        const WORKERS: usize = 8;
+        const ROUNDS: usize = 12;
+        let dir = std::env::temp_dir().join(format!("pact-pidlock-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock_path = dir.join("test.lock");
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..WORKERS)
+                .map(|_| {
+                    let lock_path = &lock_path;
+                    scope.spawn(move || {
+                        for _ in 0..ROUNDS {
+                            let lock = PidLock::acquire(lock_path, Duration::from_secs(30))
+                                .unwrap_or_else(|e| panic!("a transient sharing violation must be retried, not fatal: {e:#}"));
+                            drop(lock);
+                        }
                     })
                 })
                 .collect();

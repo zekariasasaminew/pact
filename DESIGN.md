@@ -77,6 +77,42 @@ the original holder, so the lock is stolen. A lock file written before
 this field existed (bare PID) falls back to the old PID-only check rather
 than erroring, so it's compatible with a lock held across an upgrade.
 
+### Windows delete-pending races are contention, not failure (issue #318)
+
+`acquire` used to retry only on `AlreadyExists`; any other error from
+`create_new` was fatal. That assumption is Unix-shaped. On Windows,
+deleting a file that another handle still has open does not fail the
+deleter: the file goes *delete-pending*, and the next `CreateFile` on
+that name fails with `ERROR_ACCESS_DENIED` (5), `ERROR_SHARING_VIOLATION`
+(32) or `ERROR_LOCK_VIOLATION` (33), which Rust maps to
+`PermissionDenied` or `Uncategorized`. So when one thread's `Drop`
+(`remove_file`) races another's `create_new`, or a waiter is mid-
+`steal_if_stale` reading the file while the holder releases it, the
+loser got a fatal "failed to create lock file" instead of waiting 50 ms
+and retrying. PR #316's `build + test (windows-latest)` job hit exactly
+this in `acquire_waits_out_contention_instead_of_giving_up_early` (8
+threads), while the same suite passed locally and on ubuntu/macos; the PR
+had not touched `lock.rs`. The probability scales with contention, and
+`spawn-many --shared-tree` runs 8 lanes against one lock, so this was
+going to become a real-use failure, not just a CI flake.
+
+`is_transient_contention` now classifies `PermissionDenied`,
+`Interrupted`, and (Windows only) raw OS errors 5/32/33 as "someone else
+is releasing or probing it": wait and retry within the same timeout as
+`AlreadyExists`. Anything else stays fatal, and that fatal error now
+carries the `io::ErrorKind` and raw OS code so a future escape is
+diagnosable from a CI log alone, which is how this one was not.
+
+The regression test (`rapid_acquire_release_races_retry_instead_of_
+failing`) is the existing contention test with zero hold time and many
+rounds per thread, which is what makes `create_new` land on a file mid-
+`remove_file`. Calibration mattered: a first draft at 40 rounds under a
+10 s budget *timed out* under the fix, because 8 threads each backing off
+50 ms per lost race is scheduler starvation, not the bug; 12 rounds under
+30 s isolates the fatal path. Checked both directions on this Windows
+machine: fails 2 of 3 runs without the fix (it is a race, so not every
+run), 12 of 12 with it across single-test and full-suite runs.
+
 ### Workspace lifecycle
 
 `create_workspace` captures `base_commit` (`git rev-parse HEAD`) under the
