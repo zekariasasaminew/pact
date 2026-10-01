@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::transport::stdio;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::{handoffs, leases, messages, operations};
 use crate::handoffs::HandoffDecision;
@@ -317,9 +317,107 @@ impl ServerHandler for CoordServer {
 
 pub async fn serve(conn: Connection, agent_id: String, workspace_root: PathBuf) -> anyhow::Result<()> {
     let server = CoordServer::new(conn, agent_id, workspace_root);
-    let service = server.serve(stdio()).await?;
+    serve_with_io(server, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+const PIPE_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Serves `server` over any newline-delimited JSON-RPC byte streams, with a
+/// handshake shim between the client and rmcp -- see DESIGN.md, pact-coord
+/// section "Pre-initialize requests are answered, not fatal" (issue #291).
+/// Until the client's `initialize` request has been forwarded, any other
+/// request is answered here with JSON-RPC -32601 and never reaches rmcp,
+/// whose strict handshake would otherwise exit the whole server;
+/// notifications in that window are dropped. Everything after `initialize`
+/// passes through untouched.
+pub async fn serve_with_io<R, W>(server: CoordServer, reader: R, writer: W) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut to_rmcp, rmcp_reads) = tokio::io::duplex(PIPE_BUFFER_BYTES);
+    let (rmcp_writes, from_rmcp) = tokio::io::duplex(PIPE_BUFFER_BYTES);
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+
+    let inbound_writer = writer.clone();
+    let inbound = tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        let mut initialize_seen = false;
+        while let Some(line) = lines.next_line().await? {
+            if !initialize_seen {
+                match classify_pre_initialize(&line) {
+                    PreInitialize::Initialize => initialize_seen = true,
+                    PreInitialize::OtherRequest { id, method } => {
+                        tracing::info!("answering pre-initialize request `{method}` with -32601 instead of letting rmcp exit (issue #291)");
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32601, "message": format!("Method not found: {method}") },
+                        });
+                        write_line(&inbound_writer, &reply.to_string()).await?;
+                        continue;
+                    }
+                    PreInitialize::OtherNotification { method } => {
+                        tracing::info!("dropping pre-initialize notification `{method}` (issue #291)");
+                        continue;
+                    }
+                    PreInitialize::PassThrough => {}
+                }
+            }
+            to_rmcp.write_all(line.as_bytes()).await?;
+            to_rmcp.write_all(b"\n").await?;
+        }
+        to_rmcp.shutdown().await?;
+        anyhow::Ok(())
+    });
+
+    let outbound_writer = writer.clone();
+    let outbound = tokio::spawn(async move {
+        let mut lines = BufReader::new(from_rmcp).lines();
+        while let Some(line) = lines.next_line().await? {
+            write_line(&outbound_writer, &line).await?;
+        }
+        anyhow::Ok(())
+    });
+
+    let service = server.serve((rmcp_reads, rmcp_writes)).await?;
     service.waiting().await?;
+    inbound.abort();
+    // rmcp drops its writer when its task ends; the pump then sees EOF. The timeout only
+    // guards against a transport that is never dropped, so exit cannot hang on it.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), outbound).await;
     Ok(())
+}
+
+async fn write_line<W: AsyncWrite + Unpin>(writer: &tokio::sync::Mutex<W>, line: &str) -> std::io::Result<()> {
+    let mut writer = writer.lock().await;
+    writer.write_all(line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
+}
+
+#[derive(Debug, PartialEq)]
+enum PreInitialize {
+    Initialize,
+    OtherRequest { id: serde_json::Value, method: String },
+    OtherNotification { method: String },
+    PassThrough,
+}
+
+fn classify_pre_initialize(line: &str) -> PreInitialize {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return PreInitialize::PassThrough;
+    };
+    let Some(method) = value.get("method").and_then(serde_json::Value::as_str) else {
+        return PreInitialize::PassThrough;
+    };
+    if method == "initialize" {
+        return PreInitialize::Initialize;
+    }
+    match value.get("id") {
+        Some(id) if !id.is_null() => PreInitialize::OtherRequest { id: id.clone(), method: method.to_string() },
+        _ => PreInitialize::OtherNotification { method: method.to_string() },
+    }
 }
 
 #[cfg(test)]
@@ -377,6 +475,72 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    async fn next_json(lines: &mut tokio::io::Lines<BufReader<tokio::io::DuplexStream>>) -> serde_json::Value {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("timed out waiting for a server line")
+            .unwrap()
+            .expect("server closed the stream");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn send(client: &mut tokio::io::DuplexStream, line: &str) {
+        client.write_all(line.as_bytes()).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+    }
+
+    /// Issue #291: Copilot CLI 1.0.85+ opens with the MCP 2026-07-28
+    /// `server/discover` request and falls back to the legacy `initialize`
+    /// once that is refused. rmcp 0.16 exits on any first message that is
+    /// not `initialize`, so the shim must answer discover itself and the
+    /// legacy handshake and tool listing must still complete afterwards.
+    #[tokio::test]
+    async fn pre_initialize_server_discover_is_answered_and_the_legacy_handshake_still_completes() {
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir());
+        let (mut client_tx, server_rx) = tokio::io::duplex(PIPE_BUFFER_BYTES);
+        let (server_tx, client_rx) = tokio::io::duplex(PIPE_BUFFER_BYTES);
+        let served = tokio::spawn(serve_with_io(server, server_rx, server_tx));
+        let mut replies = BufReader::new(client_rx).lines();
+
+        send(&mut client_tx, r#"{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#).await;
+        let discover = next_json(&mut replies).await;
+        assert_eq!(discover["id"], 0);
+        assert_eq!(discover["error"]["code"], -32601, "got: {discover}");
+
+        send(&mut client_tx, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#).await;
+        let init = next_json(&mut replies).await;
+        assert_eq!(init["id"], 1);
+        assert!(init["result"]["capabilities"]["tools"].is_object(), "got: {init}");
+
+        send(&mut client_tx, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).await;
+        send(&mut client_tx, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).await;
+        let tools = next_json(&mut replies).await;
+        let names: Vec<&str> = tools["result"]["tools"].as_array().expect("tools array").iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"claim_files"), "got: {names:?}");
+
+        drop(client_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(10), served)
+            .await
+            .expect("server did not exit after the client closed its stream")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn classify_pre_initialize_distinguishes_initialize_other_requests_notifications_and_junk() {
+        assert_eq!(classify_pre_initialize(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#), PreInitialize::Initialize);
+        assert_eq!(
+            classify_pre_initialize(r#"{"jsonrpc":"2.0","id":"abc","method":"server/discover"}"#),
+            PreInitialize::OtherRequest { id: serde_json::json!("abc"), method: "server/discover".to_string() }
+        );
+        assert_eq!(
+            classify_pre_initialize(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
+            PreInitialize::OtherNotification { method: "notifications/initialized".to_string() }
+        );
+        assert_eq!(classify_pre_initialize("not json"), PreInitialize::PassThrough);
+        assert_eq!(classify_pre_initialize(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#), PreInitialize::PassThrough);
     }
 
     #[test]

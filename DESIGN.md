@@ -2718,6 +2718,37 @@ near that. Not optimizing preemptively -- revisit (glob-prefix-based
 pruning, or caching the file list per workspace between calls) only if
 real usage actually hits this as a bottleneck.
 
+### Pre-initialize requests are answered, not fatal (issue #291)
+
+rmcp 0.16's server handshake treats the very first client message as the
+`initialize` request and exits the whole server with
+`ServerInitializeError::ExpectedInitializeRequest` on anything else.
+GitHub Copilot CLI 1.0.85+ opens an MCP stdio connection with the
+2026-07-28 `server/discover` request *first*, and only falls back to the
+legacy `initialize` after that is refused (confirmed against the real CLI
+and against github/copilot-cli#4888). The two collide: `pact mcp-serve`
+received `server/discover`, rmcp exited code 1, and every Copilot worker
+ran the whole session with no coordination tools (the `pact-coord:
+failed` line in the 2026-09-30 benchmark, issue #308).
+
+Fix: `serve_with_io` runs a line-level shim between the client transport
+and rmcp. Before the client's `initialize` has been seen, any other
+*request* (has an `id`) is answered directly with JSON-RPC -32601
+("method not found") and never forwarded, and any other *notification*
+(no `id`) is dropped; rmcp therefore still sees `initialize` as the first
+message it gets and its strict handshake is satisfied. After `initialize`
+passes through, the shim is a transparent byte pump. This is deliberately
+a dumb refuse-and-wait, not a real `server/discover` implementation: pact
+only needs the legacy handshake to survive discovery, and answering
+discover for real would mean tracking the modern protocol's capability
+negotiation the SDK does not expose here. Covered by a stdio-level test
+(`server/discover` -> `initialize` -> `initialized` -> `tools/list` all
+on one connection) and a unit test of the classifier. An alternative,
+upgrading rmcp to a version that tolerates unknown pre-initialize
+requests, was not taken: 0.16 -> 3.x is a major jump across the whole
+tool-router API for one handshake behavior, and the shim is independent
+of the SDK version.
+
 ### Known limitation: intermittent MCP connection status under concurrency (issue #105)
 
 Found during the 2026-07-23 Claude Code stress-testing campaign: under a
