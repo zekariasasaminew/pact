@@ -3174,6 +3174,21 @@ below). For JavaScript, `prepare_with_mode` can instead *link* the
 workspace's `node_modules` to the repo root's existing install -- see
 "Link mode" next.
 
+### Detection probes must not write to the project (issue #299)
+
+`pact doctor` reports each package manager's version by running its
+`--version`. On a machine where `pnpm`/`yarn` are Corepack shims (the
+default with a modern Node), Corepack appends a `packageManager` field to
+the nearest `package.json` on *any* invocation, `--version` included,
+unless `COREPACK_ENABLE_AUTO_PIN=0`. Running the probe from the user's cwd
+therefore silently dirtied a real project's `package.json` -- confirmed by
+hand in capture-hub, where a clean tree showed ` M package.json` the
+instant `pact doctor` ran, with a `pnpm@...` pin it never had. `run_probe`
+(used only by detection, never by a real install) runs in `temp_dir()`
+with that env var set, so a read-only probe stays read-only; `run_shimmed`
+keeps running real installs in the workspace as before. The split matters:
+an install *should* run in the workspace, a probe must not touch it.
+
 ### Link mode (issue #283)
 
 The cache-backed `npm ci` above still writes every file of `node_modules`

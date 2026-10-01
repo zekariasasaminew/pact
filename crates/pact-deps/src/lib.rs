@@ -15,7 +15,7 @@ mod detect;
 mod link;
 mod passthrough;
 
-pub use cmdutil::run as run_shimmed;
+pub use cmdutil::{run as run_shimmed, run_probe};
 pub use detect::{detect, PackageManager};
 pub use link::{ensure_git_ignores, link_dir, shareable_node_modules, NODE_MODULES};
 
