@@ -98,6 +98,12 @@ Key things that surprise people:
 - **`merge-all` never touches the repo's own checkout.** The result is a new
   local branch (default `pact/merged-<id>`); pushing/opening a PR from it is
   a separate, deliberate step.
+- **`teardown` refuses to throw away work.** It refuses on uncommitted
+  changes, and on a branch whose commits no other branch reaches (you
+  ran `commit-all` but never `merge-all`). Land the work with `merge-all`
+  first, or pass `--keep-branch` to drop only the worktree; `--force`
+  discards both kinds of work on purpose. A bare `pact teardown` with no
+  id sweeps every workspace and reports the ones it refused.
 - **`--dry-run`** exists on both `spawn` and `spawn-many` — use it to preview
   the exact command/workspace that would be created without spawning
   anything or spending money on a real agent call.

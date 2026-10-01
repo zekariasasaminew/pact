@@ -573,14 +573,17 @@ enum Command {
         id: Option<String>,
 
         /// Don't delete the pact/<id> branch -- keep it around to inspect
-        /// or rebase the workspace's commits after tearing it down.
+        /// or rebase the workspace's commits after tearing it down. Also
+        /// the way past the unmerged-commits refusal without discarding
+        /// anything.
         #[arg(long)]
         keep_branch: bool,
 
-        /// Tear down even if the workspace has uncommitted changes,
-        /// discarding them. Without this, `teardown` refuses on a dirty
-        /// workspace -- see `pact diff <id>` to inspect what would be
-        /// lost first.
+        /// Tear down even if the workspace has uncommitted changes, or its
+        /// branch holds commits no other branch reaches -- discarding
+        /// them. Without this, `teardown` refuses in both cases; see
+        /// `pact diff <id>` to inspect what would be lost first, or run
+        /// `merge-all` to land committed work.
         #[arg(long)]
         force: bool,
     },

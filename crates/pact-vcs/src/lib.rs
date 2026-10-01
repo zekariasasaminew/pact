@@ -605,6 +605,21 @@ impl WorkspaceManager {
                      --force to discard them anyway:\n{dirty}"
                 );
             }
+            // Issue #325: committed work whose only reference is this
+            // branch is the same hazard one level up, and `branch -D` plus
+            // worktree removal leaves it reachable from no reflog either.
+            if !keep_branch {
+                let orphaned = self.orphaned_commit_count(&workspace.branch)?;
+                if orphaned > 0 {
+                    bail!(
+                        "workspace {id}'s branch {} has {orphaned} commit(s) reachable from no other \
+                         branch -- refusing to delete it (would silently discard committed work). \
+                         Run `pact merge-all` to land it, pass --keep-branch to remove only the \
+                         worktree, or --force to discard it anyway.",
+                        workspace.branch
+                    );
+                }
+            }
         }
 
         kill_if_alive(&workspace);
@@ -734,6 +749,41 @@ impl WorkspaceManager {
             merge_base,
             files: files.into_iter().collect(),
         })
+    }
+
+    /// Number of commits on `branch` that no other local or remote branch
+    /// reaches -- the commits `branch -D` would orphan. Zero for a branch
+    /// still at the base tip, and zero after `merge_all`, whose real
+    /// `git merge` leaves the workspace's commits reachable from the
+    /// `pact/merged-*` branch. A branch that no longer exists has nothing
+    /// to orphan (issue #325).
+    fn orphaned_commit_count(&self, branch: &str) -> Result<usize> {
+        let exists = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+            .current_dir(&self.repo_root)
+            .output()
+            .context("failed to spawn `git rev-parse`")?;
+        if !exists.status.success() {
+            return Ok(0);
+        }
+        // `--exclude` applies to the `--branches` that follows it, so the
+        // branch's own tip is not counted as "reaching" itself.
+        let exclude = format!("--exclude={branch}");
+        let output = Command::new("git")
+            .args(["rev-list", "--count", branch, "--not", &exclude, "--branches", "--remotes"])
+            .current_dir(&self.repo_root)
+            .output()
+            .context("failed to spawn `git rev-list`")?;
+        if !output.status.success() {
+            bail!(
+                "git rev-list failed while checking whether {branch} has unmerged commits:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .with_context(|| format!("unexpected `git rev-list --count` output for {branch}"))
     }
 
     /// Best-effort: a failure to delete the branch (e.g. it was already

@@ -424,10 +424,16 @@ skip reason tells you to re-run with `--gate each` to find the culprit.
 ### Other commands
 
 ```sh
-pact teardown <id>                  # refuses if the workspace has uncommitted changes
-pact teardown <id> --force          # tear down anyway, discarding uncommitted changes
-pact teardown <id> --keep-branch    # skip deleting the workspace's branch
+pact teardown <id>                  # refuses if the workspace has uncommitted changes, or if its
+                                    # branch holds commits no other branch reaches (unmerged work)
+pact teardown <id> --force          # tear down anyway, discarding uncommitted changes and unmerged commits
+pact teardown <id> --keep-branch    # remove the worktree but keep the workspace's branch and its commits
 ```
+
+After `merge-all`, a workspace's commits are reachable from the
+`pact/merged-*` branch, so a plain `teardown` cleans up without complaint.
+The refusal only fires when deleting the branch would leave committed work
+reachable from nothing (issue #325).
 
 **Shell completions:** `pact completions <shell>` (bash, zsh, fish,
 powershell, elvish) prints a completion script to stdout -- e.g. `pact
@@ -1198,12 +1204,17 @@ protection since Phase 0.
 The fix mirrors git's own convention rather than inventing a new one:
 `teardown` now checks `git status --porcelain` first and refuses by
 default on any uncommitted change, printing exactly what's there; a new
-`--force` flag proceeds anyway. This is deliberately separate from the
-existing `--keep-branch`: working-tree dirt (never committed, not in
-git's object database at all) is the actual unrecoverable-data-loss risk;
-a committed-but-unmerged branch is lower severity, since its tip stays
-reachable via reflog for a while even after `-D`, and `--keep-branch`
-already exists for anyone who wants it kept around deliberately.
+`--force` flag proceeds anyway. This was originally kept separate from the
+existing `--keep-branch` on the reasoning that working-tree dirt (never
+committed, not in git's object database at all) was the real
+unrecoverable-data-loss risk, while a committed-but-unmerged branch stayed
+reachable via reflog for a while even after `-D`. That second half turned
+out to be wrong for pact's own teardown sequence (branch deletion drops
+the branch reflog, worktree removal drops the worktree's HEAD reflog), and
+a benchmark result was orphaned exactly that way; `teardown` now also
+refuses to delete a branch whose commits no other branch reaches unless
+`--force` or `--keep-branch` is given (issue #325, DESIGN.md "Workspace
+teardown").
 
 `pact diff <id>` (new) and a `[dirty]`/`[clean]` indicator on `list` round
 out the rest of this phase's acceptance criteria -- seeing what an agent
