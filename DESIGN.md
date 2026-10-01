@@ -547,6 +547,50 @@ cut -- `<cmd>` can already be an arbitrarily cheap command (`cargo check`
 instead of `cargo test`) if a caller wants that tradeoff, so a separate
 tier wasn't necessary to build.
 
+### Gate timing: `--gate each|final` (issue #309)
+
+The "single gate on the final branch" alternative the section above set
+aside came back with a number attached. The 2026-09-30 benchmark (issue
+#308) merged 10 file-disjoint workspaces under `--require-passing-tests
+"npm test"`: 11 full suite runs (one base preflight plus one per merge),
+roughly 4 of the 5 minutes `merge-all` took, for merges that were all
+trivially conflict-free and could never have interacted. Per-merge
+gating was pure cost there.
+
+`--gate final` (default stays `each`) merges every clean workspace first
+and runs the gate once against the combined branch. The question that
+blocked this before, "which of N merged workspaces broke it, and how do
+you undo just that one", is answered by *not answering it*: a failure
+rejects the whole batch (the integration branch is reset to the base
+commit, every merged workspace is moved to `skipped` with a reason that
+names the mode and says to re-run with `--gate each` to localize). That
+is an honest tradeoff, not a rollback algorithm: `final` is for the
+common case where the merges are independent and the suite is expected
+to pass, and `each` remains the tool for finding a culprit. Bisecting
+automatically on a `final` failure was considered and left out of this
+cut, since it would re-run the per-merge cost exactly in the case the
+user chose `final` to avoid, and `each` already does it on demand.
+
+Two things `final` does not change: a real merge conflict is still
+skipped on its own (the gate never sees it, and `conflicted` is
+unaffected), and the #232 base preflight still runs first, so a broken
+environment is still diagnosed as such rather than as a batch failure.
+
+Tests (`crates/pact-vcs/tests/gate_mode.rs`) are deliberately
+behavioral, not invocation-counting: an earlier draft counted gate runs
+by having the fixture append to a log file at an absolute path, and that
+silently recorded zero runs on Windows because `Command::new("cmd")
+.args(["/C", cmd])` re-quotes an argument containing `"`, which breaks
+cmd's parse of the redirect. Rather than fight shell quoting in a test,
+the fixture is a gate whose *verdict flips between modes*: it passes
+only when both `b.txt` and `c.txt` exist (or a base sentinel does, so the
+preflight passes). Under `each` every merge is gated alone and fails;
+under `final` the one gate sees both files and passes. A gate that
+cannot be satisfied by any single merge is the proof the per-merge gate
+is really skipped, and it is immune to how the shell receives it. The
+same lesson as issue #11/#240: a fixture must not be able to pass or
+fail for reasons unrelated to the condition under test.
+
 ### Gate diagnosability, and the environment-vs-code distinction (issue #232)
 
 A real production run found `--require-passing-tests` reporting "merged

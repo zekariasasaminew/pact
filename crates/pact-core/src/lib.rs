@@ -865,6 +865,7 @@ impl Orchestrator {
     /// branch" -- see `pact_vcs::WorkspaceManager::merge_all`. `arbiter`,
     /// if given, is wired in as pact-vcs's `ArbiterResolver` hook -- see
     /// DESIGN.md ("pact-core > Arbiter -- agent invocation").
+    #[allow(clippy::too_many_arguments)]
     pub fn merge_all(
         &self,
         ids: Option<&[String]>,
@@ -872,6 +873,7 @@ impl Orchestrator {
         union_globs: &[String],
         arbiter: Option<&ArbiterConfig>,
         require_passing_tests: Option<&str>,
+        gate_mode: pact_vcs::GateMode,
         dry_run: bool,
     ) -> Result<MergeReport> {
         let resolver = |worktree_path: &Path, task_text: &str, files: &[String]| -> Vec<String> {
@@ -900,6 +902,7 @@ impl Orchestrator {
             resolver_ref,
             dependency_prep_ref,
             require_passing_tests,
+            gate_mode,
             dry_run,
         )?;
         self.log_operation(

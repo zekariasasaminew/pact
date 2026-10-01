@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use pact_agents::{AgentEvent, AgentKind};
 use pact_core::{
@@ -11,6 +11,24 @@ use pact_core::{
 mod config;
 mod demo;
 use config::PactConfig;
+
+/// CLI spelling of `pact_vcs::GateMode` for `merge-all --gate` (issue
+/// #309). Kept as its own type so the clap surface doesn't depend on
+/// pact-vcs deriving `ValueEnum`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GateModeArg {
+    Each,
+    Final,
+}
+
+impl From<GateModeArg> for pact_vcs::GateMode {
+    fn from(value: GateModeArg) -> Self {
+        match value {
+            GateModeArg::Each => pact_vcs::GateMode::Each,
+            GateModeArg::Final => pact_vcs::GateMode::Final,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "pact", version = env!("PACT_VERSION"), about = "Orchestrate parallel AI coding agent workspaces")]
@@ -452,14 +470,26 @@ enum Command {
         /// Gates each workspace's clean merge on this command passing in
         /// the integration worktree (e.g. "npm test", "cargo test")
         /// before it's accepted -- a failure undoes just that one merge
-        /// and skips the workspace, same as a real conflict. Runs once
-        /// per accepted workspace, not once at the end against the fully
-        /// merged branch -- see the README for why. Distinct from
+        /// and skips the workspace, same as a real conflict. By default
+        /// runs once per accepted workspace; see --gate for running it
+        /// once against the fully merged branch instead. Distinct from
         /// --test-cmd: that verifies an Arbiter-proposed conflict
         /// resolution; this gates every clean merge, Arbiter-resolved or
         /// not. The two can be the same command or different ones.
         #[arg(long = "require-passing-tests")]
         require_passing_tests: Option<String>,
+
+        /// When `--require-passing-tests` runs relative to the merges:
+        /// `each` (default) runs it after every clean merge, so a failure
+        /// is isolated to the one workspace that caused it and the rest of
+        /// the batch still lands; `final` merges every clean workspace
+        /// first and runs the gate once against the combined branch, far
+        /// cheaper when the merges are independent (one test run instead
+        /// of N+1), but if the combined suite fails the whole batch is
+        /// rejected rather than pinpointed -- re-run with `each` to
+        /// localize. No effect without --require-passing-tests. Issue #309.
+        #[arg(long = "gate", default_value = "each")]
+        gate: GateModeArg,
     },
     /// Without a workspace id, lists every open conflict `merge-all`
     /// skipped (which files, which target branch, when). With one,
@@ -1003,7 +1033,7 @@ fn main() -> Result<()> {
             let operations = orchestrator.history(&filter)?;
             print_history(&operations, json);
         }
-        Command::MergeAll { ids, into, dry_run, append_only, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests } => {
+        Command::MergeAll { ids, into, dry_run, append_only, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests, gate } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
             let arbiter_agent = arbiter_agent
                 .or_else(|| config.default_agent().map(str::to_string))
@@ -1016,6 +1046,7 @@ fn main() -> Result<()> {
                 &append_only,
                 arbiter.as_ref(),
                 require_passing_tests.as_deref(),
+                gate.into(),
                 dry_run,
             )?;
             print_merge_report(&report);

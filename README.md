@@ -379,7 +379,19 @@ given together:
 
 ```sh
 pact merge-all --require-passing-tests "npm test"
+pact merge-all --require-passing-tests "npm test" --gate final
 ```
+
+`--gate` controls when that command runs. `each` (the default) runs it
+after every clean merge, so a failure is pinned to the one workspace that
+caused it and the rest still land. `final` merges every clean workspace
+first and runs the command once against the combined branch: one test run
+instead of N+1, which on a batch of independent workspaces is most of
+`merge-all`'s wall time, at the cost of localization. If the combined
+suite fails under `final`, the whole batch is rejected (the branch is
+reset to base and every merged workspace is listed as skipped), and the
+skip reason tells you to re-run with `--gate each` to find the culprit.
+`--gate` has no effect without `--require-passing-tests`.
 
 ### Other commands
 

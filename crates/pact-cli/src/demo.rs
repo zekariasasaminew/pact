@@ -92,7 +92,7 @@ fn run_inner(repo_root: &Path) -> Result<()> {
 
     println!();
     println!("running merge-all...");
-    let report = workspaces.merge_all(None, None, &[], None, None, None, false)?;
+    let report = workspaces.merge_all(None, None, &[], None, None, None, pact_vcs::GateMode::Each, false)?;
     crate::print_merge_report(&report);
 
     println!();
