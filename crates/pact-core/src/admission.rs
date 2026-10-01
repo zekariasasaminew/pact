@@ -57,11 +57,13 @@ impl AdmissionPolicy {
     /// four lanes for no reason.
     pub const ACP_LANE_RESERVE_MB: u64 = 400;
 
-    /// The `per_lane_reserve_mb` default for a runtime.
+    /// The `per_lane_reserve_mb` default for a runtime. `Auto` is sized
+    /// as `Process`: callers resolve it first (`effective_runtime`), and
+    /// the conservative figure is the right one if they do not.
     pub fn default_per_lane_reserve_mb(runtime: crate::LaneRuntime) -> u64 {
         match runtime {
-            crate::LaneRuntime::Process => Self::PROCESS_LANE_RESERVE_MB,
             crate::LaneRuntime::Acp => Self::ACP_LANE_RESERVE_MB,
+            crate::LaneRuntime::Process | crate::LaneRuntime::Auto => Self::PROCESS_LANE_RESERVE_MB,
         }
     }
 

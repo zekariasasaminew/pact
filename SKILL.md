@@ -92,13 +92,17 @@ Key things that surprise people:
   batch. `--shared-tree` runs every lane in one worktree; follow with
   `commit-all` (one commit) instead of `merge-all`. It refuses if two tasks
   mention the same file unless you pass `--allow-overlap`.
-- **Add `--runtime acp` for Copilot batches.** One `copilot --acp` process
-  hosts every lane as a session instead of one cold CLI process per lane:
-  eight lanes went from 50.9 s and 2.4 GB of startup to 5.6 s and 0.45 GB
-  on a trivial task. Lanes keep their own ids, logs, leases and run
+- **Copilot batches run as ACP sessions in one process by default.** With
+  `--runtime auto` (the default) a batch whose agents all have an Agent
+  Client Protocol mode (Copilot today) is hosted by one `copilot --acp`
+  process, one session per lane, instead of one cold CLI process per
+  lane: the full benchmark went from 31.3 min to 17.2, level with
+  Copilot's own in-process sub-agents on time and ahead on memory, CPU
+  and tests produced. Lanes keep their own ids, logs, leases and run
   records; the coordination tools are served to each session over HTTP.
-  Copilot only for now; other agents fall back with an error, so leave it
-  off for mixed batches. Works with or without `--shared-tree`.
+  A mixed batch (a Claude lane next to Copilot ones) falls back to one
+  process per lane automatically; `--runtime process` forces that. Works
+  with or without `--shared-tree`.
 - **Neither `spawn` nor `spawn-many` commits anything.** A workspace shows as
   `[dirty]` in `pact list` until `commit-all` or `merge-all` commits it —
   that's expected, not a stuck agent.

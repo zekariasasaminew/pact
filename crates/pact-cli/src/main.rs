@@ -172,11 +172,12 @@ enum Command {
         #[arg(long)]
         no_lean: bool,
 
-        /// How the agent runs (issue #331): `process` (its own agent CLI
-        /// process, the original shape) or `acp` (a session inside one
-        /// shared agent process speaking the Agent Client Protocol;
-        /// Copilot CLI only for now). Falls back to `pact.toml`'s
-        /// `defaults.runtime`, then `process`.
+        /// How the agent runs (issues #331, #337): `auto` (`acp` when the
+        /// agent has an Agent Client Protocol mode, else `process`),
+        /// `process` (its own agent CLI process, the original shape) or
+        /// `acp` (a session inside one shared agent process; Copilot CLI
+        /// only for now). Falls back to `pact.toml`'s `defaults.runtime`,
+        /// then `auto`.
         #[arg(long)]
         runtime: Option<String>,
 
@@ -348,8 +349,11 @@ enum Command {
         /// session per lane, with pact's coordination server reached over
         /// HTTP; Copilot CLI only for now). Measured on a trivial task:
         /// eight lanes took 50.9 s and 2.4 GB as processes, 5.6 s and
-        /// 0.45 GB as sessions. Falls back to `pact.toml`'s
-        /// `defaults.runtime`, then `process`.
+        /// 0.45 GB as sessions, and the full benchmark matched Copilot's
+        /// own in-process sub-agents on time with less memory and CPU.
+        /// `auto` (the default) picks `acp` when every agent in the
+        /// batch supports it, else `process`. Falls back to `pact.toml`'s
+        /// `defaults.runtime`, then `auto`.
         #[arg(long)]
         runtime: Option<String>,
 
@@ -716,7 +720,7 @@ fn main() -> Result<()> {
                 validate_workspace_name(n)?;
             }
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
-            let runtime = resolve_runtime(runtime, &config)?;
+            let requested_runtime = resolve_runtime(runtime, &config)?;
             let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
@@ -725,6 +729,7 @@ fn main() -> Result<()> {
                      try: pact doctor"
                 )
             })?;
+            let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let adapter = pact_agents::adapter(kind);
             let coord_override = coord_command.map(|command| CoordServerOverride {
                 command,
@@ -741,7 +746,7 @@ fn main() -> Result<()> {
                     !no_lean,
                 )?;
                 print_spawn_preview(&preview, deps);
-                print_runtime_preview(runtime, &[kind], 1);
+                print_runtime_preview(requested_runtime, runtime, &[kind], 1);
                 return Ok(());
             }
 
@@ -801,18 +806,11 @@ fn main() -> Result<()> {
             names,
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
-            let runtime = resolve_runtime(runtime, &config)?;
+            let requested_runtime = resolve_runtime(runtime, &config)?;
             // The reserve default depends on what a lane is (issue #332): a
-            // whole agent process, or a session sharing one.
+            // whole agent process, or a session sharing one. That is only
+            // known once the batch's agents are, below.
             let reserve_overridden = per_lane_reserve_mb.is_some() || config.default_per_lane_reserve_mb().is_some();
-            let admission = pact_core::AdmissionPolicy {
-                max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
-                min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
-                stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
-                per_lane_reserve_mb: per_lane_reserve_mb
-                    .or(config.default_per_lane_reserve_mb())
-                    .unwrap_or_else(|| pact_core::AdmissionPolicy::default_per_lane_reserve_mb(runtime)),
-            };
             if tasks.is_empty() && task_files.is_empty() {
                 bail!("at least one --task or --task-file is required");
             }
@@ -862,6 +860,16 @@ fn main() -> Result<()> {
                      -- workspace names must be unique within one spawn-many batch"
                 );
             }
+            let agents: Vec<AgentKind> = batch.iter().map(|t| t.agent).collect();
+            let runtime = pact_core::effective_runtime(requested_runtime, &agents);
+            let admission = pact_core::AdmissionPolicy {
+                max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
+                min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
+                stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
+                per_lane_reserve_mb: per_lane_reserve_mb
+                    .or(config.default_per_lane_reserve_mb())
+                    .unwrap_or_else(|| pact_core::AdmissionPolicy::default_per_lane_reserve_mb(runtime)),
+            };
 
             if !dry_run {
                 let mut warned_agents = std::collections::HashSet::new();
@@ -939,8 +947,7 @@ fn main() -> Result<()> {
                     println!("task #{index} ({}):", agent_label(task.agent));
                     print_spawn_preview(&preview, deps);
                 }
-                let agents: Vec<AgentKind> = batch.iter().map(|t| t.agent).collect();
-                print_runtime_preview(runtime, &agents, batch.len());
+                print_runtime_preview(requested_runtime, runtime, &agents, batch.len());
                 if estimate_cost {
                     print_cost_estimate(&batch);
                 }
@@ -2166,7 +2173,7 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # min_free_mem_mb = 1500  # spawn-many: wait for this much free memory before each launch; 0 disables\n\
          # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n\
          # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; default 1200 (process) or 400 (acp); 0 disables\n\
-         # runtime = \"process\"  # process (one agent CLI per lane) or acp (one shared Copilot process, one session per lane)\n"
+         # runtime = \"auto\"  # auto (acp when every agent in the batch supports it, else process), process, or acp\n"
     );
 
     std::fs::write(&config_path, contents)
@@ -2268,35 +2275,42 @@ fn resolve_deps_mode(
     }
 }
 
-/// `--runtime`, then `pact.toml`'s `defaults.runtime`, then `process`
-/// (issue #331). An unknown value is reported against the flag.
+/// `--runtime`, then `pact.toml`'s `defaults.runtime`, then `auto`
+/// (issues #331, #337). An unknown value is reported against the flag.
 fn resolve_runtime(flag: Option<String>, config: &PactConfig) -> Result<pact_core::LaneRuntime> {
     match flag.as_deref().or_else(|| config.default_runtime()) {
         Some(value) => pact_core::LaneRuntime::parse(value)
-            .ok_or_else(|| anyhow::anyhow!("--runtime: unknown value '{value}' (expected process or acp)")),
-        None => Ok(pact_core::LaneRuntime::Process),
+            .ok_or_else(|| anyhow::anyhow!("--runtime: unknown value '{value}' (expected auto, process or acp)")),
+        None => Ok(pact_core::LaneRuntime::Auto),
     }
 }
 
-/// The dry-run line for the lane runtime: under `acp`, how many shared
+/// The dry-run line for the lane runtime: what was asked for, what the
+/// batch resolved to (`auto -> acp`), and under `acp` how many shared
 /// processes the batch would start and for which agents, so the one-
 /// process-per-lane assumption behind `--max-concurrent` and the memory
 /// flags is visibly not in force.
-fn print_runtime_preview(runtime: pact_core::LaneRuntime, agents: &[AgentKind], lanes: usize) {
-    match runtime {
-        pact_core::LaneRuntime::Process => println!("runtime: process (one agent CLI process per lane)"),
+fn print_runtime_preview(
+    requested: pact_core::LaneRuntime,
+    effective: pact_core::LaneRuntime,
+    agents: &[AgentKind],
+    lanes: usize,
+) {
+    let label = if requested == effective { effective.to_string() } else { format!("{requested} -> {effective}") };
+    match effective {
         pact_core::LaneRuntime::Acp => {
             let mut kinds: Vec<&str> = agents.iter().map(|k| agent_label(*k)).collect();
             kinds.sort_unstable();
             kinds.dedup();
             println!(
-                "runtime: acp ({} shared agent process{} for {lanes} lane{}: {}; coordination served over HTTP from this process)",
+                "runtime: {label} ({} shared agent process{} for {lanes} lane{}: {}; coordination served over HTTP from this process)",
                 kinds.len(),
                 if kinds.len() == 1 { "" } else { "es" },
                 if lanes == 1 { "" } else { "s" },
                 kinds.join(", ")
             );
         }
+        _ => println!("runtime: {label} (one agent CLI process per lane)"),
     }
 }
 

@@ -101,6 +101,15 @@ pub trait AgentAdapter {
         LaunchSpec { program, args, env: Vec::new() }
     }
 
+    /// Whether this CLI has an Agent Client Protocol mode at all (issue
+    /// #337): the side-effect-free check `--runtime auto` uses to pick a
+    /// runtime before anything is launched. `build_acp_launch` is the
+    /// launch itself and may prepare a config home, so it is not the
+    /// capability check.
+    fn supports_acp(&self) -> bool {
+        false
+    }
+
     /// How to start this CLI once as an Agent Client Protocol server
     /// hosting many lane sessions (the ACP lane runtime, issue #331), or
     /// `None` when the CLI has no ACP mode. No task and no coordination
