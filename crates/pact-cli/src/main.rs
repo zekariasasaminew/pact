@@ -179,8 +179,21 @@ enum Command {
         /// --task "fix the bug" --task copilot:"write tests"` runs the
         /// first on claude and the second on copilot. Prefix is split on
         /// the first `:` only, so task text itself may contain colons.
-        #[arg(long = "task", required = true)]
+        #[arg(long = "task")]
         tasks: Vec<String>,
+
+        /// Read a task's text from a file instead of the command line,
+        /// repeatable, as `<path>` or `<agent>:<path>` (the agent prefix
+        /// works exactly like --task's). The file's entire contents are
+        /// the task text, and its file stem becomes the workspace name
+        /// (so `briefs/hub-hooks.md` -> workspace `hub-hooks`). Use this
+        /// for real worker briefs: a batch of long --task strings can blow
+        /// past the OS command-line length limit (issue #307), and one
+        /// file per unit is what an orchestrator naturally produces.
+        /// --task-file entries run after all --task entries; at least one
+        /// --task or --task-file is required.
+        #[arg(long = "task-file")]
+        task_files: Vec<String>,
 
         /// Default agent CLI for any --task without an explicit
         /// `<agent>:` prefix (claude, copilot, codex, gemini, agy). A task with
@@ -673,6 +686,7 @@ fn main() -> Result<()> {
         }
         Command::SpawnMany {
             tasks,
+            task_files,
             agent,
             safety,
             coord_command,
@@ -693,20 +707,21 @@ fn main() -> Result<()> {
                 min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
                 stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
             };
+            if tasks.is_empty() && task_files.is_empty() {
+                bail!("at least one --task or --task-file is required");
+            }
             if !names.is_empty() && names.len() != tasks.len() {
                 bail!(
                     "--name given {} time(s) but --task given {} time(s) -- give exactly one \
                      --name per --task (in the same order), or omit --name entirely for the \
-                     default naming scheme on every task",
+                     default naming scheme on every task. --task-file entries are named from \
+                     their file stem, not from --name",
                     names.len(),
                     tasks.len()
                 );
             }
             for n in &names {
                 validate_workspace_name(n)?;
-            }
-            if let Some(dup) = first_duplicate(&names) {
-                bail!("--name '{dup}' was given more than once -- workspace names must be unique within one spawn-many batch");
             }
             let agent = resolve_default_agent(agent, &config);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
@@ -723,23 +738,37 @@ fn main() -> Result<()> {
                         })
                 })
                 .transpose()?;
-            let specs = tasks
-                .iter()
-                .map(|raw| parse_task_spec(raw, default_agent))
-                .collect::<Result<Vec<_>>>()?;
+            let mut batch: Vec<SpawnManyTask> = Vec::with_capacity(tasks.len() + task_files.len());
+            let mut batch_agents: Vec<(AgentKind, String)> = Vec::with_capacity(batch.capacity());
+            for (index, raw) in tasks.iter().enumerate() {
+                let (agent, task, agent_name) = parse_task_spec(raw, default_agent)?;
+                batch_agents.push((agent, agent_name));
+                batch.push(SpawnManyTask { agent, task, name: names.get(index).cloned() });
+            }
+            for raw in &task_files {
+                let (agent, task, agent_name, name) = parse_task_file_spec(raw, default_agent)?;
+                batch_agents.push((agent, agent_name));
+                batch.push(SpawnManyTask { agent, task, name: Some(name) });
+            }
+            if let Some(dup) = first_duplicate(&batch.iter().filter_map(|t| t.name.clone()).collect::<Vec<_>>()) {
+                bail!(
+                    "workspace name '{dup}' was given more than once (via --name or a --task-file stem) \
+                     -- workspace names must be unique within one spawn-many batch"
+                );
+            }
 
             if !dry_run {
                 let mut warned_agents = std::collections::HashSet::new();
-                for (kind, agent_name) in specs.iter().map(|(k, _, name)| (*k, name.clone())) {
-                    if !warned_agents.insert(kind) {
+                for (kind, agent_name) in &batch_agents {
+                    if !warned_agents.insert(*kind) {
                         continue;
                     }
-                    let adapter = pact_agents::adapter(kind);
+                    let adapter = pact_agents::adapter(*kind);
                     match &safety {
                         Some(s) => eprintln!(
                             "warning: running '{agent_name}' with an explicit safety override ({}) -- \
                              verify this doesn't hang the session on a permission prompt in headless mode.",
-                            describe_resolved_safety(kind, s)
+                            describe_resolved_safety(*kind, s)
                         ),
                         None => eprintln!(
                             "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
@@ -749,16 +778,6 @@ fn main() -> Result<()> {
                     }
                 }
             }
-
-            let batch: Vec<SpawnManyTask> = specs
-                .into_iter()
-                .enumerate()
-                .map(|(index, (agent, task, _))| SpawnManyTask {
-                    agent,
-                    task,
-                    name: names.get(index).cloned(),
-                })
-                .collect();
 
             let overlaps = pact_core::predict_task_overlap(&batch);
             if !overlaps.is_empty() {
@@ -1704,6 +1723,48 @@ fn parse_task_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(Age
     Ok((kind, raw.to_string(), name.to_string()))
 }
 
+/// Like [`parse_task_spec`], but the task text comes from a file and the
+/// workspace name is the file's stem -- issue #307. `raw` is `<path>` or
+/// `<agent>:<path>`; the agent prefix is split exactly like
+/// `parse_task_spec` (an unknown prefix falls through to the default,
+/// which also keeps a bare Windows path like `C:\briefs\x.md` working
+/// since `C` is not an agent). Returns `(kind, task_text, agent_name,
+/// workspace_name)`.
+fn parse_task_file_spec(raw: &str, default: Option<(AgentKind, &str)>) -> Result<(AgentKind, String, String, String)> {
+    let (kind, agent_name, path) = match raw.split_once(':') {
+        Some((prefix, rest)) if AgentKind::parse(prefix).is_some() => {
+            (AgentKind::parse(prefix).unwrap(), prefix.to_string(), rest)
+        }
+        _ => {
+            let Some((kind, name)) = default else {
+                bail!(
+                    "--task-file '{raw}' has no agent: use <agent>:<path>, e.g. claude:briefs/unit.md, \
+                     or pass --agent to set a default"
+                );
+            };
+            (kind, name.to_string(), raw)
+        }
+    };
+    let path = path.trim();
+    if path.is_empty() {
+        bail!("--task-file '{raw}' has an empty path");
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading --task-file '{path}'"))?;
+    if text.trim().is_empty() {
+        bail!("--task-file '{path}' is empty");
+    }
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    validate_workspace_name(&stem).map_err(|_| {
+        anyhow::anyhow!("--task-file '{path}' has no usable workspace name in its file stem ('{stem}') -- rename the file so its stem contains a letter or digit")
+    })?;
+    Ok((kind, text, agent_name, stem))
+}
+
 /// Counts distinct tasks involved in *any* predicted overlap, not the sum
 /// of each overlapping token's group size -- issue #59: two tasks sharing
 /// 3 overlapping file mentions previously printed "6 of your tasks" (3
@@ -2583,6 +2644,61 @@ mod tests {
     fn parse_task_spec_rejects_empty_task_text_after_prefix() {
         let err = parse_task_spec("claude:", None).unwrap_err();
         assert!(err.to_string().contains("empty task text"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_task_file_spec_reads_text_and_names_the_workspace_from_the_stem() {
+        let dir = std::env::temp_dir().join(format!("pact-task-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hub-hooks.md");
+        std::fs::write(&path, "Write tests for the hub hooks.\nCover load, create, delete.").unwrap();
+
+        let (kind, task, agent_name, name) =
+            parse_task_file_spec(path.to_str().unwrap(), Some((AgentKind::Copilot, "copilot"))).unwrap();
+        assert_eq!(kind, AgentKind::Copilot);
+        assert_eq!(agent_name, "copilot");
+        assert_eq!(name, "hub-hooks");
+        assert!(task.contains("Cover load, create, delete."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_task_file_spec_honors_an_agent_prefix() {
+        let dir = std::env::temp_dir().join(format!("pact-task-file-prefix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("api-routes.md");
+        std::fs::write(&path, "brief body").unwrap();
+
+        let spec = format!("claude:{}", path.to_str().unwrap());
+        let (kind, task, agent_name, name) = parse_task_file_spec(&spec, None).unwrap();
+        assert_eq!(kind, AgentKind::Claude);
+        assert_eq!(agent_name, "claude");
+        assert_eq!(task, "brief body");
+        assert_eq!(name, "api-routes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_task_file_spec_errors_on_a_missing_file() {
+        let err = parse_task_file_spec("definitely/not/here.md", Some((AgentKind::Copilot, "copilot"))).unwrap_err();
+        assert!(err.to_string().contains("reading --task-file"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_task_file_spec_errors_on_an_empty_file() {
+        let dir = std::env::temp_dir().join(format!("pact-task-file-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blank.md");
+        std::fs::write(&path, "   \n").unwrap();
+        let err = parse_task_file_spec(path.to_str().unwrap(), Some((AgentKind::Copilot, "copilot"))).unwrap_err();
+        assert!(err.to_string().contains("is empty"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_task_file_spec_requires_an_agent_when_no_default_and_no_prefix() {
+        let err = parse_task_file_spec("briefs/unit.md", None).unwrap_err();
+        assert!(err.to_string().contains("no agent"), "unexpected error: {err}");
     }
 
     #[test]

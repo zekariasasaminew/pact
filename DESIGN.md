@@ -4142,6 +4142,28 @@ Chosen over dropping `--agent` from `spawn` and always requiring a prefix
 there, since that would break every existing `spawn` caller -- this is
 purely additive to `spawn-many`.
 
+### `--task-file`: real briefs without the argv limit (issue #307)
+
+A worker only ever sees its own `--task` text, so a correct brief is long
+(files to edit, the conventions the result must follow, acceptance
+commands, "do not commit", "you cannot install or build"). A batch of
+long inline `--task` strings blows past the OS command-line length limit:
+the 2026-09-30 benchmark (issue #308) had a Copilot orchestrator fail with
+"The filename or extension is too long" building a `pact spawn-many` with
+ten multi-KB `--task` strings. `--task-file <path>` (or `<agent>:<path>`,
+the same prefix rule as `--task`) reads the brief from a file, so the
+outer command stays short, and uses the file's stem as the workspace name
+(`briefs/hub-hooks.md` -> `hub-hooks`), which is both more readable than a
+random suffix and exactly what an orchestrator producing one file per unit
+wants. `--task-file` entries run after all `--task` entries; `--name`
+stays positional over `--task` only, since a `--task-file` already carries
+its name in its stem. The agent-prefix split reuses `--task`'s rule, which
+also keeps a bare Windows path (`C:\briefs\x.md`) working because `C` is
+not a known agent and falls through to the default. Only the file-delivery
+half of #307 is implemented here; piping an over-long *single* brief to
+the agent over stdin (for one brief above the limit, which the benchmark
+did not hit) is left as follow-up.
+
 ### Streamed event filtering (issue #38)
 
 The Copilot CLI adapter recognizes 4 event types and passes everything
