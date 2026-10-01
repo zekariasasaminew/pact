@@ -1247,6 +1247,13 @@ impl Orchestrator {
         let mut by_base: std::collections::HashMap<String, Vec<(String, Vec<String>)>> =
             std::collections::HashMap::new();
         for workspace in &workspaces {
+            // A shared-tree lane has its batch's path and branch, so its
+            // diff is the batch's diff; counting it would report every
+            // file in the batch as touched by every lane (issue #327).
+            // The batch workspace stands for the whole tree.
+            if workspace.shared_batch.is_some() {
+                continue;
+            }
             match self.workspaces.workspace_changes(&workspace.id) {
                 Ok(changes) if !changes.merge_base.is_empty() => {
                     by_base

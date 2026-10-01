@@ -313,3 +313,49 @@ fn shared_tree_dry_run_previews_one_worktree_for_many_lanes() {
     cleanup(&repo);
     cleanup(&shim);
 }
+
+#[test]
+fn conflicts_do_not_count_shared_tree_lanes_as_touching_every_file_in_their_batch() {
+    // Issue #327: lanes share the batch's path and branch, so diffing each
+    // one reported every file as touched by the batch plus every lane. The
+    // batch stands for the tree; a real overlap with some other workspace
+    // is still reported, once, against the batch id.
+    let repo = init_repo("conflicts");
+    let shim = shim_dir();
+
+    let task_a = script(&[("alpha.txt", "ALPHA")], "a");
+    let task_b = script(&[("beta.txt", "BETA")], "b");
+    let spawn = pact(
+        &repo,
+        &shim,
+        &["spawn-many", "--agent", "claude", "--shared-tree", "--name", "lane-a", "--name", "lane-b", "--task", &task_a, "--task", &task_b],
+    );
+    assert!(spawn.status.success(), "spawn-many failed: {}", stderr(&spawn));
+    let commit = pact(&repo, &shim, &["commit-all"]);
+    assert!(commit.status.success(), "commit-all failed: {}", stderr(&commit));
+
+    let quiet = pact(&repo, &shim, &["conflicts"]);
+    assert!(quiet.status.success(), "conflicts failed: {}", stderr(&quiet));
+    assert!(
+        stdout(&quiet).contains("no cross-workspace conflicts found"),
+        "a shared-tree batch alone must report no conflicts, got:\n{}",
+        stdout(&quiet)
+    );
+
+    // An isolated workspace that also writes alpha.txt is a real overlap.
+    let rival = script(&[("alpha.txt", "RIVAL")], "rival");
+    let spawn = pact(&repo, &shim, &["spawn", "--agent", "claude", "--name", "rival", rival.as_str()]);
+    assert!(spawn.status.success(), "spawn failed: {}", stderr(&spawn));
+    let commit = pact(&repo, &shim, &["commit-all", "--id", "rival"]);
+    assert!(commit.status.success(), "commit-all failed: {}", stderr(&commit));
+
+    let report = stdout(&pact(&repo, &shim, &["conflicts"]));
+    let alpha_lines: Vec<&str> = report.lines().filter(|l| l.contains("alpha.txt")).collect();
+    assert_eq!(alpha_lines.len(), 1, "alpha.txt is reported once, got:\n{report}");
+    assert!(alpha_lines[0].contains("batch-") && alpha_lines[0].contains("rival"), "reported against the batch and the rival: {}", alpha_lines[0]);
+    assert!(!alpha_lines[0].contains("lane-a") && !alpha_lines[0].contains("lane-b"), "lanes must not appear: {}", alpha_lines[0]);
+    assert!(!report.contains("beta.txt"), "beta.txt is touched by one tree only, got:\n{report}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
