@@ -1144,13 +1144,12 @@ before adding concurrency machinery", 2026-09-29) argued for exactly
 that. All three are `spawn-many` flags and `pact.toml` `[defaults]`
 keys. Single `spawn` is not subject to admission.
 
-What this does *not* do, on purpose for now: it counts agent processes,
-not the memory they will grow into (a lean agent that runs a test suite
-briefly needs 1.5 GB, and only the floor check at admission time sees
-that); it does not cap a test runner's own parallelism (a separate
-change sets `VITEST_MAX_FORKS`); and it does not coordinate across two
-concurrent `pact` invocations against different repos (each batch has
-its own `Admission`).
+What this does *not* do, on purpose for now: it does not cap a test
+runner's own parallelism (a separate change sets `VITEST_MAX_FORKS`);
+and it does not coordinate across two concurrent `pact` invocations
+against different repos (each batch has its own `Admission`). It used to
+also not count the memory running agents would grow into; that is what
+the per-lane reservation below adds (issue #320).
 
 The end-to-end test runs four fake agents under `--max-concurrent 2`,
 counts presence files they hold open while alive, and fails without the
@@ -1159,6 +1158,45 @@ the cap still lets two run together, and that a waiter says "queued",
 are asserted deterministically in the unit tests instead, because on a
 loaded CI runner two 1.5-second fake agents can finish before the next
 two are even spawned.
+
+### Per-lane memory reservation (issue #320)
+
+The floor check read *instantaneous* available memory at each admission.
+A lean agent sits at 0.3-0.45 GB while authoring and then runs a
+1.5-1.9 GB test suite or type-check later, so N decisions made within a
+few seconds of each other all saw the same ~5 GB free and all admitted,
+and the lanes then peaked together. Measured twice on the 13.7 GB
+benchmark laptop with `--max-concurrent 8 --min-free-mem-mb 500`: free
+RAM dropped to 296 MB (E1, isolated lanes) and to **112 MB** (arm P,
+`--shared-tree`, where all eight launch within seconds because the tree
+is prepared once). No OOM either time, but one more process would have
+paged or died, and a killed lane mid-write is the failure pact exists to
+prevent. `--shared-tree` makes this sharper, not just more likely: the
+gate was evaluated eight times against the same number.
+
+`per_lane_reserve_mb` (default 1200, flag `--per-lane-reserve-mb`,
+`pact.toml` `defaults.per_lane_reserve_mb`, `0` disables) is subtracted
+once per already-running lane before the floor is compared:
+`decide` admits when `available - running * reserve >= floor`. On the
+benchmark laptop with ~5 GB free and the defaults that yields 3 lanes
+(5000, 3800, 2600 admit; 1400 < 1500 waits), which is exactly the
+lane count the owner had measured as safe by hand before any of this
+existed; a machine with 16 GB free admits 8. The reservation is a
+*projection*, so it is deliberately conservative: a lane that has
+already grown is double-counted (its real use is in `available` and its
+reserve is subtracted again). That errs toward fewer lanes, which is the
+side to err on, and `0` is one flag away for a machine with real
+headroom.
+
+Considered and not built here: a steady-state governor that samples
+memory while lanes run and pauses the newest lane's process tree
+(`SIGSTOP` / `NtSuspendProcess`) below the floor. It would govern the
+case the reservation cannot (a lane that grows far past its reserve),
+but pausing an agent CLI mid-HTTP-stream risks a provider-side timeout
+that ends the lane's turn anyway, and the mechanism is platform-specific
+enough to need live verification against each CLI. The reservation
+removes the measured failure with a pure-logic change and deterministic
+tests; the governor stays open on #320 for the residual case.
 
 ### Coordination config wiring
 
