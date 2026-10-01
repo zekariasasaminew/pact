@@ -323,9 +323,14 @@ task: eight lanes took 50.9 s and 2.4 GB as eight cold processes, 5.6 s
 and 0.45 GB as eight sessions in one process, since per-process startup
 is all of the former. `pact list` shows `runtime: acp session <id>` for
 such a lane, and tearing one down cancels its session rather than
-killing the shared process. Combine freely with `--shared-tree`.
-`defaults.runtime` in `pact.toml` sets the default; `process` remains the
-default until the full benchmark is re-run under `acp`.
+killing the shared process. Combine freely with `--shared-tree`. The
+full benchmark under `acp` (arm Q, issue #308) finished in 17.2 min
+against 15.8 for Copilot's own in-process sub-agents, with 11% less peak
+memory, 45% less mean memory, 27% less CPU and 25% more tests at the
+highest coverage of any arm, so the default is `auto` (issue #337): `acp`
+when every agent in the batch has an ACP mode, `process` otherwise.
+`--runtime process` or `acp` forces either; `defaults.runtime` in
+`pact.toml` sets the default.
 
 ```sh
 pact spawn-many --agent copilot --runtime acp --shared-tree \

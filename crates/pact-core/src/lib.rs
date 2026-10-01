@@ -4,7 +4,7 @@ use std::process::Command;
 
 mod acp_runtime;
 mod admission;
-pub use acp_runtime::LaneRuntime;
+pub use acp_runtime::{effective_runtime, LaneRuntime};
 pub use admission::{available_memory_mb, decide, Admission, AdmissionDecision, AdmissionPolicy};
 
 use acp_runtime::AcpBatch;
@@ -576,9 +576,9 @@ impl Orchestrator {
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let supervisor = Supervisor::new();
-        let acp = match options.runtime {
-            LaneRuntime::Process => None,
+        let acp = match effective_runtime(options.runtime, &[agent]) {
             LaneRuntime::Acp => Some(self.start_acp_batch(&[agent], options, &mut on_event)?),
+            _ => None,
         };
         let result =
             self.spawn_with_supervisor(&supervisor, agent, task, name, options, None, None, acp.as_ref(), on_event);
@@ -646,10 +646,10 @@ impl Orchestrator {
         // ACP runtime (issue #331): the shared agent process(es) and the
         // coordination server come up once, before any lane, and a failure
         // here is one batch-level error for the same reason as above.
-        let acp = match options.runtime {
-            LaneRuntime::Process => None,
+        // `Auto` (issue #337) resolves on the batch's agents here.
+        let agents: Vec<AgentKind> = tasks.iter().map(|t| t.agent).collect();
+        let acp = match effective_runtime(options.runtime, &agents) {
             LaneRuntime::Acp => {
-                let agents: Vec<AgentKind> = tasks.iter().map(|t| t.agent).collect();
                 let first_agent = tasks.first().map(|t| t.agent).unwrap_or(AgentKind::Copilot);
                 match self.start_acp_batch(&agents, options, &mut |event| on_event(0, &first_agent, event)) {
                     Ok(batch) => Some(batch),
@@ -667,6 +667,7 @@ impl Orchestrator {
                     }
                 }
             }
+            _ => None,
         };
 
         let outcomes = std::thread::scope(|scope| {

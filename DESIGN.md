@@ -1204,8 +1204,21 @@ reserve runtime-aware); only Copilot has an ACP mode today, so a mixed
 batch under `acp` fails up front with the agent named; cancellation
 depends on the agent honouring `session/cancel` mid-turn, which the
 fake cannot exercise and the real CLI has not been measured on.
-`process` stays the default until arm Q of the benchmark is run under
-`acp`.
+
+Arm Q then ran the full benchmark under `acp` (issue #308): 17.2 min
+against 15.8 for Copilot's in-process sub-agents and 31.3 for pact's
+previous best, with 11% less peak memory, 45% less mean memory, 27%
+less CPU, 8% more cost and 25% more tests at the highest coverage of
+any arm. On that evidence the default became `auto` (issue #337):
+`effective_runtime` resolves it to `acp` when every agent in the batch
+reports `supports_acp` (a side-effect-free capability check, separate
+from `build_acp_launch` because the lean launch prepares a home) and to
+`process` otherwise, since a mixed batch cannot put a CLI without an
+ACP mode into a shared process. The CLI resolves once the batch's agents
+are known, sizes the memory reserve (#332) from the result, and says
+`runtime: auto -> acp` in a dry run so the resolution is never silent.
+An explicit `--runtime` is passed through untouched; asking for `acp`
+with an agent that lacks it still fails up front with the agent named.
 
 ### Admission control (issue #285)
 

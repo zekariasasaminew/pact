@@ -118,6 +118,10 @@ impl AgentAdapter for CopilotAdapter {
         LaunchSpec { program, args, env: lean_home_env(request.agent_home) }
     }
 
+    fn supports_acp(&self) -> bool {
+        true
+    }
+
     /// `copilot --acp`: one process hosting one ACP session per lane
     /// (issue #331). Verified live against CLI 1.0.90: eight concurrent
     /// sessions finished a trivial task in 5.6 s and 445 MB where eight

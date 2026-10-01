@@ -22,9 +22,14 @@ use pact_coord::http::{HttpCoordServer, LaneRoute};
 /// Which way `spawn`/`spawn-many` run each lane's agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LaneRuntime {
-    /// One agent CLI process per lane, pact-coord as that process's own
-    /// stdio MCP child. The original shape; still the default.
+    /// `Acp` when every agent in the batch has an ACP mode, else
+    /// `Process` (issue #337). The default since benchmark arm Q matched
+    /// Copilot's in-process sub-agents on time and beat them on memory,
+    /// CPU and output (#308).
     #[default]
+    Auto,
+    /// One agent CLI process per lane, pact-coord as that process's own
+    /// stdio MCP child. The original shape.
     Process,
     /// One agent process per agent kind, one ACP session per lane,
     /// pact-coord over HTTP from inside the orchestrating process.
@@ -34,6 +39,7 @@ pub enum LaneRuntime {
 impl LaneRuntime {
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(LaneRuntime::Auto),
             "process" => Some(LaneRuntime::Process),
             "acp" => Some(LaneRuntime::Acp),
             _ => None,
@@ -42,6 +48,7 @@ impl LaneRuntime {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            LaneRuntime::Auto => "auto",
             LaneRuntime::Process => "process",
             LaneRuntime::Acp => "acp",
         }
@@ -51,6 +58,24 @@ impl LaneRuntime {
 impl std::fmt::Display for LaneRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// The runtime a batch of `agents` actually runs under when `requested`
+/// (issue #337): `Auto` resolves to `Acp` only when every agent has an
+/// ACP mode, since a mixed batch cannot put a CLI without one into a
+/// shared process; an explicit request is returned as is, and an empty
+/// batch resolves to `Process`. Never returns `Auto`.
+pub fn effective_runtime(requested: LaneRuntime, agents: &[AgentKind]) -> LaneRuntime {
+    match requested {
+        LaneRuntime::Auto => {
+            if !agents.is_empty() && agents.iter().all(|&agent| pact_agents::adapter(agent).supports_acp()) {
+                LaneRuntime::Acp
+            } else {
+                LaneRuntime::Process
+            }
+        }
+        explicit => explicit,
     }
 }
 
@@ -190,12 +215,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lane_runtime_parses_case_insensitively_and_defaults_to_process() {
+    fn lane_runtime_parses_case_insensitively_and_defaults_to_auto() {
         assert_eq!(LaneRuntime::parse("ACP"), Some(LaneRuntime::Acp));
         assert_eq!(LaneRuntime::parse(" process "), Some(LaneRuntime::Process));
+        assert_eq!(LaneRuntime::parse("auto"), Some(LaneRuntime::Auto));
         assert_eq!(LaneRuntime::parse("threads"), None);
-        assert_eq!(LaneRuntime::default(), LaneRuntime::Process);
+        assert_eq!(LaneRuntime::default(), LaneRuntime::Auto);
         assert_eq!(LaneRuntime::Acp.to_string(), "acp");
+    }
+
+    #[test]
+    fn auto_resolves_to_acp_only_when_every_agent_in_the_batch_supports_it() {
+        assert_eq!(effective_runtime(LaneRuntime::Auto, &[AgentKind::Copilot, AgentKind::Copilot]), LaneRuntime::Acp);
+        assert_eq!(effective_runtime(LaneRuntime::Auto, &[AgentKind::Claude]), LaneRuntime::Process);
+        assert_eq!(effective_runtime(LaneRuntime::Auto, &[AgentKind::Copilot, AgentKind::Claude]), LaneRuntime::Process, "a mixed batch cannot share a process");
+        assert_eq!(effective_runtime(LaneRuntime::Auto, &[]), LaneRuntime::Process);
+        assert_eq!(effective_runtime(LaneRuntime::Process, &[AgentKind::Copilot]), LaneRuntime::Process, "explicit wins");
+        assert_eq!(effective_runtime(LaneRuntime::Acp, &[AgentKind::Claude]), LaneRuntime::Acp, "explicit is passed through; the batch start reports the unsupported agent");
     }
 
     #[test]

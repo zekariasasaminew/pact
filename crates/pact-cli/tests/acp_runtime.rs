@@ -231,13 +231,28 @@ fn runtime_acp_dry_run_names_the_shared_process_and_refuses_agents_without_acp()
     );
     assert!(pact_vcs::WorkspaceManager::open(&repo).unwrap().list_workspaces().unwrap().is_empty(), "dry-run creates nothing");
 
+    // The default is `auto` (issue #337): a Copilot-only batch resolves to
+    // acp and takes acp's reserve default; a claude batch resolves to
+    // process; a mixed batch cannot share a process, so process.
     let plain = pact(&repo, &shim, &["spawn-many", "--agent", "copilot", "--task", &task(&[("a.txt", "a")], "a"), "--dry-run"]);
-    assert!(stdout(&plain).contains("runtime: process"), "the default is still the process runtime:\n{}", stdout(&plain));
+    assert!(stdout(&plain).contains("runtime: auto -> acp (1 shared agent process for 1 lane: copilot"), "auto picks acp for Copilot:\n{}", stdout(&plain));
     assert!(
-        stdout(&plain).contains("each running agent reserves 1200 MB against that, the default for the process runtime"),
-        "process lanes keep the 1200 MB default:\n{}",
+        stdout(&plain).contains("each running agent reserves 400 MB against that, the default for the acp runtime"),
+        "the reserve default follows the resolved runtime:\n{}",
         stdout(&plain)
     );
+    let claude = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--task", "do a", "--dry-run"]);
+    assert!(stdout(&claude).contains("runtime: auto -> process (one agent CLI process per lane)"), "auto falls back for claude:\n{}", stdout(&claude));
+    assert!(
+        stdout(&claude).contains("each running agent reserves 1200 MB against that, the default for the process runtime"),
+        "process lanes keep the 1200 MB default:\n{}",
+        stdout(&claude)
+    );
+    let mixed = pact(&repo, &shim, &["spawn-many", "--task", "claude:do a", "--task", "copilot:do b", "--dry-run"]);
+    assert!(mixed.status.success(), "mixed dry run failed: {}", stderr(&mixed));
+    assert!(stdout(&mixed).contains("runtime: auto -> process"), "a mixed batch cannot share one process:\n{}", stdout(&mixed));
+    let forced = pact(&repo, &shim, &["spawn-many", "--agent", "copilot", "--runtime", "process", "--task", "do a", "--dry-run"]);
+    assert!(stdout(&forced).contains("runtime: process (one agent CLI process per lane)"), "an explicit runtime prints without an arrow:\n{}", stdout(&forced));
 
     let explicit = pact(&repo, &shim, &["spawn-many", "--agent", "copilot", "--runtime", "acp", "--per-lane-reserve-mb", "900", "--task", &task(&[("a.txt", "a")], "a"), "--dry-run"]);
     assert!(
@@ -255,6 +270,27 @@ fn runtime_acp_dry_run_names_the_shared_process_and_refuses_agents_without_acp()
     assert!(!bad.status.success());
     assert!(stderr(&bad).contains("--runtime: unknown value 'threads'"), "stderr: {}", stderr(&bad));
 
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+/// Issue #337: with no `--runtime` at all, a Copilot batch runs as ACP
+/// sessions. Same proof as the explicit test: session ids from one counter.
+#[test]
+fn a_copilot_batch_runs_as_acp_sessions_by_default() {
+    let repo = init_repo("auto-default");
+    let shim = shim_dir();
+    let spawn = pact(
+        &repo,
+        &shim,
+        &["spawn-many", "--agent", "copilot", "--name", "lane-a", "--name", "lane-b", "--task", &task(&[("a.txt", "A")], "a"), "--task", &task(&[("b.txt", "B")], "b")],
+    );
+    assert!(spawn.status.success(), "spawn-many failed:\nstdout: {}\nstderr: {}", stdout(&spawn), stderr(&spawn));
+    let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
+    let mut sessions: Vec<String> = manager.list_workspaces().unwrap().into_iter().filter_map(|w| w.acp_session).collect();
+    sessions.sort();
+    assert_eq!(sessions, vec!["sess-1", "sess-2"], "auto chose the ACP runtime without being asked");
+    assert_eq!(run_record(&repo, "lane-a")["runtime"], "acp");
     cleanup(&repo);
     cleanup(&shim);
 }

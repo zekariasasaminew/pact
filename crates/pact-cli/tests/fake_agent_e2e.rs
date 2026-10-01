@@ -770,7 +770,10 @@ fn deps_install_opts_out_of_linking_and_conflicting_flags_are_rejected() {
 /// an empty MCP config, so none of the user's own MCP servers load. The
 /// fake agent (impersonating `copilot`) dumps the `COPILOT_HOME` it saw,
 /// which must be pact's per-agent home, not the user's; `--no-lean` must
-/// leave the user's home in place and create nothing.
+/// leave the user's home in place and create nothing. `--runtime process`
+/// because this is the process runtime's lean home; under the default
+/// `auto` a Copilot lane is an ACP session (issue #337), which this
+/// JSONL-speaking fake cannot be.
 #[test]
 fn lean_copilot_spawn_runs_the_agent_under_an_isolated_copilot_home() {
     let repo = init_repo("lean-copilot");
@@ -785,7 +788,7 @@ fn lean_copilot_spawn_runs_the_agent_under_an_isolated_copilot_home() {
     let user_home_str = user_home.to_str().unwrap();
 
     let task = serde_json::json!({"dump_env": ["COPILOT_HOME"], "summary": "dumped env"}).to_string();
-    let spawn = pact_with_env(&repo, &shim, &["spawn", &task, "--agent", "copilot"], &[("COPILOT_HOME", user_home_str)]);
+    let spawn = pact_with_env(&repo, &shim, &["spawn", &task, "--agent", "copilot", "--runtime", "process"], &[("COPILOT_HOME", user_home_str)]);
     assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
     let id = workspace_id_from_spawn_output(&spawn);
 
@@ -810,7 +813,7 @@ fn lean_copilot_spawn_runs_the_agent_under_an_isolated_copilot_home() {
     assert_eq!(run["session_id"], meta["session_id"], "workspace and run metadata must agree on the session id");
     assert!(meta["session_id"].as_str().is_some_and(|s| s.len() == 36));
 
-    let plain = pact_with_env(&repo, &shim, &["spawn", &task, "--agent", "copilot", "--no-lean"], &[("COPILOT_HOME", user_home_str)]);
+    let plain = pact_with_env(&repo, &shim, &["spawn", &task, "--agent", "copilot", "--no-lean", "--runtime", "process"], &[("COPILOT_HOME", user_home_str)]);
     assert!(plain.status.success(), "stdout: {}\nstderr: {}", stdout(&plain), String::from_utf8_lossy(&plain.stderr));
     let plain_id = workspace_id_from_spawn_output(&plain);
     let seen = std::fs::read_to_string(state_dir_for(&repo).join("workspaces").join(&plain_id).join("env-COPILOT_HOME.txt")).unwrap();
