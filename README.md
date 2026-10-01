@@ -273,6 +273,29 @@ way) -- see Safety model below for why headless mode requires *some*
 such setting for every adapter, and why their vocabularies aren't
 unified into one shared flag.
 
+**Generated, gitignored files** are the other half of "a fresh worktree is
+not a working project" (issue #301). `next typegen` output, Prisma
+clients, GraphQL/OpenAPI codegen and the like are not tracked, so a new
+worktree lacks them and `tsc` or the tests fail for reasons that have
+nothing to do with the agent's work; measured on capture-hub, where
+`npx tsc --noEmit` cannot type-check a route until `npx next typegen`
+has run. Declare the regenerating command once and pact runs it in every
+new workspace (and in a `--shared-tree` batch once) right after
+dependency prep, and in `merge-all`'s integration worktree before the
+gate:
+
+```toml
+[defaults]
+prepare = ["npx next typegen"]
+```
+
+`--prepare <cmd>` (repeatable, on `spawn`, `spawn-many`, `run` and
+`merge-all`) replaces the config list for one invocation. Failures are
+warnings with the command's output tail, like dependency prep; `inspect`
+shows what ran; `--dry-run` prints the commands. Workers are not told to
+run this themselves because the lean profile would have to widen its
+allowlist to let them.
+
 `--dry-run` (on both `spawn` and `spawn-many`) previews the workspace
 id/branch/path that would be created, the package manager(s) detected for
 the repo, and the exact `program args...` that would be launched --

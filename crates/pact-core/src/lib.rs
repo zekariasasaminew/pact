@@ -184,6 +184,12 @@ pub struct SpawnOptions<'a> {
     pub shared_tree: bool,
     /// How each lane's agent runs -- see `LaneRuntime` (issue #331).
     pub runtime: LaneRuntime,
+    /// Shell commands run in every new workspace after dependency prep
+    /// (issue #301): a fresh worktree has only what git tracks, and repos
+    /// that depend on generated, gitignored files (`next typegen`, Prisma
+    /// clients, codegen) are not working projects until they run.
+    /// Failures warn, like dependency prep.
+    pub prepare: &'a [String],
 }
 
 impl Default for SpawnOptions<'_> {
@@ -196,8 +202,73 @@ impl Default for SpawnOptions<'_> {
             admission: AdmissionPolicy::default(),
             shared_tree: false,
             runtime: LaneRuntime::default(),
+            prepare: &[],
         }
     }
+}
+
+/// One prepare command's result (issue #301), persisted as
+/// `meta/<id>-prepare.json` so `inspect` can show what ran.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PrepareReport {
+    pub command: String,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    /// Last lines of combined output; empty on success.
+    pub output_tail: String,
+}
+
+/// Runs `commands` in `dir` one after another (`cmd /C` on Windows,
+/// `sh -c` elsewhere), reporting each as a phase. A failure is a warning
+/// and the next command still runs: a half-prepared workspace is still
+/// more useful to the agent than none, and the report says what failed.
+fn run_prepare_commands(dir: &Path, commands: &[String], on_event: &mut impl FnMut(&AgentEvent)) -> Vec<PrepareReport> {
+    let mut reports = Vec::with_capacity(commands.len());
+    for command in commands {
+        on_event(&AgentEvent::Phase(format!("prepare: {command}")));
+        let start = std::time::Instant::now();
+        let mut shell = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", command]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", command]);
+            c
+        };
+        let report = match shell.current_dir(dir).output() {
+            Ok(output) => {
+                let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                let lines: Vec<&str> = combined.lines().collect();
+                PrepareReport {
+                    command: command.clone(),
+                    success: output.status.success(),
+                    exit_code: output.status.code(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_tail: if output.status.success() { String::new() } else { lines[lines.len().saturating_sub(20)..].join("\n") },
+                }
+            }
+            Err(err) => PrepareReport {
+                command: command.clone(),
+                success: false,
+                exit_code: None,
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_tail: format!("could not start: {err}"),
+            },
+        };
+        if report.success {
+            on_event(&AgentEvent::Phase(format!("prepare done in {:.1}s: {command}", report.duration_ms as f64 / 1000.0)));
+        } else {
+            tracing::warn!("prepare command `{command}` failed in {}: {}", dir.display(), report.output_tail);
+            on_event(&AgentEvent::Phase(format!(
+                "prepare FAILED (exit {}): {command}",
+                report.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            )));
+        }
+        reports.push(report);
+    }
+    reports
 }
 
 /// The outcome of one task within a `spawn_many` batch. `result` is `Err`
@@ -863,32 +934,49 @@ impl Orchestrator {
         options: &SpawnOptions<'_>,
         on_event: &mut impl FnMut(&AgentEvent),
     ) {
-        if options.deps == DepsMode::None {
-            return;
-        }
-        on_event(&AgentEvent::Phase(format!("preparing dependencies ({})", options.deps)));
-        let dep_reports = pact_deps::prepare_with_mode(&workspace.path, &self.repo_root, options.deps);
-        for report in &dep_reports {
-            if !report.success {
-                tracing::warn!(
-                    "dependency prepare step for {} failed in workspace {}: {:?}",
-                    report.manager,
-                    workspace.id,
-                    report.warnings
-                );
+        if options.deps != DepsMode::None {
+            on_event(&AgentEvent::Phase(format!("preparing dependencies ({})", options.deps)));
+            let dep_reports = pact_deps::prepare_with_mode(&workspace.path, &self.repo_root, options.deps);
+            for report in &dep_reports {
+                if !report.success {
+                    tracing::warn!(
+                        "dependency prepare step for {} failed in workspace {}: {:?}",
+                        report.manager,
+                        workspace.id,
+                        report.warnings
+                    );
+                }
+            }
+            on_event(&AgentEvent::Phase(dependency_phase_summary(&dep_reports)));
+            let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
+            if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
+                tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
+            }
+            let linked_paths: Vec<String> = dep_reports.iter().flat_map(|r| r.linked_paths.iter().cloned()).collect();
+            if !linked_paths.is_empty() {
+                if let Err(err) = self.workspaces.set_linked_paths(&workspace.id, linked_paths) {
+                    tracing::warn!("failed to record linked paths for workspace {}: {err:#}", workspace.id);
+                }
             }
         }
-        on_event(&AgentEvent::Phase(dependency_phase_summary(&dep_reports)));
-        let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
-        if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
-            tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
-        }
-        let linked_paths: Vec<String> = dep_reports.iter().flat_map(|r| r.linked_paths.iter().cloned()).collect();
-        if !linked_paths.is_empty() {
-            if let Err(err) = self.workspaces.set_linked_paths(&workspace.id, linked_paths) {
-                tracing::warn!("failed to record linked paths for workspace {}: {err:#}", workspace.id);
+        // Repo-declared prepare commands (issue #301) run after
+        // dependencies, independent of the deps mode: `--no-deps` says the
+        // task needs no install, not that generated files already exist.
+        let reports = run_prepare_commands(&workspace.path, options.prepare, on_event);
+        if !reports.is_empty() {
+            let path = self.workspaces.state_dir().join("meta").join(format!("{}-prepare.json", workspace.id));
+            if let Err(err) = std::fs::write(&path, serde_json::to_vec_pretty(&reports).unwrap_or_default()) {
+                tracing::warn!("failed to persist prepare report to {}: {err:#}", path.display());
             }
         }
+    }
+
+    /// The prepare-command report recorded for this workspace at spawn
+    /// time (issue #301), if any: same contract as `dependency_prep_report`.
+    pub fn prepare_report(&self, id: &str) -> Option<Vec<PrepareReport>> {
+        let path = self.workspaces.state_dir().join("meta").join(format!("{id}-prepare.json"));
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1267,6 +1355,7 @@ impl Orchestrator {
         arbiter: Option<&ArbiterConfig>,
         require_passing_tests: Option<&str>,
         gate_mode: pact_vcs::GateMode,
+        prepare: &[String],
         dry_run: bool,
     ) -> Result<MergeReport> {
         let resolver = |worktree_path: &Path, task_text: &str, files: &[String]| -> Vec<String> {
@@ -1285,6 +1374,13 @@ impl Orchestrator {
                     );
                 }
             }
+            // The integration worktree is as fresh as an agent's (issue
+            // #301): generated files must exist before the gate runs there.
+            run_prepare_commands(worktree_path, prepare, &mut |event| {
+                if let AgentEvent::Phase(text) = event {
+                    tracing::info!("integration worktree: {text}");
+                }
+            });
         };
         let dependency_prep_ref: Option<&pact_vcs::DependencyPrepHook<'_>> =
             if require_passing_tests.is_some() { Some(&dependency_prep) } else { None };

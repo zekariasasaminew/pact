@@ -181,6 +181,14 @@ enum Command {
         #[arg(long)]
         runtime: Option<String>,
 
+        /// Shell command run in the new workspace after dependency prep,
+        /// repeatable, for generated gitignored files a fresh worktree
+        /// lacks (issue #301): `--prepare "npx next typegen"`. Overrides
+        /// `pact.toml`'s `defaults.prepare`. Failures warn and the spawn
+        /// continues.
+        #[arg(long = "prepare")]
+        prepare: Vec<String>,
+
         /// Explicit workspace name -- drives the workspace id/branch
         /// directly (slugified, e.g. "Add Pagination" -> "add-pagination")
         /// instead of the default task-text-slug-plus-random-suffix
@@ -356,6 +364,11 @@ enum Command {
         /// `defaults.runtime`, then `auto`.
         #[arg(long)]
         runtime: Option<String>,
+
+        /// Same as `spawn --prepare`, applied to every workspace in this
+        /// batch (and to the shared tree once, under --shared-tree).
+        #[arg(long = "prepare")]
+        prepare: Vec<String>,
 
         /// Explicit workspace name for the Nth --task, repeatable in the
         /// same order as --task -- same fix as `spawn --name` (issue
@@ -614,6 +627,13 @@ enum Command {
         /// localize. No effect without --require-passing-tests. Issue #309.
         #[arg(long = "gate", default_value = "each")]
         gate: GateModeArg,
+
+        /// Shell command run in the integration worktree before the gate,
+        /// repeatable, for generated gitignored files a fresh worktree
+        /// lacks (issue #301). Only used with --require-passing-tests.
+        /// Overrides `pact.toml`'s `defaults.prepare`.
+        #[arg(long = "prepare")]
+        prepare: Vec<String>,
     },
     /// Without a workspace id, lists every open conflict `merge-all`
     /// skipped (which files, which target branch, when). With one,
@@ -777,6 +797,7 @@ fn main() -> Result<()> {
             no_deps,
             no_lean,
             runtime,
+            prepare,
             name,
         } => {
             if let Some(n) = &name {
@@ -784,6 +805,7 @@ fn main() -> Result<()> {
             }
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;
+            let prepare = resolve_prepare(prepare, &config);
             let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
@@ -809,6 +831,7 @@ fn main() -> Result<()> {
                     !no_lean,
                 )?;
                 print_spawn_preview(&preview, deps);
+                print_prepare_preview(&prepare);
                 print_runtime_preview(requested_runtime, runtime, &[kind], 1);
                 return Ok(());
             }
@@ -834,6 +857,7 @@ fn main() -> Result<()> {
                 admission: pact_core::AdmissionPolicy::default(),
                 shared_tree: false,
                 runtime,
+                prepare: &prepare,
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -866,10 +890,12 @@ fn main() -> Result<()> {
             shared_tree,
             allow_overlap,
             runtime,
+            prepare,
             names,
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;
+            let prepare = resolve_prepare(prepare, &config);
             // The reserve default depends on what a lane is (issue #332): a
             // whole agent process, or a session sharing one. That is only
             // known once the batch's agents are, below.
@@ -1010,6 +1036,7 @@ fn main() -> Result<()> {
                     println!("task #{index} ({}):", agent_label(task.agent));
                     print_spawn_preview(&preview, deps);
                 }
+                print_prepare_preview(&prepare);
                 print_runtime_preview(requested_runtime, runtime, &agents, batch.len());
                 if estimate_cost {
                     print_cost_estimate(&batch);
@@ -1026,6 +1053,7 @@ fn main() -> Result<()> {
                 admission,
                 shared_tree,
                 runtime,
+                prepare: &prepare,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -1296,8 +1324,9 @@ fn main() -> Result<()> {
             let operations = orchestrator.history(&filter)?;
             print_history(&operations, json);
         }
-        Command::MergeAll { ids, into, dry_run, append_only, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests, gate } => {
+        Command::MergeAll { ids, into, dry_run, append_only, test_cmd, arbiter_agent, arbiter_safety, require_passing_tests, gate, prepare } => {
             let ids = if ids.is_empty() { None } else { Some(ids) };
+            let prepare = resolve_prepare(prepare, &config);
             let arbiter_agent = arbiter_agent
                 .or_else(|| config.default_agent().map(str::to_string))
                 .unwrap_or_else(|| "claude".to_string());
@@ -1310,6 +1339,7 @@ fn main() -> Result<()> {
                 arbiter.as_ref(),
                 require_passing_tests.as_deref(),
                 gate.into(),
+                &prepare,
                 dry_run,
             )?;
             print_merge_report(&report);
@@ -1672,6 +1702,20 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
             }
         }
         None => println!("  no record (workspace wasn't spawned in this session, or the record is missing)"),
+    }
+    if let Some(reports) = orchestrator.prepare_report(id) {
+        println!("prepare commands (issue #301):");
+        for report in reports {
+            println!(
+                "  `{}` [{}] {:.1}s",
+                report.command,
+                if report.success { "ok" } else { "failed" },
+                report.duration_ms as f64 / 1000.0
+            );
+            for line in report.output_tail.lines() {
+                println!("    {line}");
+            }
+        }
     }
 
     println!();
@@ -2319,7 +2363,8 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # min_free_mem_mb = 1500  # spawn-many: wait for this much free memory before each launch; 0 disables\n\
          # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n\
          # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; default 1200 (process) or 400 (acp); 0 disables\n\
-         # runtime = \"auto\"  # auto (acp when every agent in the batch supports it, else process), process, or acp\n"
+         # runtime = \"auto\"  # auto (acp when every agent in the batch supports it, else process), process, or acp\n\
+         # prepare = [\"npx next typegen\"]  # shell commands run in every new workspace after dependency prep, for generated gitignored files\n"
     );
 
     std::fs::write(&config_path, contents)
@@ -2418,6 +2463,27 @@ fn resolve_deps_mode(
             .parse::<pact_core::DepsMode>()
             .map_err(|err| anyhow::anyhow!("--deps: {err}")),
         None => Ok(pact_core::DepsMode::Auto),
+    }
+}
+
+/// `--prepare` (repeatable), else `pact.toml`'s `defaults.prepare`, else
+/// nothing (issue #301). The flag replaces the config list rather than
+/// adding to it, so a one-off run can opt out of a repo default by
+/// passing a different command.
+fn resolve_prepare(flag: Vec<String>, config: &PactConfig) -> Vec<String> {
+    if flag.is_empty() {
+        config.default_prepare().to_vec()
+    } else {
+        flag
+    }
+}
+
+/// The dry-run line for prepare commands.
+fn print_prepare_preview(prepare: &[String]) {
+    if prepare.is_empty() {
+        println!("prepare: none (set `defaults.prepare` in pact.toml or pass --prepare for generated gitignored files, e.g. \"npx next typegen\")");
+    } else {
+        println!("prepare: {}", prepare.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(" then "));
     }
 }
 

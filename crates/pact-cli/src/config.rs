@@ -23,6 +23,8 @@ struct Defaults {
     stagger_ms: Option<u64>,
     per_lane_reserve_mb: Option<u64>,
     runtime: Option<String>,
+    #[serde(default)]
+    prepare: Vec<String>,
 }
 
 impl PactConfig {
@@ -84,6 +86,12 @@ impl PactConfig {
     /// `--runtime` is omitted (issue #331). Validated at use, like `deps`.
     pub fn default_runtime(&self) -> Option<&str> {
         self.defaults.runtime.as_deref()
+    }
+
+    /// `defaults.prepare`: shell commands run in every new workspace after
+    /// dependency prep, for generated gitignored files (issue #301).
+    pub fn default_prepare(&self) -> &[String] {
+        &self.defaults.prepare
     }
 }
 
