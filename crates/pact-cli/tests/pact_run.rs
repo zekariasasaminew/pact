@@ -142,6 +142,7 @@ fn run_plans_briefs_executes_commits_and_verifies_from_one_task() {
         .collect();
     assert_eq!(log_lines[0]["pact"]["planner_attempt"], 1, "{:?}", log_lines[0]);
     assert!(log_lines.iter().skip(1).all(|l| l.get("sessionId").is_some() && l.get("update").is_some()), "{log_lines:?}");
+    assert!(log_lines.iter().all(|l| l["t"].as_u64().is_some_and(|t| t > 1_700_000_000_000)), "every line carries Unix milliseconds (#358):\n{log_lines:?}");
     assert!(log_lines.len() > 1, "the planner's reply must have produced updates:\n{log_lines:?}");
 
     // The plan and the briefs are on disk, the briefs carry the rules.

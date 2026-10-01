@@ -658,7 +658,7 @@ impl Orchestrator {
         loop {
             attempts += 1;
             on_event(&AgentEvent::Phase(format!("planning (attempt {attempts})")));
-            append_log_line(&log_path, &serde_json::json!({ "pact": { "planner_attempt": attempts, "prompt_chars": prompt.len() } }))?;
+            append_log_line(&log_path, &serde_json::json!({ "t": crate::acp_runtime::unix_millis(), "pact": { "planner_attempt": attempts, "prompt_chars": prompt.len() } }))?;
             let reply = self.ask_agent(options.agent, &self.repo_root, &prompt, &options.spawn, &log_path, on_event)?;
             let after = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
             let touched: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
@@ -732,7 +732,7 @@ impl Orchestrator {
                     let mut coalescer = crate::acp_runtime::ChunkCoalescer::new();
                     let stop = runtime
                         .prompt(&mut session, prompt, |update| {
-                            let line = serde_json::json!({ "sessionId": update.session_id, "update": update.raw });
+                            let line = crate::acp_runtime::log_line(&update);
                             let _ = writeln!(log, "{line}");
                             coalescer.push(&update, &mut forward)
                         })
