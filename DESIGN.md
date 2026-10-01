@@ -1235,6 +1235,71 @@ any other kind or the end of the turn, so a lane's message reads as the
 process runtime's complete `assistant.message` does. The per-lane JSONL
 log is written before either and keeps every raw update.
 
+### `pact run`: pact owns the split (issue #305)
+
+Everything above made execution cheap; the judgement still lived
+outside pact. The benchmark kit needed a 2.4 KB header to get a Copilot
+session to orchestrate acceptably, and every rule in that header
+(disjoint file ownership per unit, verbatim conventions in every brief,
+"do not commit", "you cannot install or build", verify on the result)
+is something pact already knows. `pact run` moves the loop inside:
+
+1. **Plan.** `ask_agent` runs one planner turn in the repo root with no
+   workspace (an ACP session in a throwaway process when the agent has
+   one, a headless process run otherwise) and collects the assistant
+   text. `planner_prompt` carries the rules and the JSON shape; the
+   planner reads the repository with its own tools, so pact inlines no
+   tree listing. `extract_plan_json` takes the last ```json fence, or
+   the outermost braces, because planners narrate before and after.
+2. **Validate, mechanically.** `validate_plan` is pure and names each
+   violation in words the planner can act on: a file owned by two
+   units, duplicate or unusable names, absolute or `..` paths, empty
+   briefs, too many units. Violations go back as `repair_prompt` with
+   the previous plan, up to `--plan-retries` times; a plan that still
+   cannot run is refused with the list. A planner that modified the
+   repository is refused outright: `changed_paths` before and after,
+   because planning is read-only by contract and a planner that writes
+   is a planner that will write into the lanes' tree next.
+3. **Brief.** `render_brief` gives every unit the same shape: its files
+   (own these, touch nothing else), what to produce in the planner's
+   words, the plan's `shared_context` verbatim, and the rules humans
+   kept forgetting to repeat. The shared-tree preamble (claim first,
+   leases) is added by `spawn_many` as for any lane.
+4. **Execute.** The plan is disjoint by validation, so the batch is a
+   shared tree (#315) under the default runtime (#337). `run_plan`
+   creates the batch itself (`spawn_many_in`) rather than through
+   `spawn_many`, for the next step's sake.
+5. **Verify with a baseline.** The first live run told the story: the
+   planner chose `npm run lint && npx tsc --noEmit`, both lanes finished
+   in 90 s with correct work, and verification failed, because Next's
+   generated types are gitignored and absent from any fresh worktree
+   (#301). Both workers had said "pre-existing, unrelated" in their
+   summaries; pact's verdict had no way to know. So the verification
+   command runs once on the untouched batch tree before any lane starts,
+   and the final result is read against it: pass/pass is `Passed`,
+   fail/pass is `Fixed`, pass/fail is `Regressed`, fail/fail is
+   `Inconclusive` (exit 3, the run neither succeeded nor failed by this
+   command's lights, and the CLI says so and points at #301), fail with
+   no baseline is `Failed`. The baseline runs in the batch tree, not the
+   repo root, precisely because the root may hold generated files the
+   worktree lacks; the first run would have misread a root baseline as
+   "passes" and called the result a regression.
+6. **Report and persist.** The plan is written to `meta/plans/` before
+   anything runs and the briefs to `briefs/<stamp>/`, so `--dry-run` is
+   "plan, print, stop" and `--plan <file>` is "skip the planner and run
+   this", the edit-and-rerun loop the epic asked for. Unit names are
+   workspace names; a rerun after a failed run needs `pact teardown`
+   first, and the collision error says so.
+
+Not here: dependent units (waves, #282), gap-closing lanes after a
+failed verification, balancing beyond an advisory warning when the
+heaviest unit's existing lines exceed four times the lightest (new-file
+units weigh nothing, so test-writing plans never trigger it). Tested
+end to end through the real binary with pact-acp's fake agent as both
+planner (a canned reply for prose prompts) and workers (JSON write
+tasks inside the rendered briefs), never a model; the live check against
+Copilot CLI produced a valid two-unit plan in one attempt and 36 s.
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched

@@ -4,6 +4,7 @@ use std::process::Command;
 
 mod acp_runtime;
 mod admission;
+pub mod run;
 pub use acp_runtime::{effective_runtime, LaneRuntime};
 pub use admission::{available_memory_mb, decide, Admission, AdmissionDecision, AdmissionPolicy};
 
@@ -158,6 +159,7 @@ pub struct CoordServerOverride {
 /// struct rather than 3+ positional parameters on those functions (clippy's
 /// `too_many_arguments`, and every call site was already passing these as
 /// one logical group).
+#[derive(Clone, Copy)]
 pub struct SpawnOptions<'a> {
     pub safety_override: Option<&'a str>,
     pub coord_override: Option<&'a CoordServerOverride>,
@@ -616,9 +618,6 @@ impl Orchestrator {
         options: &SpawnOptions<'_>,
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Vec<SpawnManyOutcome> {
-        let supervisor = Supervisor::new();
-        let admission = Admission::new(options.admission);
-
         // Shared-tree batch (issue #315): one worktree, prepared once, that
         // every lane runs in. Created up front so a failure here is one
         // batch-level error rather than N identical per-lane ones.
@@ -641,7 +640,22 @@ impl Orchestrator {
                 })
                 .collect();
         }
-        let shared_batch = shared.and_then(Result::ok);
+        self.spawn_many_in(tasks, options, shared.and_then(Result::ok), on_event)
+    }
+
+    /// `spawn_many` with the shared-tree batch already created (or `None`
+    /// for isolated lanes). `pact run` creates the batch itself so it can
+    /// take a verification baseline in the untouched tree before any lane
+    /// writes to it (issue #305).
+    pub(crate) fn spawn_many_in(
+        &self,
+        tasks: Vec<SpawnManyTask>,
+        options: &SpawnOptions<'_>,
+        shared_batch: Option<Workspace>,
+        on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
+    ) -> Vec<SpawnManyOutcome> {
+        let supervisor = Supervisor::new();
+        let admission = Admission::new(options.admission);
 
         // ACP runtime (issue #331): the shared agent process(es) and the
         // coordination server come up once, before any lane, and a failure

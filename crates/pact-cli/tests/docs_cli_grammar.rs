@@ -116,6 +116,13 @@ fn make_safe_to_run(mut args: Vec<String>) -> Vec<String> {
     if launches_an_agent && !args.iter().any(|a| a == "--dry-run") {
         args.push("--dry-run".to_string());
     }
+    // `run` calls a planner agent even under --dry-run; pointing it at a
+    // plan file that does not exist fails after argument parsing (exit
+    // 1), which is all this test needs, without any agent call.
+    if args.first().map(String::as_str) == Some("run") && !args.iter().any(|a| a == "--plan") {
+        args.push("--plan".to_string());
+        args.push("docs-grammar-check-no-such-plan.json".to_string());
+    }
     args
 }
 

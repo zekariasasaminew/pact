@@ -366,6 +366,69 @@ enum Command {
         #[arg(long = "name")]
         names: Vec<String>,
     },
+    /// Run one big task end to end (issue #305): a planner session splits
+    /// it into file-disjoint units, pact validates the plan, writes one
+    /// self-contained brief per unit, runs the units as lanes in one
+    /// shared tree, commits once, runs the verification command in the
+    /// result, and reports. Plans are persisted under the state dir's
+    /// `meta/plans/`; edit one and re-run it with `--plan`.
+    Run {
+        /// The whole task, in your words. The planner reads the repo and
+        /// decides the split; you do not write briefs.
+        task: String,
+
+        /// Agent for the planner and every lane. Falls back to
+        /// `pact.toml`'s `defaults.agent`, then auto-detection.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Most units the planner may produce (and so most lanes). The
+        /// slowest unit sets the batch's wall-clock, so more, smaller
+        /// units are usually faster; admission still caps how many run at
+        /// once.
+        #[arg(long, default_value_t = 8)]
+        max_units: usize,
+
+        /// Shell command run once in the result tree after the commit,
+        /// e.g. "npm test". Overrides the plan's own `verify`.
+        #[arg(long)]
+        verify: Option<String>,
+
+        /// Reuse a persisted plan (`meta/plans/*.json`, or your own file in
+        /// the same shape) instead of calling the planner.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+
+        /// Plan (calls the planner), persist the plan and the briefs, print
+        /// them, and stop without spawning anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// How many times a rejected plan is sent back to the planner with
+        /// its violations before giving up.
+        #[arg(long, default_value_t = 2)]
+        plan_retries: usize,
+
+        /// Same meaning as on spawn-many.
+        #[arg(long)]
+        safety: Option<String>,
+        #[arg(long, conflicts_with = "no_deps")]
+        deps: Option<String>,
+        #[arg(long)]
+        no_deps: bool,
+        #[arg(long)]
+        no_lean: bool,
+        #[arg(long)]
+        max_concurrent: Option<usize>,
+        #[arg(long)]
+        min_free_mem_mb: Option<u64>,
+        #[arg(long)]
+        stagger_ms: Option<u64>,
+        #[arg(long)]
+        per_lane_reserve_mb: Option<u64>,
+        #[arg(long)]
+        runtime: Option<String>,
+    },
     /// List active agent workspaces
     List,
     /// One-screen repo-wide view: detected agent CLIs, an aggregate
@@ -1010,6 +1073,89 @@ fn main() -> Result<()> {
             let exit_code = report.exit_code();
             if exit_code != 0 {
                 std::process::exit(exit_code);
+            }
+        }
+        Command::Run {
+            task,
+            agent,
+            max_units,
+            verify,
+            plan,
+            dry_run,
+            plan_retries,
+            safety,
+            deps,
+            no_deps,
+            no_lean,
+            max_concurrent,
+            min_free_mem_mb,
+            stagger_ms,
+            per_lane_reserve_mb,
+            runtime,
+        } => {
+            if max_units == 0 {
+                bail!("--max-units must be at least 1");
+            }
+            let deps = resolve_deps_mode(deps, no_deps, &config)?;
+            let requested_runtime = resolve_runtime(runtime, &config)?;
+            let agent_name = resolve_default_agent(agent, &config)
+                .ok_or_else(|| anyhow::anyhow!("no agent given: pass --agent or set defaults.agent in pact.toml"))?;
+            let kind = AgentKind::parse(&agent_name).ok_or_else(|| {
+                anyhow::anyhow!("unknown --agent '{agent_name}' (expected claude, copilot, codex, gemini, or agy) -- try: pact doctor")
+            })?;
+            let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
+            let safety = safety.or_else(|| config.default_safety().map(str::to_string));
+            let admission = pact_core::AdmissionPolicy {
+                max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
+                min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
+                stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
+                per_lane_reserve_mb: per_lane_reserve_mb
+                    .or(config.default_per_lane_reserve_mb())
+                    .unwrap_or_else(|| pact_core::AdmissionPolicy::default_per_lane_reserve_mb(runtime)),
+            };
+            if !dry_run {
+                let adapter = pact_agents::adapter(kind);
+                match &safety {
+                    Some(s) => eprintln!(
+                        "warning: running '{agent_name}' with an explicit safety override ({}) -- \
+                         verify this doesn't hang the session on a permission prompt in headless mode.",
+                        describe_resolved_safety(kind, s)
+                    ),
+                    None => eprintln!(
+                        "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
+                         Pass --safety explicitly to use a different setting.",
+                        adapter.default_safety_description()
+                    ),
+                }
+            }
+            let spawn_options = pact_core::SpawnOptions {
+                safety_override: safety.as_deref(),
+                coord_override: None,
+                deps,
+                lean: !no_lean,
+                admission,
+                shared_tree: true,
+                runtime,
+            };
+            let run_options = pact_core::run::RunOptions {
+                agent: kind,
+                max_units,
+                verify: verify.as_deref(),
+                plan_path: plan.as_deref(),
+                dry_run,
+                plan_retries,
+                spawn: spawn_options,
+            };
+            let report = orchestrator.run_task(&task, &run_options, |index, agent, event| {
+                let label = if index == usize::MAX { "planner".to_string() } else { format!("{}:{index}", agent_label(*agent)) };
+                print_event_labeled(&label, event, verbose);
+            })?;
+            print_run_report(&report, &orchestrator);
+            if !report.succeeded() {
+                // 3 for "could not judge", so a script can tell it from a real
+                // failure (1) and from clap's usage errors (2).
+                let inconclusive = report.verify.as_ref().is_some_and(|v| v.verdict() == pact_core::run::Verdict::Inconclusive);
+                std::process::exit(if inconclusive { 3 } else { 1 });
             }
         }
         Command::List => {
@@ -2311,6 +2457,85 @@ fn print_runtime_preview(
             );
         }
         _ => println!("runtime: {label} (one agent CLI process per lane)"),
+    }
+}
+
+/// `pact run`'s end-of-run listing (issue #305): the plan as decided, each
+/// unit's outcome, the commit and the verification, then what to do next.
+fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestrator) {
+    println!(
+        "plan: {} unit{} ({} planner attempt{}), saved to {}",
+        report.plan.units.len(),
+        if report.plan.units.len() == 1 { "" } else { "s" },
+        report.planner_attempts,
+        if report.planner_attempts == 1 { "" } else { "s" },
+        report.plan_path.display()
+    );
+    for (unit, brief) in report.plan.units.iter().zip(&report.brief_paths) {
+        println!("  {}: {} file{} -- brief {}", unit.name, unit.files.len(), if unit.files.len() == 1 { "" } else { "s" }, brief.display());
+        for file in &unit.files {
+            println!("      {file}");
+        }
+    }
+    if let Some(warning) = &report.balance_warning {
+        println!("  balance: {warning}");
+    }
+    if report.dry_run {
+        println!("dry run: nothing spawned. Edit the plan and run it with `pact run --plan {}`", report.plan_path.display());
+        return;
+    }
+    for outcome in &report.outcomes {
+        match &outcome.result {
+            Ok((workspace, run)) => {
+                let duration = orchestrator
+                    .run_metadata(&workspace.id)
+                    .map(|m| format!(" in {}s", m.ended_at.saturating_sub(m.started_at)))
+                    .unwrap_or_default();
+                println!("unit {}: {}{duration}: {}", workspace.id, if run.success { "done" } else { "failed" }, run.summary);
+            }
+            Err(err) => println!("unit #{}: FAILED before/during launch -- {err:#}", outcome.index),
+        }
+    }
+    if let Some(batch) = &report.batch {
+        println!(
+            "result: branch {} in {} ({})",
+            batch.branch,
+            batch.path.display(),
+            match report.committed {
+                Some(true) => "committed",
+                Some(false) => "nothing to commit",
+                None => "not committed",
+            }
+        );
+    }
+    match &report.verify {
+        Some(v) => {
+            println!(
+                "verify `{}`: {} (exit {}, {:.1}s)",
+                v.command,
+                v.verdict(),
+                v.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+                v.duration.as_secs_f32()
+            );
+            if !v.success {
+                for line in v.output_tail.lines() {
+                    println!("    {line}");
+                }
+            }
+        }
+        None => println!("verify: no command (pass --verify or set `verify` in the plan)"),
+    }
+    if report.succeeded() {
+        if let Some(batch) = &report.batch {
+            println!("run: OK. Review with `pact diff {}`, land with `pact merge-all`, or push {}", batch.id, batch.branch);
+        }
+    } else if report.verify.as_ref().is_some_and(|v| v.verdict() == pact_core::run::Verdict::Inconclusive) {
+        println!(
+            "run: INCONCLUSIVE. The lanes finished but the verification command fails on the base commit too, so it cannot judge them; \
+             judge the result yourself (`pact diff <id>`), or fix the command (a repo-declared prepare step for generated files, issue #301) and re-run with --plan"
+        );
+    } else {
+        println!("run: FAILED. Workspaces are kept for inspection: `pact list`, `pact diff <id>`, `pact teardown` when done");
     }
 }
 

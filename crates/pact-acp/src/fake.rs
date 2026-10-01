@@ -124,7 +124,19 @@ impl Fake {
             .and_then(Value::as_str)
             .unwrap_or("{}")
             .to_string();
-        let task = parse_task(&text);
+        let task = match parse_task(&text) {
+            Some(task) => task,
+            None => {
+                // A prose prompt with no JSON task: the planner's. Answer
+                // with the canned reply when one is configured, in two
+                // chunks like a real stream, so `pact run` can be tested
+                // end to end without a model.
+                let reply = std::env::var_os("FAKE_ACP_REPLY_FILE")
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .unwrap_or_else(|| text.clone());
+                json!({ "summary": reply })
+            }
+        };
 
         self.update(&session_id, json!({ "sessionUpdate": "usage_update", "used": 10, "size": 1000 }));
 
@@ -181,22 +193,30 @@ impl Fake {
     }
 }
 
-/// The JSON task inside a prompt. pact may prepend prose to the task (the
-/// shared-tree preamble, issue #315), so the first `{` to the last `}` is
-/// tried when the whole text is not JSON; anything else is a plain prompt
-/// with nothing to write.
-fn parse_task(text: &str) -> Value {
+/// The JSON task inside a prompt, if there is one. pact may prepend prose
+/// to the task (the shared-tree preamble, issue #315, or a `pact run`
+/// brief), so the first `{` to the last `}` is tried when the whole text
+/// is not JSON. Only an object using the fake's own keys counts: pact's
+/// planner prompt embeds a JSON schema that must not be mistaken for a
+/// task. `None` for a prompt that carries no task object at all.
+fn parse_task(text: &str) -> Option<Value> {
+    const TASK_KEYS: &[&str] = &["writes", "summary", "ask_permission", "exit_mid_turn", "sleep_ms", "stop"];
+    let is_task = |value: &Value| value.as_object().is_some_and(|obj| TASK_KEYS.iter().any(|k| obj.contains_key(*k)));
     if let Ok(task) = serde_json::from_str::<Value>(text) {
-        return task;
+        if is_task(&task) {
+            return Some(task);
+        }
     }
     if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
         if end > start {
             if let Ok(task) = serde_json::from_str::<Value>(&text[start..=end]) {
-                return task;
+                if is_task(&task) {
+                    return Some(task);
+                }
             }
         }
     }
-    json!({ "summary": text })
+    None
 }
 
 /// Runs the fake agent on this process's stdin/stdout until EOF.
