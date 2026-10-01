@@ -94,7 +94,7 @@ fn state_dir(repo: &Path) -> PathBuf {
 }
 
 fn run_record(repo: &Path, id: &str) -> serde_json::Value {
-    let path = state_dir(repo).join("meta").join(format!("{id}-run.json"));
+    let path = state_dir(repo).join("meta").join("runs").join(format!("{id}.json"));
     serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))).unwrap()
 }
 

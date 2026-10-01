@@ -392,10 +392,74 @@ impl WorkspaceManager {
         std::fs::create_dir_all(state_dir.join("meta"))?;
         std::fs::create_dir_all(state_dir.join("workspaces"))?;
 
-        Ok(Self {
+        let manager = Self {
             repo_root,
             state_dir,
-        })
+        };
+        manager.relocate_legacy_sidecars()?;
+        Ok(manager)
+    }
+
+    /// Where pact-core records a workspace's dependency-prep report
+    /// (`meta/deps/<id>.json`). Sidecar records live in directories of
+    /// their own since issue #343, so the top of `meta/` holds workspace
+    /// records only and nothing has to tell them apart by name.
+    pub fn deps_report_path(&self, id: &str) -> PathBuf {
+        self.state_dir.join("meta").join("deps").join(format!("{id}.json"))
+    }
+
+    /// Where pact-core records a workspace's run metadata
+    /// (`meta/runs/<id>.json`); see `deps_report_path`.
+    pub fn run_report_path(&self, id: &str) -> PathBuf {
+        self.state_dir.join("meta").join("runs").join(format!("{id}.json"))
+    }
+
+    /// One-time migration for state directories written before issue
+    /// #343, when the sidecars sat beside the workspace records as
+    /// `<id>-deps.json` / `<id>-run.json` and `list_workspaces` told them
+    /// apart by that suffix, which mistook a workspace *named* `smoke-run`
+    /// for a sidecar and dropped it from `list`, teardown sweeps and
+    /// merge-all. A top-level `meta/*.json` with one of those suffixes
+    /// that does not parse as a workspace record is such a leftover and
+    /// moves to its directory; one that does parse is a workspace and
+    /// stays. Runs on every `open` (one small `read_dir`) so a state dir
+    /// upgraded mid-flight is fixed before any command reads it; a rename
+    /// that fails because a concurrent pact got there first is not an
+    /// error.
+    fn relocate_legacy_sidecars(&self) -> Result<()> {
+        let meta_dir = self.state_dir.join("meta");
+        for entry in std::fs::read_dir(&meta_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !entry.file_type()?.is_file() || path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let new_home = if let Some(id) = stem.strip_suffix("-deps") {
+                self.deps_report_path(id)
+            } else if let Some(id) = stem.strip_suffix("-run") {
+                self.run_report_path(id)
+            } else {
+                continue;
+            };
+            let contents = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            if serde_json::from_str::<Workspace>(strip_bom(&contents)).is_ok() {
+                continue;
+            }
+            if let Some(parent) = new_home.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if new_home.exists() {
+                // A newer pact already wrote this workspace's record in its
+                // new home; the leftover is stale.
+                let _ = std::fs::remove_file(&path);
+            } else if std::fs::rename(&path, &new_home).is_err() && path.exists() {
+                bail!("moving legacy sidecar {} to {}", path.display(), new_home.display());
+            }
+        }
+        Ok(())
     }
 
     pub fn state_dir(&self) -> &PathBuf {
@@ -935,10 +999,15 @@ impl WorkspaceManager {
         for entry in std::fs::read_dir(&meta_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") && is_workspace_meta_file(&path) {
+            // Sidecar records live in subdirectories (issue #343), so
+            // every file here is a workspace record.
+            if entry.file_type()?.is_file() && path.extension().is_some_and(|e| e == "json") {
                 let contents = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
-                out.push(serde_json::from_str(strip_bom(&contents))?);
+                out.push(
+                    serde_json::from_str(strip_bom(&contents))
+                        .with_context(|| format!("parsing workspace record {}", path.display()))?,
+                );
             }
         }
         out.sort_by_key(|w: &Workspace| w.created_at);
@@ -1806,20 +1875,6 @@ fn strip_bom(s: &str) -> &str {
     s.strip_prefix('\u{FEFF}').unwrap_or(s)
 }
 
-/// `meta/` holds one canonical `<id>.json` per workspace plus sibling
-/// observability files (`<id>-deps.json`, `<id>-run.json`) written by
-/// dependency prep and agent runs -- both must be excluded here or their
-/// non-`Workspace`-shaped JSON breaks `list_workspaces`'s deserialization.
-/// Safe to match by suffix: every id ends in a random lowercase-hex
-/// suffix, which can never itself end in "-deps" or "-run" (`p`/`s`/`r`/`u`
-/// aren't hex digits).
-fn is_workspace_meta_file(path: &Path) -> bool {
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    !stem.ends_with("-deps") && !stem.ends_with("-run")
-}
-
 /// Whether `path` is a lockfile pact never auto-resolves semantically --
 /// also reused by pact-core's Arbiter as an up-front reject for the same
 /// class of file (issue #147): a lockfile needs the real package manager
@@ -2587,16 +2642,13 @@ mod tests {
     }
 
     #[test]
-    fn is_workspace_meta_file_accepts_the_canonical_id_json() {
-        assert!(is_workspace_meta_file(Path::new(
-            "/state/meta/writes-hello-txt-hello-from-a-fa-ed19eee2.json"
-        )));
-    }
-
-    #[test]
-    fn is_workspace_meta_file_rejects_the_deps_and_run_sidecar_files() {
-        assert!(!is_workspace_meta_file(Path::new("/state/meta/some-id-deps.json")));
-        assert!(!is_workspace_meta_file(Path::new("/state/meta/some-id-run.json")));
+    fn sidecar_records_live_in_their_own_directories_under_meta() {
+        let manager = WorkspaceManager {
+            repo_root: PathBuf::from("/repo"),
+            state_dir: PathBuf::from("/state"),
+        };
+        assert_eq!(manager.deps_report_path("smoke-run"), PathBuf::from("/state/meta/deps/smoke-run.json"));
+        assert_eq!(manager.run_report_path("smoke-run"), PathBuf::from("/state/meta/runs/smoke-run.json"));
     }
 
     #[test]

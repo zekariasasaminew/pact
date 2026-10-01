@@ -75,13 +75,15 @@ fn inspect_shows_persisted_dependency_prep_and_run_metadata() {
     let ws = manager.create_workspace("add a feature", None).unwrap();
 
     let meta_dir = manager.state_dir().join("meta");
+    std::fs::create_dir_all(meta_dir.join("deps")).unwrap();
+    std::fs::create_dir_all(meta_dir.join("runs")).unwrap();
     std::fs::write(
-        meta_dir.join(format!("{}-deps.json", ws.id)),
+        manager.deps_report_path(&ws.id),
         r#"[{"manager":"npm","strategy":"npm-ci","success":true,"warnings":[]}]"#,
     )
     .unwrap();
     std::fs::write(
-        meta_dir.join(format!("{}-run.json", ws.id)),
+        manager.run_report_path(&ws.id),
         format!(
             r#"{{"workspace_id":"{}","agent":"claude","program":"claude","args":["-p","do it"],"cwd":"/tmp","started_at":100,"ended_at":142,"exit_success":true,"summary":"Created foo.rs","coord_status":"connected","files_touched":true,"log_path":"/tmp/log.jsonl"}}"#,
             ws.id

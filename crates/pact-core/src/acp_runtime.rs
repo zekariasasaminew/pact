@@ -8,7 +8,7 @@
 //! above this module keeps its thread-per-lane shape: a lane thread calls
 //! `AcpRuntime::prompt`, which blocks exactly as `run_and_stream` does,
 //! and translates each `session/update` into the same `AgentEvent`s the
-//! process runtime produces, so logs, `-run.json`, `list` and the
+//! process runtime produces, so logs, run records, `list` and the
 //! reconciliation summary need no second code path.
 
 use std::collections::HashMap;

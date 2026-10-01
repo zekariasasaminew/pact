@@ -597,8 +597,9 @@ fn merge_all_refuses_to_let_arbiter_touch_a_conflicted_lockfile() {
 
 /// Regression test for issue #178 (backfilled per #71, once this
 /// harness existed to make it possible): `list_workspaces` used to crash
-/// on the `-deps.json` sidecar file dependency prep writes alongside a
-/// workspace's own `meta/<id>.json`, since nothing before this harness
+/// on the dependency-prep sidecar file prep writes for a workspace next
+/// to its own `meta/<id>.json` (now `meta/deps/<id>.json`, issue #343),
+/// since nothing before this harness
 /// ever drove a real `spawn -> (real dependency prep) -> list` round
 /// trip -- every prior test either stubbed the agent out entirely or
 /// never touched a real package manager. A zero-dependency `package.json`
@@ -617,11 +618,9 @@ fn spawn_through_real_dependency_prep_then_list_does_not_crash() {
     let spawn = pact(&repo, &shim, &["spawn", &task, "--agent", "claude"]);
     assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
 
-    let deps_dir = state_dir_for(&repo).join("meta");
-    let has_deps_sidecar = std::fs::read_dir(&deps_dir)
-        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with("-deps.json")))
-        .unwrap_or(false);
-    assert!(has_deps_sidecar, "expected dependency prep to have written a -deps.json sidecar file");
+    let id = workspace_id_from_spawn_output(&spawn);
+    let deps_sidecar = state_dir_for(&repo).join("meta").join("deps").join(format!("{id}.json"));
+    assert!(deps_sidecar.exists(), "expected dependency prep to have written {}", deps_sidecar.display());
 
     let list = pact(&repo, &shim, &["list"]);
     assert!(
@@ -630,7 +629,6 @@ fn spawn_through_real_dependency_prep_then_list_does_not_crash() {
         stdout(&list),
         String::from_utf8_lossy(&list.stderr)
     );
-    let id = workspace_id_from_spawn_output(&spawn);
     assert!(stdout(&list).contains(&id), "expected the workspace to actually appear in `list`, got: {}", stdout(&list));
 
     cleanup(&repo);
@@ -639,7 +637,7 @@ fn spawn_through_real_dependency_prep_then_list_does_not_crash() {
 
 /// Contrast case for the test above, and issue #233's other half: a task
 /// that doesn't touch dependencies at all shouldn't pay dependency prep's
-/// cost. `--no-deps` must skip prep entirely -- no `-deps.json` sidecar at
+/// cost. `--no-deps` must skip prep entirely -- no deps sidecar at
 /// all (not an empty one; "never attempted" is a different fact than "ran
 /// and found nothing to do"), and `list` must still work normally.
 #[test]
@@ -654,13 +652,10 @@ fn spawn_with_no_deps_skips_dependency_prep_entirely() {
     let spawn = pact(&repo, &shim, &["spawn", &task, "--agent", "claude", "--no-deps"]);
     assert!(spawn.status.success(), "stdout: {}\nstderr: {}", stdout(&spawn), String::from_utf8_lossy(&spawn.stderr));
 
-    let deps_dir = state_dir_for(&repo).join("meta");
-    let has_deps_sidecar = std::fs::read_dir(&deps_dir)
-        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with("-deps.json")))
-        .unwrap_or(false);
-    assert!(!has_deps_sidecar, "expected --no-deps to skip dependency prep entirely, found a -deps.json sidecar anyway");
-
     let id = workspace_id_from_spawn_output(&spawn);
+    let deps_sidecar = state_dir_for(&repo).join("meta").join("deps").join(format!("{id}.json"));
+    assert!(!deps_sidecar.exists(), "expected --no-deps to skip dependency prep entirely, found {} anyway", deps_sidecar.display());
+
     let list = pact(&repo, &shim, &["list"]);
     assert!(list.status.success(), "stdout: {}\nstderr: {}", stdout(&list), String::from_utf8_lossy(&list.stderr));
     assert!(stdout(&list).contains(&id), "expected the workspace to still appear in `list`, got: {}", stdout(&list));
@@ -710,7 +705,7 @@ fn spawn_links_node_modules_to_the_repo_root_and_teardown_leaves_it_intact() {
     assert_eq!(meta["linked_paths"], serde_json::json!(["node_modules"]));
 
     let deps: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join(format!("{id}-deps.json"))).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join("deps").join(format!("{id}.json"))).unwrap())
             .unwrap();
     assert_eq!(deps[0]["strategy"], "link", "deps report: {deps}");
 
@@ -804,7 +799,7 @@ fn lean_copilot_spawn_runs_the_agent_under_an_isolated_copilot_home() {
     assert_eq!(mcp, serde_json::json!({"mcpServers": {}}));
 
     let run: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join(format!("{id}-run.json"))).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(state_dir_for(&repo).join("meta").join("runs").join(format!("{id}.json"))).unwrap()).unwrap();
     let args: Vec<&str> = run["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
     assert!(args.contains(&"--disable-builtin-mcps") && args.contains(&"--session-id"), "args: {args:?}");
     assert!(args.contains(&"shell(npm install:*)"), "deny rules must be on the command line: {args:?}");

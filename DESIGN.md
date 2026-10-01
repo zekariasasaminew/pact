@@ -1933,9 +1933,7 @@ not that generated files already exist. A failure is a warning and the
 next command still runs, matching dependency prep's posture (a
 half-prepared workspace is still more useful to the agent than none),
 with each command's result persisted as `meta/prepare/<id>.json` for
-`inspect` (its own directory, because `list_workspaces` tells sidecars
-in `meta/` apart by suffix and a workspace named `...-prepare` would
-defeat that). The orchestrator runs these, not the workers, because the
+`inspect`. The orchestrator runs these, not the workers, because the
 lean profile would have to widen its allowlist to let a worker run
 arbitrary setup, and because every lane would otherwise pay for the
 same generation in a shared tree.
@@ -1957,9 +1955,10 @@ path. That context only ever lived in ephemeral terminal output and the
 raw JSONL log file, never a queryable record.
 
 New `RunMetadata` (pact-core) persists all of that to
-`state_dir/meta/<id>-run.json`, sibling to the workspace's own
-`meta/<id>.json` and the dependency-prep report (issue #12) -- the same
-three-file-per-workspace convention now covers workspace identity,
+`state_dir/meta/runs/<id>.json` (originally `meta/<id>-run.json` beside
+the workspace's own `meta/<id>.json`; see "Sidecar records" below for
+the move), the same per-workspace convention as the dependency-prep
+report (issue #12): workspace identity,
 dependency prep, and the actual agent run. Recorded regardless of
 success or failure: `spawn_with_supervisor` used to propagate
 `run_and_stream`'s `Err` straight up via `?` with nothing captured first,
@@ -2025,6 +2024,39 @@ alongside a "last run" that succeeded without touching anything.
 Verified end-to-end via the fake-agent harness (issue #157): a
 scripted no-op-but-successful spawn shows the distinct annotation, a
 real scripted file write does not.
+
+### Sidecar records live in directories of their own (issue #343)
+
+The three per-workspace observability records (dependency prep, run
+metadata, prepare report) used to sit beside the workspace records as
+`meta/<id>-deps.json` and `meta/<id>-run.json`, and `list_workspaces`
+told them apart from `meta/<id>.json` by that suffix, justified by
+"every id ends in a random hex suffix, which can never end in -deps or
+-run". That stopped being true three times over: `--name` (#234),
+`--task-file` stems (#307) and `pact run`'s unit names (#305) all let a
+workspace be called `smoke-run` or `db-deps`, and such a workspace
+silently vanished from `list`, the teardown sweep, `merge-all` and
+conflict detection while its worktree and branch lived on. Found while
+adding the prepare report (#301), which already took its own
+`meta/prepare/` directory to stay out of the suffix game.
+
+Now each kind has a directory: `meta/deps/<id>.json`,
+`meta/runs/<id>.json`, `meta/prepare/<id>.json`
+(`WorkspaceManager::deps_report_path` / `run_report_path`, written
+through one `write_sidecar` helper that creates the directory). The top
+of `meta/` holds workspace records only, so `list_workspaces` reads
+every `*.json` file there as one and a parse failure is reported with
+the file name instead of being mistaken for a sidecar. State
+directories written before the move are migrated by
+`WorkspaceManager::open`: a top-level `*-deps.json` / `*-run.json` that
+does not parse as a workspace record moves to its directory (a leftover
+whose new home already exists is stale and dropped), and one that does
+parse is a workspace named that way and stays. Running the migration on
+every `open` costs one small `read_dir` and means no command can read a
+half-upgraded state directory; a rename lost to a concurrent pact doing
+the same migration is not an error. The alternative, rejecting those
+names in `validate_workspace_name`, would have left `pact run` unable to
+use a planner's perfectly reasonable unit name.
 
 ## pact-agents — adapters and process supervision
 
@@ -3970,8 +4002,8 @@ read-only-hardlink/copy) was used, without reading logs.
 manager: `manager`, `strategy`, `store_key`, `store_hit`,
 `materialization`, `success`, `warnings`) instead of a bare `Result<()>`
 -- callers get real data, not just a side effect. `pact-core`'s
-`spawn_with_supervisor` persists it to `state_dir/meta/<id>-deps.json`,
-sibling to the workspace's own `meta/<id>.json`, feeding `pact inspect`
+`spawn_with_supervisor` persists it to `state_dir/meta/deps/<id>.json`
+(issue #343 moved it there from `meta/<id>-deps.json`), feeding `pact inspect`
 (issue #16).
 
 Two real, previously-invisible gaps this surfaced while making the
@@ -4041,7 +4073,7 @@ every task paid dependency prep's full cost even for tasks that
 explicitly said not to touch dependencies (pure version-string edits in
 a manifest file) -- prep ran unconditionally, with no way to opt out.
 `--no-deps` skips `pact_deps::prepare` entirely for that invocation; no
-`-deps.json` sidecar is written either (its absence now means "never
+deps sidecar is written either (its absence now means "never
 attempted", distinct from an empty array meaning "ran, detected zero
 package managers").
 

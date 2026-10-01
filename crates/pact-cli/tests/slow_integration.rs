@@ -152,11 +152,11 @@ fn five_concurrent_tasks_each_run_a_real_npm_ci_under_real_contention() {
     // `npm ci` (no shared staging/materialization step anymore) against
     // npm's own global cache -- all N must succeed under real concurrent
     // contention, with npm's own cache locking, not pact's.
-    let deps_dir = state_dir_for(&repo).join("meta");
+    let deps_dir = state_dir_for(&repo).join("meta").join("deps");
     let mut npm_ci_success_count = 0;
     for entry in std::fs::read_dir(&deps_dir).unwrap().filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with("-deps.json") {
+        if !name.ends_with(".json") {
             continue;
         }
         let reports: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
