@@ -245,7 +245,7 @@ fn run_with_a_plan_file_skips_the_planner_and_reports_a_failed_verification() {
     let text = stdout(&out);
     assert!(text.contains("plan: 2 units (0 planner attempts)"), "{text}");
     assert!(text.contains("unit alpha: done") && text.contains("unit beta: done"), "lanes ran:\n{text}");
-    assert!(text.contains("[planner] [phase] baseline already FAILS before any lane runs"), "the baseline ran on the untouched tree:\n{text}");
+    assert!(text.contains("[planner] [phase] baseline `exit 3` already FAILS before any lane runs"), "the baseline ran on the untouched tree:\n{text}");
     assert!(text.contains("verify `exit 3`: INCONCLUSIVE (it already fails on the base commit"), "{text}");
     assert!(text.contains("run: INCONCLUSIVE."), "{text}");
     let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
@@ -258,7 +258,7 @@ fn run_with_a_plan_file_skips_the_planner_and_reports_a_failed_verification() {
     let broken = if cfg!(windows) { "if exist alpha.txt (exit 1) else (exit 0)" } else { "! [ -f alpha.txt ]" };
     let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "--verify", broken, "x"]);
     assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
-    assert!(stdout(&out).contains("[planner] [phase] baseline passes"), "{}", stdout(&out));
+    assert!(stdout(&out).contains(&format!("[planner] [phase] baseline `{broken}` passes")), "{}", stdout(&out));
     assert!(stdout(&out).contains("FAILED (it passed on the base commit, so this run broke it)"), "{}", stdout(&out));
     assert!(stdout(&out).contains("run: FAILED. Workspaces are kept"), "{}", stdout(&out));
 
@@ -270,6 +270,23 @@ fn run_with_a_plan_file_skips_the_planner_and_reports_a_failed_verification() {
     assert!(out.status.success(), "--verify override should pass:\nstdout: {}\nstderr: {}", stdout(&out), stderr(&out));
     assert!(stdout(&out).contains("passed (it failed on the base commit, so this run fixed it)"), "both files are new, so the base fails and the run fixes it:\n{}", stdout(&out));
     assert!(stdout(&out).contains("run: OK"), "{}", stdout(&out));
+
+    // Issue #360: several --verify commands, each with its own baseline and
+    // verdict; the worst one (a regression) decides the exit code even
+    // though the other is inconclusive.
+    let teardown = pact(&repo, &shim, None, &["teardown", "--force"]);
+    assert!(teardown.status.success(), "teardown failed: {}", stdout(&teardown));
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "--verify", "exit 3", "--verify", broken, "x"]);
+    assert_eq!(out.status.code(), Some(1), "a regression beside an inconclusive check is a failure:\n{}", stdout(&out));
+    let text = stdout(&out);
+    assert_eq!(text.matches("[planner] [phase] verification baseline on the untouched tree:").count(), 2, "one baseline per command:\n{text}");
+    assert!(text.contains("verify `exit 3`: INCONCLUSIVE"), "{text}");
+    assert!(text.contains(&format!("verify `{broken}`: FAILED (it passed on the base commit")), "{text}");
+    assert!(text.contains("run: FAILED."), "{text}");
+    let persisted: Vec<PathBuf> = std::fs::read_dir(state_dir(&repo).join("meta").join("plans")).unwrap().map(|e| e.unwrap().path()).collect();
+    let newest = persisted.iter().max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(newest).unwrap()).unwrap();
+    assert_eq!(saved["verify"], serde_json::json!(["exit 3", broken]), "the persisted plan records the list that ran: {saved}");
 
     cleanup(&repo);
     cleanup(&shim);
@@ -293,7 +310,7 @@ fn run_prepares_the_shared_tree_before_the_baseline_and_the_lanes() {
     assert!(out.status.success(), "pact run failed:\nstdout: {}\nstderr: {}", stdout(&out), stderr(&out));
     let text = stdout(&out);
     assert!(text.contains(&format!("[phase] prepare: {generate}")), "{text}");
-    assert!(text.contains("[planner] [phase] baseline passes"), "the generated file was there before the baseline:\n{text}");
+    assert!(text.contains("[planner] [phase] baseline `") && text.contains("` passes in"), "the generated file was there before the baseline:\n{text}");
     assert!(text.contains("run: OK"), "{text}");
     assert!(!repo.join("generated.txt").exists(), "prepare ran in the batch tree, not the repo root");
 

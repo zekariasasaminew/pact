@@ -1396,6 +1396,25 @@ printed, and both flags remain overrides. On the owner's 12-core
 13.7 GB laptop with 5.6 GB free this picks 12 ACP lanes against the
 kit's 500 MB floor and 11 against the default 1500.
 
+Arm R3 then ran with that sizing: 12 lanes, and no faster than 8
+(issue #360 and its two dependents). The sessions' event logs showed
+why: a lane spends 56% of its time in shell commands, and most of that
+is project-wide type-checks and lints the worker runs because the task
+says they must stay clean. Twelve lanes doing that at once on twelve
+cores made a scoped `eslint` on three files take 80 to 150 s (the
+type-aware rules load the whole TS program), so finer splitting
+multiplied the whole-project checks and bought nothing; the
+model-bound part of a lane, about three minutes of generation, was not
+the bottleneck. The fix is a division of labour, and its first piece
+is that `verify` becomes a list: the plan's `verify` accepts a string
+or an array (old plans still load), `--verify` is repeatable and
+replaces the plan's list when given, every command gets its own
+baseline on the untouched tree and its own verdict afterwards, the
+report prints one line per command, and `worst_verdict` decides the
+exit code with a real failure outranking an inconclusive check. With
+that in place the project-wide checks can belong to pact (#361) and a
+repair lane can close what the workers no longer catch (#362).
+
 Not here: dependent units (waves, #282), gap-closing lanes after a
 failed verification, balancing beyond an advisory warning when the
 heaviest unit's existing lines exceed four times the lightest (new-file

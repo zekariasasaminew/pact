@@ -180,7 +180,7 @@ running `./target/release/pact` after building from source -- see
 ### One task, pact does the rest: `pact run`
 
 ```sh
-pact run --agent copilot --verify "npm test" \
+pact run --agent copilot --verify "npm test" --verify "npm run typecheck" \
   "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
 pact run --agent copilot --dry-run "..."          # plan only: print and persist the plan, spawn nothing
 pact run --agent copilot --task-file task.md      # a task statement that runs to pages
@@ -200,14 +200,16 @@ breaking when humans wrote briefs: no installs or builds, no commits,
 touch nothing outside your files); runs the units as lanes in one shared
 tree (disjoint by construction, so no isolation and no merge, under the
 default ACP runtime, as many at once as were planned unless
-`--max-concurrent` says otherwise); commits once; then runs the
-verification command in the result
+`--max-concurrent` says otherwise); commits once; then runs each
+verification command (`--verify`, repeatable; or the plan's `verify`
+list) in the result
 and reports a verdict that knows the baseline: the same command is run
 on the untouched tree first, so a check that already fails on the base
 commit (generated files missing from a fresh worktree, say) reads as
 `INCONCLUSIVE` (exit 3), a check the run broke reads as a regression,
-and a check the run made pass reads as fixed. The shared tree, its
-dependencies and that baseline are prepared while the planner works.
+and a check the run made pass reads as fixed; the worst verdict across
+the commands decides the exit code. The shared tree, its
+dependencies and those baselines are prepared while the planner works.
 Plans and briefs are
 persisted under the state dir (`meta/plans/`, `briefs/`), the planner's
 session under `logs/planner-*.jsonl`; the result is
