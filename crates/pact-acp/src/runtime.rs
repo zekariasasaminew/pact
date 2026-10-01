@@ -110,7 +110,13 @@ impl AcpRuntime {
     }
 
     pub fn cancel(&self, session: &LaneSession) -> Result<(), AcpError> {
-        self.runtime.block_on(self.client.cancel(&session.id))
+        self.cancel_by_id(&session.id)
+    }
+
+    /// Cancels a session by id, for a watcher that cannot borrow the
+    /// `LaneSession` while `prompt` holds it.
+    pub fn cancel_by_id(&self, session_id: &str) -> Result<(), AcpError> {
+        self.runtime.block_on(self.client.cancel(session_id))
     }
 
     pub fn close(&self, session: &LaneSession) -> Result<(), AcpError> {

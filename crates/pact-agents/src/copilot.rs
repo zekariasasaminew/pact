@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::adapter::{AgentAdapter, CoordConfig, LaunchRequest, LaunchSpec};
+use crate::adapter::{AcpLaunchRequest, AgentAdapter, CoordConfig, LaunchRequest, LaunchSpec};
 use crate::event::AgentEvent;
 
 pub struct CopilotAdapter;
@@ -113,32 +113,62 @@ impl AgentAdapter for CopilotAdapter {
         if !request.lean {
             return LaunchSpec { program, args, env: Vec::new() };
         }
-        args.extend(
-            ["--disable-builtin-mcps", "--no-auto-update", "--session-id", request.session_id].map(str::to_string),
-        );
-        for rule in LEAN_DENY_RULES {
-            args.push("--deny-tool".to_string());
-            args.push(rule.to_string());
+        args.extend(["--session-id", request.session_id].map(str::to_string));
+        args.extend(lean_args());
+        LaunchSpec { program, args, env: lean_home_env(request.agent_home) }
+    }
+
+    /// `copilot --acp`: one process hosting one ACP session per lane
+    /// (issue #331). Verified live against CLI 1.0.90: eight concurrent
+    /// sessions finished a trivial task in 5.6 s and 445 MB where eight
+    /// `copilot -p` processes took 50.9 s and 2,456 MB. Same safety
+    /// posture as the headless launch (`--allow-all-tools`, see
+    /// `default_safety_description`), same lean trimmings when `lean`;
+    /// no `--output-format` (events arrive as ACP `session/update`s) and
+    /// no `--session-id` (each session gets its own id from the agent).
+    fn build_acp_launch(&self, request: &AcpLaunchRequest<'_>) -> Option<LaunchSpec> {
+        let mut args = vec!["--acp".to_string(), "--allow-all-tools".to_string()];
+        if !request.lean {
+            return Some(LaunchSpec { program: "copilot".to_string(), args, env: Vec::new() });
         }
-        let env = match user_copilot_home()
-            .ok_or_else(|| anyhow::anyhow!("could not determine the user's Copilot home"))
-            .and_then(|source| prepare_lean_home(&source, request.agent_home))
-        {
-            Ok(()) => vec![("COPILOT_HOME".to_string(), request.agent_home.to_string_lossy().to_string())],
-            Err(err) => {
-                tracing::warn!(
-                    "could not prepare a lean COPILOT_HOME at {}: {err:#}; launching with the user's own \
-                     home (every user-level MCP server will load)",
-                    request.agent_home.display()
-                );
-                Vec::new()
-            }
-        };
-        LaunchSpec { program, args, env }
+        args.extend(lean_args());
+        Some(LaunchSpec { program: "copilot".to_string(), args, env: lean_home_env(request.agent_home) })
     }
 
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         parse_line(line)
+    }
+}
+
+/// The lean flags shared by the headless and ACP launches: no built-in
+/// MCP servers, no auto-update, and the deny rules that keep a worker from
+/// running the long-lived commands that would hang a lane.
+fn lean_args() -> Vec<String> {
+    let mut args: Vec<String> = ["--disable-builtin-mcps", "--no-auto-update"].map(str::to_string).to_vec();
+    for rule in LEAN_DENY_RULES {
+        args.push("--deny-tool".to_string());
+        args.push(rule.to_string());
+    }
+    args
+}
+
+/// `COPILOT_HOME` pointed at a freshly prepared lean home, or nothing (and
+/// a warning) when the user's own home cannot be found or copied, in
+/// which case the CLI boots with every user-level MCP server.
+fn lean_home_env(agent_home: &std::path::Path) -> Vec<(String, String)> {
+    match user_copilot_home()
+        .ok_or_else(|| anyhow::anyhow!("could not determine the user's Copilot home"))
+        .and_then(|source| prepare_lean_home(&source, agent_home))
+    {
+        Ok(()) => vec![("COPILOT_HOME".to_string(), agent_home.to_string_lossy().to_string())],
+        Err(err) => {
+            tracing::warn!(
+                "could not prepare a lean COPILOT_HOME at {}: {err:#}; launching with the user's own \
+                 home (every user-level MCP server will load)",
+                agent_home.display()
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -295,6 +325,37 @@ mod tests {
         assert_eq!(launch.args, args);
         assert!(launch.env.is_empty());
         assert!(!home.join("mcp-config.json").exists(), "a non-lean launch must not touch the agent home");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn acp_launch_is_one_server_process_with_the_same_safety_and_lean_posture() {
+        let home = scratch("acp");
+        let lean = CopilotAdapter
+            .build_acp_launch(&AcpLaunchRequest { agent_home: &home, lean: true })
+            .expect("Copilot has an ACP mode");
+        assert_eq!(lean.program, "copilot");
+        assert_eq!(lean.args[0], "--acp", "ACP server mode first: {:?}", lean.args);
+        for flag in ["--allow-all-tools", "--disable-builtin-mcps", "--no-auto-update"] {
+            assert!(lean.args.iter().any(|a| a == flag), "missing {flag} in {:?}", lean.args);
+        }
+        for absent in ["-p", "--output-format", "--session-id", "--additional-mcp-config"] {
+            assert!(
+                !lean.args.iter().any(|a| a == absent),
+                "{absent} is per session or per stream, not per process: {:?}",
+                lean.args
+            );
+        }
+        let denied = lean.args.windows(2).filter(|w| w[0] == "--deny-tool").count();
+        assert_eq!(denied, LEAN_DENY_RULES.len(), "the ACP process carries every deny rule");
+        for (key, value) in &lean.env {
+            assert_eq!(key, "COPILOT_HOME");
+            assert_eq!(std::path::Path::new(value), home);
+        }
+
+        let plain = CopilotAdapter.build_acp_launch(&AcpLaunchRequest { agent_home: &home, lean: false }).unwrap();
+        assert_eq!(plain.args, vec!["--acp", "--allow-all-tools"]);
+        assert!(plain.env.is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 

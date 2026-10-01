@@ -22,6 +22,7 @@ struct Defaults {
     min_free_mem_mb: Option<u64>,
     stagger_ms: Option<u64>,
     per_lane_reserve_mb: Option<u64>,
+    runtime: Option<String>,
 }
 
 impl PactConfig {
@@ -77,6 +78,12 @@ impl PactConfig {
     /// #320).
     pub fn default_per_lane_reserve_mb(&self) -> Option<u64> {
         self.defaults.per_lane_reserve_mb
+    }
+
+    /// `defaults.runtime`: the lane runtime (`process` or `acp`) when
+    /// `--runtime` is omitted (issue #331). Validated at use, like `deps`.
+    pub fn default_runtime(&self) -> Option<&str> {
+        self.defaults.runtime.as_deref()
     }
 }
 

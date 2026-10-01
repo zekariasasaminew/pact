@@ -30,6 +30,11 @@ use uuid::Uuid;
 /// tasks requested with no loud signal.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// How long `stop_agent` waits for an ACP lane's hosting process to
+/// consume a cancel marker, in 100 ms polls: 5 s, matching the order of
+/// `kill_if_alive`'s own wait for a killed process to disappear.
+const CANCEL_MARKER_WAIT_POLLS: u32 = 50;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Workspace {
     pub id: String,
@@ -75,6 +80,14 @@ pub struct Workspace {
     /// isolated workspace and for the batch workspace itself.
     #[serde(default)]
     pub shared_batch: Option<String>,
+    /// Set when this workspace's agent runs as a session inside a shared
+    /// agent process (the ACP lane runtime, issue #331) rather than as its
+    /// own process: the ACP session id. `agent_pid` then names the shared
+    /// process, which teardown must not kill (it would take every other
+    /// lane with it); it asks the lane to stop through a cancel marker
+    /// instead -- see `stop_agent`.
+    #[serde(default)]
+    pub acp_session: Option<String>,
 }
 
 /// What an agent has actually done in one workspace, split into the
@@ -453,6 +466,7 @@ impl WorkspaceManager {
             linked_paths: Vec::new(),
             session_id: None,
             shared_batch: None,
+            acp_session: None,
         };
 
         std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&workspace)?)
@@ -496,6 +510,7 @@ impl WorkspaceManager {
             linked_paths: batch.linked_paths.clone(),
             session_id: None,
             shared_batch: Some(batch.id.clone()),
+            acp_session: None,
         };
         std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&lane)?)
             .context("writing lane metadata")?;
@@ -561,6 +576,64 @@ impl WorkspaceManager {
         Ok(())
     }
 
+    /// Records (or clears) the ACP session this workspace's agent runs
+    /// as inside a shared agent process (issue #331). Best-effort like
+    /// `set_agent_pid`.
+    pub fn set_acp_session(&self, id: &str, session: Option<&str>) -> Result<()> {
+        let mut workspace = self.get_workspace(id)?;
+        workspace.acp_session = session.map(str::to_string);
+        std::fs::write(self.meta_path(id), serde_json::to_vec_pretty(&workspace)?)
+            .context("writing workspace metadata")?;
+        Ok(())
+    }
+
+    /// The file whose existence asks an ACP lane's hosting process to
+    /// cancel that lane's session (issue #331). Teardown creates it; the
+    /// `spawn-many` process that owns the session watches for it, since
+    /// only that process holds the agent's stdin.
+    pub fn cancel_marker_path(&self, id: &str) -> PathBuf {
+        self.state_dir().join("meta").join(format!("{id}.cancel"))
+    }
+
+    /// Stops the agent working in `workspace` before its tree goes away:
+    /// kills its process tree when it has one of its own, or, for an ACP
+    /// lane sharing a process with other lanes, leaves a cancel marker for
+    /// the hosting process and waits (bounded) for it to be consumed, so
+    /// the tree is not removed under a session that is still writing.
+    /// Best-effort either way: a marker nobody consumes (the hosting
+    /// process is gone) is cleared after the wait and teardown proceeds.
+    fn stop_agent(&self, workspace: &Workspace) {
+        let Some(session) = workspace.acp_session.as_deref() else {
+            kill_if_alive(workspace);
+            return;
+        };
+        // `agent_pid` is cleared when a lane's run ends and names the
+        // shared process while it runs; a finished lane, or one whose
+        // process is already gone, has nothing to cancel.
+        match workspace.agent_pid {
+            Some(pid) if agent_process_alive(pid) => {}
+            _ => return,
+        }
+        let marker = self.cancel_marker_path(&workspace.id);
+        if let Err(err) = std::fs::write(&marker, session) {
+            tracing::warn!("could not write cancel marker {}: {err}", marker.display());
+            return;
+        }
+        tracing::info!("asked the shared agent process to cancel lane {}'s session", workspace.id);
+        for _ in 0..CANCEL_MARKER_WAIT_POLLS {
+            if !marker.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        tracing::warn!(
+            "no process consumed the cancel marker for lane {} within {} s; its hosting process is probably gone",
+            workspace.id,
+            CANCEL_MARKER_WAIT_POLLS / 10
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
     /// Removes a workspace's worktree and, unless `keep_branch` is set,
     /// the `pact/<id>` branch created for it. Refuses on uncommitted
     /// changes unless `force` is set -- see DESIGN.md ("pact-vcs >
@@ -591,7 +664,7 @@ impl WorkspaceManager {
             // its agent, and let the batch workspace's own teardown (which
             // refuses while lanes remain) remove the tree once every lane
             // is gone.
-            kill_if_alive(&workspace);
+            self.stop_agent(&workspace);
             let _ = std::fs::remove_file(self.meta_path(id));
             return Ok(());
         }
@@ -622,7 +695,7 @@ impl WorkspaceManager {
             }
         }
 
-        kill_if_alive(&workspace);
+        self.stop_agent(&workspace);
 
         {
             let _lock = PidLock::acquire(&self.lock_path(), LOCK_TIMEOUT)
@@ -2261,6 +2334,7 @@ mod tests {
             linked_paths: Vec::new(),
             session_id: None,
             shared_batch: Some("batch-x".to_string()),
+            acp_session: None,
         }
     }
 
