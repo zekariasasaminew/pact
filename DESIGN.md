@@ -1127,6 +1127,16 @@ the explicit knob it will turn. Also not here: in-process or
 shared-runtime lanes (#306). The remaining gap to Copilot's own in-process
 sub-agents (26.7 vs 15.8 min) is per-lane process cost, a separate lever.
 
+One more place keyed on `shared_batch`, found by the first real run
+(issue #327): `detect_conflicts` diffed every registered workspace
+against its merge-base, and since a lane's diff *is* the batch's diff,
+every committed file came back as touched by the batch plus all N lanes.
+Tearing down the arm P batch printed that for 39 files times 9
+workspaces, and `pact conflicts` said the same. The report now skips
+lanes; the batch workspace stands for the tree, so a real overlap between
+a shared-tree batch and some other active workspace is still reported,
+once, against the batch id. Same dedup `merge_all` already applies.
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched
