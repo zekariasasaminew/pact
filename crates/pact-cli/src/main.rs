@@ -1752,8 +1752,7 @@ const PACKAGE_MANAGER_CHECKS: &[DoctorCheck] = &[
 /// the program isn't on `PATH`/failed to report a version -- see DESIGN.md
 /// ("pact-cli > `pact doctor` (issue #18)").
 fn doctor_check_version(check: &DoctorCheck) -> Option<String> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let output = pact_deps::run_shimmed(check.program, check.args, &cwd).ok()?;
+    let output = pact_deps::run_probe(check.program, check.args).ok()?;
     if !output.status.success() {
         return None;
     }
