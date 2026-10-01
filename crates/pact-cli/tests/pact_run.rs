@@ -157,6 +157,8 @@ fn run_plans_briefs_executes_commits_and_verifies_from_one_task() {
     // Both lanes wrote into one shared tree, committed once on the batch branch.
     let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
     let batch = manager.list_workspaces().unwrap().into_iter().find(|w| w.shared_batch.is_none()).expect("a shared-tree batch");
+    assert!(batch.task.starts_with("pact run: Add two text files"), "the tree is prepared before the lanes are known (#353), so it is named after the task: {}", batch.task);
+    assert!(text.contains("[planner] [phase] creating the shared tree while the planner works"), "{text}");
     let files = run_git(&repo, &["ls-tree", "--name-only", &batch.branch]);
     assert!(files.contains("alpha.txt") && files.contains("beta.txt"), "committed files: {files}");
     let lanes: Vec<String> = manager.list_workspaces().unwrap().into_iter().filter(|w| w.shared_batch.is_some()).map(|w| w.id).collect();
@@ -184,7 +186,10 @@ fn run_sends_a_bad_plan_back_and_gives_up_after_the_retries() {
     assert!(text.contains("still cannot run after 2 attempt(s)"), "{text}");
     assert!(text.contains("\"shared.txt\" is owned by more than one unit (a, b)"), "{text}");
     assert_eq!(text.matches("[planner] [phase] planning (attempt").count(), 2, "one retry means two attempts:\n{text}");
+    assert!(text.contains("planning failed; removing the prepared shared tree"), "the tree prepared during planning is taken down (#353):\n{text}");
     assert!(pact_vcs::WorkspaceManager::open(&repo).unwrap().list_workspaces().unwrap().is_empty(), "nothing is spawned for a rejected plan");
+    let branches = run_git(&repo, &["branch", "--list", "pact/*"]);
+    assert!(branches.trim().is_empty(), "the prepared batch branch is gone too: {branches}");
 
     cleanup(&repo);
     cleanup(&shim);
