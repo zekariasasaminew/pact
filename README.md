@@ -205,7 +205,11 @@ commit (generated files missing from a fresh worktree, say) reads as
 and a check the run made pass reads as fixed. Plans and briefs are
 persisted under the state dir (`meta/plans/`, `briefs/`); the result is
 a branch to review with `pact diff`, land with `pact merge-all`, or push.
-One wave only for now: units that depend on each other are #282.
+Measured on the benchmark (arm R, issue #308): `pact run` on a 39-file
+test-writing task finished in 16.3 min against 15.8 for Copilot's own
+in-process sub-agents, 8% cheaper, with 9% more tests, 57% less mean
+memory and 25% less CPU, and nobody wrote a brief. One wave only for
+now: units that depend on each other are #282.
 
 ### Running agents in parallel by hand
 
