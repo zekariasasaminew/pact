@@ -12,17 +12,22 @@
 //! http://127.0.0.1:<port>/lanes/<agent-id>
 //! ```
 //!
-//! Each route is an rmcp `StreamableHttpService` whose factory builds the
+//! Each lane, registered with `add_lane` as its workspace comes into
+//! existence, is an rmcp `StreamableHttpService` whose factory builds the
 //! same `CoordServer` the stdio path uses, with that lane's agent id and
 //! workspace root, so lane identity comes from the URL and nothing about
 //! the tool contract or the operation log changes. See DESIGN.md
 //! ("pact-coord > Streamable HTTP mode").
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Request, Response, StatusCode};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio_util::sync::CancellationToken;
@@ -37,11 +42,23 @@ pub struct LaneRoute {
     pub workspace_root: PathBuf,
 }
 
+type LaneService = StreamableHttpService<CoordServer, LocalSessionManager>;
+
+/// Lanes are registered while the server runs, because `spawn-many`
+/// creates each lane's workspace (and so learns its id) inside the lane's
+/// own thread, after the server is already up.
+#[derive(Clone)]
+struct Registry {
+    repo_root: PathBuf,
+    cancel: CancellationToken,
+    lanes: Arc<RwLock<HashMap<String, LaneService>>>,
+}
+
 /// A running HTTP coordination server. Dropping it does not stop the
 /// server; call [`HttpCoordServer::shutdown`].
 pub struct HttpCoordServer {
     local_addr: SocketAddr,
-    cancel: CancellationToken,
+    registry: Registry,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -55,44 +72,78 @@ impl HttpCoordServer {
         format!("http://{}{}", self.local_addr, lane_path(agent_id))
     }
 
-    /// Stops accepting connections and ends every open session.
-    pub async fn shutdown(self) {
-        self.cancel.cancel();
-        let _ = self.task.await;
-    }
-}
-
-fn lane_path(agent_id: &str) -> String {
-    format!("/lanes/{agent_id}")
-}
-
-/// Binds `bind` (use port 0 for an ephemeral port) and serves one
-/// pact-coord route per lane until [`HttpCoordServer::shutdown`]. Every
-/// route opens its own connection to `repo_root`'s coordination database
-/// when a client connects, exactly as a `pact mcp-serve` process would.
-pub async fn serve_lanes(repo_root: &Path, bind: SocketAddr, lanes: &[LaneRoute]) -> Result<HttpCoordServer> {
-    let cancel = CancellationToken::new();
-    let mut router = axum::Router::new();
-    for lane in lanes {
-        let repo_root = repo_root.to_path_buf();
+    /// Registers a lane and returns its URL. Each connecting client gets
+    /// its own `CoordServer` acting as this lane, with its own connection
+    /// to the coordination database, exactly as a `pact mcp-serve` process
+    /// would. Registering an id again replaces the previous route.
+    pub fn add_lane(&self, lane: LaneRoute) -> String {
+        let repo_root = self.registry.repo_root.clone();
         let agent_id = lane.agent_id.clone();
-        let workspace_root = lane.workspace_root.clone();
+        let workspace_root = lane.workspace_root;
         let service = StreamableHttpService::new(
             move || {
                 let conn = crate::db::open(&repo_root).map_err(|err| std::io::Error::other(format!("{err:#}")))?;
                 Ok(CoordServer::new(conn, agent_id.clone(), workspace_root.clone()))
             },
             Arc::new(LocalSessionManager::default()),
-            StreamableHttpServerConfig { cancellation_token: cancel.child_token(), ..Default::default() },
+            StreamableHttpServerConfig { cancellation_token: self.registry.cancel.child_token(), ..Default::default() },
         );
-        router = router.nest_service(&lane_path(&lane.agent_id), service);
+        self.registry.lanes.write().unwrap().insert(lane.agent_id.clone(), service);
+        tracing::debug!("pact-coord lane route added: {}", lane.agent_id);
+        self.lane_url(&lane.agent_id)
     }
+
+    /// Unregisters a lane; later requests to its URL are 404. Open MCP
+    /// sessions on it end when the server shuts down.
+    pub fn remove_lane(&self, agent_id: &str) {
+        self.registry.lanes.write().unwrap().remove(agent_id);
+    }
+
+    pub fn lane_count(&self) -> usize {
+        self.registry.lanes.read().unwrap().len()
+    }
+
+    /// Stops accepting connections and ends every open session.
+    pub async fn shutdown(self) {
+        self.registry.cancel.cancel();
+        let _ = self.task.await;
+    }
+}
+
+const LANES_PREFIX: &str = "/lanes/";
+
+fn lane_path(agent_id: &str) -> String {
+    format!("{LANES_PREFIX}{agent_id}")
+}
+
+/// Every request is dispatched by the `/lanes/<id>` prefix to that lane's
+/// rmcp service, which itself only looks at the HTTP method and headers,
+/// never the path. Anything else is 404.
+async fn dispatch(State(registry): State<Registry>, request: Request<Body>) -> Response<Body> {
+    let path = request.uri().path();
+    let lane_id = path.strip_prefix(LANES_PREFIX).map(|rest| rest.split('/').next().unwrap_or("")).unwrap_or("");
+    let service = if lane_id.is_empty() { None } else { registry.lanes.read().unwrap().get(lane_id).cloned() };
+    match service {
+        Some(service) => {
+            let response = service.handle(request).await;
+            response.map(Body::new)
+        }
+        None => Response::builder().status(StatusCode::NOT_FOUND).body(Body::from("no such lane")).unwrap(),
+    }
+}
+
+/// Binds `bind` (use port 0 for an ephemeral port) and serves pact-coord
+/// for `repo_root` until [`HttpCoordServer::shutdown`]. Lanes are added
+/// with [`HttpCoordServer::add_lane`].
+pub async fn serve(repo_root: &Path, bind: SocketAddr) -> Result<HttpCoordServer> {
+    let registry = Registry { repo_root: repo_root.to_path_buf(), cancel: CancellationToken::new(), lanes: Arc::default() };
+    let router = axum::Router::new().fallback(dispatch).with_state(registry.clone());
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding the coordination HTTP server to {bind}"))?;
     let local_addr = listener.local_addr().context("reading the bound address")?;
-    let shutdown = cancel.clone();
+    let shutdown = registry.cancel.clone();
     let task = tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, router)
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
@@ -101,8 +152,8 @@ pub async fn serve_lanes(repo_root: &Path, bind: SocketAddr, lanes: &[LaneRoute]
             tracing::warn!("coordination HTTP server stopped with an error: {err}");
         }
     });
-    tracing::info!("pact-coord serving {} lane route(s) at http://{local_addr}/lanes/<id>", lanes.len());
-    Ok(HttpCoordServer { local_addr, cancel, task })
+    tracing::info!("pact-coord serving lanes at http://{local_addr}{LANES_PREFIX}<id>");
+    Ok(HttpCoordServer { local_addr, registry, task })
 }
 
 #[cfg(test)]
@@ -148,15 +199,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn each_lane_route_acts_as_its_own_agent() {
         let repo_root = temp_repo("two-lanes");
-        let lanes = vec![
-            LaneRoute { agent_id: "lane-a".into(), workspace_root: repo_root.clone() },
-            LaneRoute { agent_id: "lane-b".into(), workspace_root: repo_root.clone() },
-        ];
-        let server = serve_lanes(&repo_root, "127.0.0.1:0".parse().unwrap(), &lanes).await.unwrap();
+        let server = serve(&repo_root, "127.0.0.1:0".parse().unwrap()).await.unwrap();
         assert_ne!(server.local_addr().port(), 0, "an ephemeral port must be reported");
+        // Lanes join after the server is up, as spawn-many's threads will.
+        let url_a = server.add_lane(LaneRoute { agent_id: "lane-a".into(), workspace_root: repo_root.clone() });
+        let url_b = server.add_lane(LaneRoute { agent_id: "lane-b".into(), workspace_root: repo_root.clone() });
+        assert_eq!(url_a, server.lane_url("lane-a"));
+        assert!(url_a.ends_with("/lanes/lane-a"), "url: {url_a}");
+        assert_eq!(server.lane_count(), 2);
 
-        let a = claim_through(&server.lane_url("lane-a"), "a.txt").await;
-        let b = claim_through(&server.lane_url("lane-b"), "b.txt").await;
+        let a = claim_through(&url_a, "a.txt").await;
+        let b = claim_through(&url_b, "b.txt").await;
         assert!(a.contains("accepted"), "lane-a claim result: {a}");
         assert!(b.contains("accepted"), "lane-b claim result: {b}");
 
@@ -175,17 +228,22 @@ mod tests {
         cleanup(&repo_root);
     }
 
-    /// A route that was never registered is not a lane: plain 404, no
-    /// server created, nothing logged.
+    /// A route that was never registered, or was removed, is not a lane:
+    /// plain 404, no server created, nothing logged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unknown_lane_path_is_not_found() {
+    async fn an_unknown_or_removed_lane_path_is_not_found() {
         let repo_root = temp_repo("unknown");
-        let lanes = vec![LaneRoute { agent_id: "lane-a".into(), workspace_root: repo_root.clone() }];
-        let server = serve_lanes(&repo_root, "127.0.0.1:0".parse().unwrap(), &lanes).await.unwrap();
+        let server = serve(&repo_root, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let url_a = server.add_lane(LaneRoute { agent_id: "lane-a".into(), workspace_root: repo_root.clone() });
 
         let transport = StreamableHttpClientTransport::from_uri(server.lane_url("nobody"));
-        let outcome = ().serve(transport).await;
-        assert!(outcome.is_err(), "the handshake must fail against an unregistered lane route");
+        assert!(().serve(transport).await.is_err(), "the handshake must fail against an unregistered lane route");
+        assert!(crate::status(&repo_root).unwrap().connected_agent_ids.is_empty());
+
+        server.remove_lane("lane-a");
+        assert_eq!(server.lane_count(), 0);
+        let transport = StreamableHttpClientTransport::from_uri(url_a);
+        assert!(().serve(transport).await.is_err(), "a removed lane's route must be gone");
         assert!(crate::status(&repo_root).unwrap().connected_agent_ids.is_empty());
 
         server.shutdown().await;

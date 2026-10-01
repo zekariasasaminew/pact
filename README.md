@@ -1320,7 +1320,7 @@ What *was* worth doing: today, the coordination server's command was hardcoded t
 
 ### The coordination server also speaks Streamable HTTP, one route per lane
 
-`pact_coord::http::serve_lanes` (issue #329) serves the same tools over HTTP from inside the orchestrating process, at `http://127.0.0.1:<port>/lanes/<workspace-id>`. Each route acts as that lane's agent: identity comes from the URL, so the model never has to pass or remember its own id. This exists because the ACP lane runtime (issue #306) hosts every lane as a session inside one agent process, and Copilot's ACP mode only accepts HTTP/SSE MCP servers per session; it also lets the process runtime drop its one-`pact mcp-serve`-child-per-lane pattern. Measured motivation and protocol details are in DESIGN.md ("pact-coord > Streamable HTTP mode").
+`pact_coord::http::serve` plus `add_lane` (issue #329) serve the same tools over HTTP from inside the orchestrating process, at `http://127.0.0.1:<port>/lanes/<workspace-id>`, with lanes registered as their workspaces come into existence. Each route acts as that lane's agent: identity comes from the URL, so the model never has to pass or remember its own id. This exists because the ACP lane runtime (issue #306) hosts every lane as a session inside one agent process, and Copilot's ACP mode only accepts HTTP/SSE MCP servers per session; it also lets the process runtime drop its one-`pact mcp-serve`-child-per-lane pattern. Measured motivation and protocol details are in DESIGN.md ("pact-coord > Streamable HTTP mode").
 
 ## Architecture reference
 

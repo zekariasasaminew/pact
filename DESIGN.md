@@ -3104,19 +3104,25 @@ from client`, its debug log) and accepts `type: "http"`. Verified by
 pointing two sessions at two throwaway HTTP servers: each session's
 tool call landed on its own server, so a URL can carry lane identity.
 
-`pact_coord::http::serve_lanes` (feature `http`, enabled by pact-core)
-binds `127.0.0.1:0` inside the orchestrating process and nests one rmcp
-`StreamableHttpService` per lane at `/lanes/<agent-id>`. The service
-factory builds the same `CoordServer` the stdio path builds, with that
-lane's agent id and workspace root, opening its own SQLite connection
-when the lane connects, so nothing about the tools, the operation log or
-`coord-status` changes: `each_lane_route_acts_as_its_own_agent` shows
-two lanes' claims recorded under their own ids and both logged as
-connected through the HTTP handshake. Stateful mode (rmcp's default) is
-kept so one MCP session maps to one `CoordServer`, as one `mcp-serve`
-process does today. Identity by route rather than by a header or a tool
-argument because it is the one thing the agent cannot get wrong: the
-model never sees or chooses it.
+`pact_coord::http::serve` (feature `http`, enabled by pact-core) binds
+`127.0.0.1:0` inside the orchestrating process; `add_lane` registers one
+rmcp `StreamableHttpService` per lane, reached at `/lanes/<agent-id>`.
+Lanes register while the server runs rather than at construction
+because `spawn-many` creates each lane's workspace, and so learns its
+id, inside the lane's own thread after the server is already up; an
+axum fallback dispatches on the `/lanes/<id>` prefix, which is safe
+because rmcp's service reads only the HTTP method and headers, never the
+path. The service factory builds the same `CoordServer` the stdio path
+builds, with that lane's agent id and workspace root, opening its own
+SQLite connection when the lane connects, so nothing about the tools,
+the operation log or `coord-status` changes:
+`each_lane_route_acts_as_its_own_agent` shows two lanes' claims recorded
+under their own ids and both logged as connected through the HTTP
+handshake, and `remove_lane` makes a route 404 again. Stateful mode
+(rmcp's default) is kept so one MCP session maps to one `CoordServer`,
+as one `mcp-serve` process does today. Identity by route rather than by
+a header or a tool argument because it is the one thing the agent cannot
+get wrong: the model never sees or chooses it.
 
 Also a win on its own, before any ACP lane exists: Copilot's
 `--additional-mcp-config` accepts HTTP servers too, so the process
