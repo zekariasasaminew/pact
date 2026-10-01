@@ -64,7 +64,7 @@ fn a_clean_merge_is_skipped_when_the_test_command_fails() {
     let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, Some(fails_if_b_txt_exists()), false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, Some(fails_if_b_txt_exists()), pact_vcs::GateMode::Each, false).unwrap();
 
     assert!(report.merged.is_empty(), "expected the workspace to be rejected by the failing test gate");
     assert_eq!(report.skipped.len(), 1);
@@ -114,7 +114,7 @@ fn a_gate_that_fails_on_the_unmodified_base_aborts_instead_of_skipping_every_wor
         if cfg!(windows) { "if exist setup_marker.txt (exit 0) else (exit 1)" } else { "test -f setup_marker.txt" };
 
     let err = manager
-        .merge_all(None, None, &[], None, None, Some(requires_missing_marker), false)
+        .merge_all(None, None, &[], None, None, Some(requires_missing_marker), pact_vcs::GateMode::Each, false)
         .expect_err("a gate that fails on the unmodified base must abort merge_all, not return Ok with skips");
 
     let message = format!("{err:#}");
@@ -138,7 +138,7 @@ fn a_clean_merge_is_accepted_when_the_test_command_passes() {
     let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, Some(always_pass_cmd()), false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, Some(always_pass_cmd()), pact_vcs::GateMode::Each, false).unwrap();
 
     assert_eq!(report.merged.len(), 1);
     assert_eq!(report.merged[0].id, a.id);
@@ -159,7 +159,7 @@ fn a_failed_gate_does_not_block_a_later_workspace_in_the_same_batch() {
 
     // fails_if_b_txt_exists fails for a's merge (introduces b.txt), passes
     // for b's (introduces c.txt only).
-    let report = manager.merge_all(None, None, &[], None, None, Some(fails_if_b_txt_exists()), false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, Some(fails_if_b_txt_exists()), pact_vcs::GateMode::Each, false).unwrap();
 
     let merged_ids: Vec<&str> = report.merged.iter().map(|w| w.id.as_str()).collect();
     assert!(merged_ids.contains(&b.id.as_str()), "expected b's merge to pass the gate");
@@ -195,7 +195,7 @@ fn dependency_prep_hook_runs_in_the_integration_worktree_before_the_gate() {
     };
 
     let report = manager
-        .merge_all(None, None, &[], None, Some(&prep), Some(fails_unless_marker_file_exists()), false)
+        .merge_all(None, None, &[], None, Some(&prep), Some(fails_unless_marker_file_exists()), pact_vcs::GateMode::Each, false)
         .unwrap();
 
     assert_eq!(report.merged.len(), 1, "expected the gate to pass once the prep hook's marker exists");
@@ -219,7 +219,7 @@ fn dependency_prep_hook_is_not_invoked_when_the_gate_is_omitted() {
     let called = std::cell::Cell::new(false);
     let prep = |_: &Path| called.set(true);
 
-    let report = manager.merge_all(None, None, &[], None, Some(&prep), None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, Some(&prep), None, pact_vcs::GateMode::Each, false).unwrap();
     assert_eq!(report.merged.len(), 1);
     assert!(!called.get(), "dependency prep shouldn't run when no gate command was requested");
 
@@ -234,7 +234,7 @@ fn require_passing_tests_is_a_no_op_when_omitted() {
     let a = manager.create_workspace("add b.txt", None).unwrap();
     std::fs::write(a.path.join("b.txt"), "new file\n").unwrap();
 
-    let report = manager.merge_all(None, None, &[], None, None, None, false).unwrap();
+    let report = manager.merge_all(None, None, &[], None, None, None, pact_vcs::GateMode::Each, false).unwrap();
     assert_eq!(report.merged.len(), 1, "expected unchanged behavior when the gate is omitted");
 
     cleanup(&repo);

@@ -98,6 +98,27 @@ pub struct WorkspaceChanges {
     pub files: Vec<String>,
 }
 
+/// When `merge_all`'s `--require-passing-tests` command runs relative to
+/// the per-workspace merges -- see DESIGN.md ("pact-vcs > Gate timing
+/// (issue #309)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GateMode {
+    /// Run the gate after every clean merge; a failure undoes just that
+    /// one merge and skips the workspace, so one bad workspace never
+    /// blocks the rest, and a failure is localized to its cause. The
+    /// safe default, unchanged from before #309 existed.
+    #[default]
+    Each,
+    /// Merge every clean workspace first, then run the gate once against
+    /// the fully merged branch. Far cheaper when the merges are
+    /// independent (one test run instead of N+1), at the cost of
+    /// localization: if the combined suite fails, the whole batch is
+    /// rejected (reset to base, every merged workspace moved to skipped)
+    /// rather than pinpointing which workspace broke it. Re-run with
+    /// `Each` to localize.
+    Final,
+}
+
 /// One workspace whose branch was merged cleanly into the integration
 /// branch during `merge_all`.
 #[derive(Debug, Clone)]
@@ -760,6 +781,7 @@ impl WorkspaceManager {
         arbiter: Option<&ArbiterResolver<'_>>,
         dependency_prep: Option<&DependencyPrepHook<'_>>,
         require_passing_tests: Option<&str>,
+        gate_mode: GateMode,
         dry_run: bool,
     ) -> Result<MergeReport> {
         let mut selected: Vec<Workspace> = match ids {
@@ -975,19 +997,21 @@ impl WorkspaceManager {
             let commit_before = run_git_text(&integration_path, &["rev-parse", "HEAD"])?;
             match self.merge_branch_into(&integration_path, &workspace.branch, union_globs, arbiter, &workspace.task)? {
                 MergeOutcome::Merged { auto_resolved, arbiter_resolved } => {
-                    if let Some(test_cmd) = require_passing_tests {
-                        let gate = run_shell(&integration_path, test_cmd)?;
-                        if !gate.success {
-                            self.reset_integration_worktree(&integration_path, &commit_before)?;
-                            skipped.push(SkippedWorkspace {
-                                id: workspace.id,
-                                branch: workspace.branch,
-                                reason: format!(
-                                    "merged cleanly but failed the required test command ('{test_cmd}'): {}",
-                                    gate.diagnosis()
-                                ),
-                            });
-                            continue;
+                    if gate_mode == GateMode::Each {
+                        if let Some(test_cmd) = require_passing_tests {
+                            let gate = run_shell(&integration_path, test_cmd)?;
+                            if !gate.success {
+                                self.reset_integration_worktree(&integration_path, &commit_before)?;
+                                skipped.push(SkippedWorkspace {
+                                    id: workspace.id,
+                                    branch: workspace.branch,
+                                    reason: format!(
+                                        "merged cleanly but failed the required test command ('{test_cmd}'): {}",
+                                        gate.diagnosis()
+                                    ),
+                                });
+                                continue;
+                            }
                         }
                     }
                     merged.push(MergedWorkspace {
@@ -1009,6 +1033,33 @@ impl WorkspaceManager {
                         target_branch: branch_name.clone(),
                         files,
                     });
+                }
+            }
+        }
+
+        // Final-gate mode (issue #309): every clean merge above ran without
+        // the gate; run it once now against the fully merged branch. A
+        // failure rejects the whole batch -- reset the branch to base and
+        // move every merged workspace to skipped -- rather than localizing
+        // the culprit, which is the explicit tradeoff `GateMode::Final`
+        // makes for one test run instead of N+1. `conflicted`/already-
+        // skipped workspaces are untouched (they were never merged).
+        if gate_mode == GateMode::Final {
+            if let Some(test_cmd) = require_passing_tests {
+                if !merged.is_empty() {
+                    let gate = run_shell(&integration_path, test_cmd)?;
+                    if !gate.success {
+                        self.reset_integration_worktree(&integration_path, &head)?;
+                        let reason = format!(
+                            "merged cleanly, but the combined suite failed the required test command \
+                             ('{test_cmd}') under --gate final, so the whole batch was rejected -- \
+                             re-run with --gate each to find which workspace is responsible: {}",
+                            gate.diagnosis()
+                        );
+                        for m in merged.drain(..) {
+                            skipped.push(SkippedWorkspace { id: m.id, branch: m.branch, reason: reason.clone() });
+                        }
+                    }
                 }
             }
         }
