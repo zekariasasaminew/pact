@@ -46,6 +46,7 @@ agent CLI just means that adapter isn't usable yet, not that pact is broken.
 pact run --agent copilot --verify "npm test" \
   "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
 pact run --agent copilot --dry-run "..."     # see and persist the plan without spawning
+pact run --agent copilot --task-file task.md # long task statements go in a file
 pact run --agent copilot --plan <meta/plans/...json> "..."   # re-run an edited plan
 
 pact spawn --agent claude "Add input validation to the signup form"
