@@ -46,6 +46,12 @@ pact spawn-many \
   --task claude:"Add a GET /api/users/:id/orders endpoint, with tests" \
   --task copilot:"Add a GET /api/users/:id/preferences endpoint, with tests"
 
+# For real, long worker briefs, put each in a file and pass --task-file
+# (the file stem becomes the workspace name):
+pact spawn-many --agent copilot \
+  --task-file briefs/orders-endpoint.md \
+  --task-file briefs/preferences-endpoint.md
+
 pact list
 pact diff <workspace-id>
 pact coord-status
@@ -59,9 +65,16 @@ pact teardown <workspace-id>
 
 Key things that surprise people:
 
-- **`--task` is repeatable, not a task file.** Each `--task` is either
-  `<agent>:"<text>"` (mixing agents in one batch) or bare text using
-  `--agent`'s default. There's no `--tasks <file>` flag.
+- **`--task` is repeatable; `--task-file` is how you pass a real brief.**
+  Each `--task` is either `<agent>:"<text>"` (mixing agents in one batch) or
+  bare text using `--agent`'s default. A worker only ever sees its own task
+  text, so a correct brief is long (files to edit, conventions, acceptance
+  commands, "do not commit — pact commits for you", "you cannot install or
+  build"). A batch of long inline `--task` strings can exceed the OS
+  command-line length limit and fail before pact starts, so put each brief in
+  a file and use `--task-file <path>` (or `<agent>:<path>`); its contents are
+  the task text and its file stem is the workspace name. One file per unit is
+  also the natural thing for an orchestrating agent to produce.
 - **Neither `spawn` nor `spawn-many` commits anything.** A workspace shows as
   `[dirty]` in `pact list` until `commit-all` or `merge-all` commits it —
   that's expected, not a stuck agent.
