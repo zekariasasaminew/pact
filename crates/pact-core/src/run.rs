@@ -18,6 +18,7 @@
 //! batch worktree and reports. Dependent units (waves, #282) and
 //! gap-closing after a failed verification are deliberately not here.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -318,6 +319,13 @@ pub struct RunReport {
     pub plan: Plan,
     pub plan_path: PathBuf,
     pub planner_attempts: usize,
+    /// What the planner did, as one JSON line per agent update (the same
+    /// shape as a lane's `logs/<id>.jsonl`); `None` when the plan came
+    /// from a file. Issue #348.
+    pub planner_log: Option<PathBuf>,
+    /// Wall time spent planning, all attempts included; zero when the
+    /// plan came from a file.
+    pub planning: Duration,
     pub balance_warning: Option<String>,
     pub brief_paths: Vec<PathBuf>,
     pub dry_run: bool,
@@ -416,7 +424,8 @@ impl Orchestrator {
         options: &RunOptions<'_>,
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Result<RunReport> {
-        let (plan, planner_attempts) = match options.plan_path {
+        let planning_started = std::time::Instant::now();
+        let (plan, planner_attempts, planner_log) = match options.plan_path {
             Some(path) => {
                 let text = std::fs::read_to_string(path).with_context(|| format!("reading plan {}", path.display()))?;
                 let mut plan: Plan = serde_json::from_str(&text).with_context(|| format!("parsing plan {}", path.display()))?;
@@ -427,23 +436,27 @@ impl Orchestrator {
                 if !problems.is_empty() {
                     bail!("plan {} cannot run:\n{}", path.display(), problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"));
                 }
-                (plan, 0)
+                (plan, 0, None)
             }
-            None => self.plan_task(task, options, &mut |event| on_event(PLANNER_LABEL, &options.agent, event))?,
+            None => {
+                let (plan, attempts, log) = self.plan_task(task, options, &mut |event| on_event(PLANNER_LABEL, &options.agent, event))?;
+                (plan, attempts, Some(log))
+            }
         };
+        let planning = Planning { attempts: planner_attempts, log: planner_log, elapsed: planning_started.elapsed() };
         if let Some(verify) = options.verify {
             // Recorded on the plan so the persisted file is the whole truth.
             let mut plan = plan;
             plan.verify = Some(verify.to_string());
-            return self.run_plan(plan, planner_attempts, options, on_event);
+            return self.run_plan(plan, planning, options, on_event);
         }
-        self.run_plan(plan, planner_attempts, options, on_event)
+        self.run_plan(plan, planning, options, on_event)
     }
 
     fn run_plan(
         &self,
         plan: Plan,
-        planner_attempts: usize,
+        planning: Planning,
         options: &RunOptions<'_>,
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Result<RunReport> {
@@ -472,7 +485,9 @@ impl Orchestrator {
             return Ok(RunReport {
                 plan,
                 plan_path,
-                planner_attempts,
+                planner_attempts: planning.attempts,
+                planner_log: planning.log,
+                planning: planning.elapsed,
                 balance_warning: balance,
                 brief_paths,
                 dry_run: true,
@@ -528,7 +543,9 @@ impl Orchestrator {
         Ok(RunReport {
             plan,
             plan_path,
-            planner_attempts,
+            planner_attempts: planning.attempts,
+            planner_log: planning.log,
+            planning: planning.elapsed,
             balance_warning: balance,
             brief_paths,
             dry_run: false,
@@ -541,24 +558,28 @@ impl Orchestrator {
 
     /// Asks the planner for a plan, validates it, and sends violations
     /// back up to `plan_retries` times. Refuses a planner that modified
-    /// the repository: planning is read-only by contract.
+    /// the repository: planning is read-only by contract. Every attempt
+    /// appends to one `logs/planner-<stamp>.jsonl`, each attempt opened
+    /// by a `{"pact": {"planner_attempt": n}}` line (issue #348).
     fn plan_task(
         &self,
         task: &str,
         options: &RunOptions<'_>,
         on_event: &mut impl FnMut(&AgentEvent),
-    ) -> Result<(Plan, usize)> {
+    ) -> Result<(Plan, usize, PathBuf)> {
         let before = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
         let anchors = discover_test_anchors(&self.repo_root, 6);
         if !anchors.is_empty() {
             on_event(&AgentEvent::Phase(format!("handing the planner {} existing test file(s) to imitate", anchors.len())));
         }
+        let log_path = self.workspaces.state_dir().join("logs").join(format!("planner-{}.jsonl", unix_now()));
         let mut prompt = planner_prompt(task, options.max_units, &anchors);
         let mut attempts = 0;
         loop {
             attempts += 1;
             on_event(&AgentEvent::Phase(format!("planning (attempt {attempts})")));
-            let reply = self.ask_agent(options.agent, &self.repo_root, &prompt, &options.spawn, on_event)?;
+            append_log_line(&log_path, &serde_json::json!({ "pact": { "planner_attempt": attempts, "prompt_chars": prompt.len() } }))?;
+            let reply = self.ask_agent(options.agent, &self.repo_root, &prompt, &options.spawn, &log_path, on_event)?;
             let after = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
             let touched: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
             if !touched.is_empty() {
@@ -578,7 +599,7 @@ impl Orchestrator {
             };
             let problems = validate_plan(&plan, options.max_units);
             if problems.is_empty() {
-                return Ok((plan, attempts));
+                return Ok((plan, attempts, log_path));
             }
             on_event(&AgentEvent::Phase(format!("plan rejected: {}", problems.join("; "))));
             if attempts > options.plan_retries {
@@ -595,13 +616,15 @@ impl Orchestrator {
     /// assistant's text: the planner's call. Uses the ACP runtime when the
     /// agent has one (one session in a throwaway process), else a
     /// headless process run; either way the events stream to `on_event`
-    /// like a lane's would.
+    /// like a lane's would, and every raw update is appended to
+    /// `log_path` in the same one-JSON-line shape as a lane's log.
     pub fn ask_agent(
         &self,
         agent: AgentKind,
         cwd: &Path,
         prompt: &str,
         spawn: &SpawnOptions<'_>,
+        log_path: &Path,
         on_event: &mut impl FnMut(&AgentEvent),
     ) -> Result<String> {
         let mut text = String::new();
@@ -612,15 +635,27 @@ impl Orchestrator {
             }
             on_event(event);
         };
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         match effective_runtime(spawn.runtime, &[agent]) {
             LaneRuntime::Acp => {
                 let batch = self.start_acp_batch(&[agent], spawn, &mut forward)?;
                 let runtime = batch.runtime(agent).ok_or_else(|| anyhow::anyhow!("no ACP process for {}", agent_kind_name(agent)))?;
+                let mut log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                    .with_context(|| format!("opening log file {}", log_path.display()))?;
                 let outcome = (|| -> Result<()> {
                     let mut session = runtime.new_session(cwd, Vec::new()).map_err(|err| anyhow::anyhow!("opening the planner session: {err}"))?;
                     let mut coalescer = crate::acp_runtime::ChunkCoalescer::new();
                     let stop = runtime
-                        .prompt(&mut session, prompt, |update| coalescer.push(&update, &mut forward))
+                        .prompt(&mut session, prompt, |update| {
+                            let line = serde_json::json!({ "sessionId": update.session_id, "update": update.raw });
+                            let _ = writeln!(log, "{line}");
+                            coalescer.push(&update, &mut forward)
+                        })
                         .map_err(|err| anyhow::anyhow!("planner turn: {err}"))?;
                     coalescer.flush(&mut forward);
                     let _ = runtime.close(&session);
@@ -645,7 +680,6 @@ impl Orchestrator {
                     session_id: &session_id,
                     lean: spawn.lean,
                 });
-                let log_path = self.workspaces.state_dir().join("logs").join(format!("planner-{session_id}.jsonl"));
                 let supervisor = Supervisor::new();
                 let run = pact_agents::run_and_stream(
                     &supervisor,
@@ -653,7 +687,7 @@ impl Orchestrator {
                     &launch.args,
                     &launch.env,
                     cwd,
-                    &log_path,
+                    log_path,
                     |line| adapter.parse_line(line),
                     &mut forward,
                     |_| {},
@@ -665,6 +699,26 @@ impl Orchestrator {
         }
         Ok(text)
     }
+}
+
+/// The planner's bookkeeping handed from `run_task` to `run_plan`.
+struct Planning {
+    attempts: usize,
+    log: Option<PathBuf>,
+    elapsed: Duration,
+}
+
+fn append_log_line(path: &Path, line: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening log file {}", path.display()))?;
+    writeln!(file, "{line}")?;
+    Ok(())
 }
 
 fn short_slug(text: &str) -> String {

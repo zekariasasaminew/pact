@@ -122,13 +122,27 @@ fn run_plans_briefs_executes_commits_and_verifies_from_one_task() {
     let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "Add two text files"]);
     assert!(out.status.success(), "pact run failed:\nstdout: {}\nstderr: {}", stdout(&out), stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains("plan: 2 units (1 planner attempt), saved to"), "{text}");
+    assert!(text.contains("plan: 2 units (1 planner attempt, ") && text.contains("s), saved to"), "the plan line carries the planning time:\n{text}");
     assert!(text.contains("  alpha: 1 file -- brief") && text.contains("  beta: 2 files -- brief"), "{text}");
     assert!(text.contains("unit alpha: done") && text.contains("unit beta: done"), "{text}");
     assert!(text.contains("[planner] [phase] planning (attempt 1)"), "the planner's events are labelled:\n{text}");
     assert!(text.contains("(committed)"), "{text}");
     assert!(text.contains(": passed (it failed on the base commit, so this run fixed it) (exit 0"), "verification ran, with the baseline telling the story:\n{text}");
     assert!(text.contains("run: OK"), "{text}");
+
+    // Issue #348: the planner's session is logged like a lane's, one JSON
+    // line per update, opened by pact's attempt marker.
+    let log_line = text.lines().find(|l| l.trim_start().starts_with("planner log: ")).unwrap_or_else(|| panic!("no planner log line in:\n{text}"));
+    let log_path = PathBuf::from(log_line.trim().trim_start_matches("planner log: "));
+    assert!(log_path.starts_with(state_dir(&repo).join("logs")), "{}", log_path.display());
+    let log_lines: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|err| panic!("{}: {err}", log_path.display()))
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|err| panic!("{err}: {l}")))
+        .collect();
+    assert_eq!(log_lines[0]["pact"]["planner_attempt"], 1, "{:?}", log_lines[0]);
+    assert!(log_lines.iter().skip(1).all(|l| l.get("sessionId").is_some() && l.get("update").is_some()), "{log_lines:?}");
+    assert!(log_lines.len() > 1, "the planner's reply must have produced updates:\n{log_lines:?}");
 
     // The plan and the briefs are on disk, the briefs carry the rules.
     let plans: Vec<PathBuf> = std::fs::read_dir(state_dir(&repo).join("meta").join("plans")).unwrap().map(|e| e.unwrap().path()).collect();
