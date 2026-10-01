@@ -248,6 +248,32 @@ fn run_with_a_plan_file_skips_the_planner_and_reports_a_failed_verification() {
 }
 
 #[test]
+fn run_prepares_the_shared_tree_before_the_baseline_and_the_lanes() {
+    // Issue #301: a verification that needs a generated, gitignored file
+    // passes only because --prepare produced it in the batch tree before
+    // the baseline ran; the repo root stays untouched.
+    let repo = init_repo("prepare");
+    let shim = shim_dir();
+    std::fs::write(repo.join(".gitignore"), "generated.txt\n").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "ignore generated"]);
+    let generate = if cfg!(windows) { "echo generated> generated.txt" } else { "echo generated > generated.txt" };
+    let needs_generated = if cfg!(windows) { "if exist generated.txt (exit 0) else (exit 1)" } else { "[ -f generated.txt ]" };
+    let reply = write_reply(&shim, &plan_reply(good_units(), Some(needs_generated)));
+
+    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--prepare", generate, "Add two text files"]);
+    assert!(out.status.success(), "pact run failed:\nstdout: {}\nstderr: {}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains(&format!("[phase] prepare: {generate}")), "{text}");
+    assert!(text.contains("[planner] [phase] baseline passes"), "the generated file was there before the baseline:\n{text}");
+    assert!(text.contains("run: OK"), "{text}");
+    assert!(!repo.join("generated.txt").exists(), "prepare ran in the batch tree, not the repo root");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn run_refuses_a_plan_file_that_cannot_run() {
     let repo = init_repo("bad-file");
     let shim = shim_dir();

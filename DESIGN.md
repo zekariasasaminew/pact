@@ -1912,8 +1912,10 @@ regardless of `--deps none`: that flag says the task needs no install,
 not that generated files already exist. A failure is a warning and the
 next command still runs, matching dependency prep's posture (a
 half-prepared workspace is still more useful to the agent than none),
-with each command's result persisted as `meta/<id>-prepare.json` for
-`inspect`. The orchestrator runs these, not the workers, because the
+with each command's result persisted as `meta/prepare/<id>.json` for
+`inspect` (its own directory, because `list_workspaces` tells sidecars
+in `meta/` apart by suffix and a workspace named `...-prepare` would
+defeat that). The orchestrator runs these, not the workers, because the
 lean profile would have to widen its allowlist to let a worker run
 arbitrary setup, and because every lane would otherwise pay for the
 same generation in a shared tree.

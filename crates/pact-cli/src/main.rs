@@ -441,6 +441,10 @@ enum Command {
         per_lane_reserve_mb: Option<u64>,
         #[arg(long)]
         runtime: Option<String>,
+        /// Same as `spawn --prepare`: run in the shared tree before the
+        /// verification baseline and the lanes (issue #301).
+        #[arg(long = "prepare")]
+        prepare: Vec<String>,
     },
     /// List active agent workspaces
     List,
@@ -1120,12 +1124,14 @@ fn main() -> Result<()> {
             stagger_ms,
             per_lane_reserve_mb,
             runtime,
+            prepare,
         } => {
             if max_units == 0 {
                 bail!("--max-units must be at least 1");
             }
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;
+            let prepare = resolve_prepare(prepare, &config);
             let agent_name = resolve_default_agent(agent, &config)
                 .ok_or_else(|| anyhow::anyhow!("no agent given: pass --agent or set defaults.agent in pact.toml"))?;
             let kind = AgentKind::parse(&agent_name).ok_or_else(|| {
@@ -1164,6 +1170,7 @@ fn main() -> Result<()> {
                 admission,
                 shared_tree: true,
                 runtime,
+                prepare: &prepare,
             };
             let run_options = pact_core::run::RunOptions {
                 agent: kind,

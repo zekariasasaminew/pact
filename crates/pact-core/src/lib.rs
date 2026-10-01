@@ -208,7 +208,7 @@ impl Default for SpawnOptions<'_> {
 }
 
 /// One prepare command's result (issue #301), persisted as
-/// `meta/<id>-prepare.json` so `inspect` can show what ran.
+/// `meta/prepare/<id>.json` so `inspect` can show what ran.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PrepareReport {
     pub command: String,
@@ -964,7 +964,12 @@ impl Orchestrator {
         // task needs no install, not that generated files already exist.
         let reports = run_prepare_commands(&workspace.path, options.prepare, on_event);
         if !reports.is_empty() {
-            let path = self.workspaces.state_dir().join("meta").join(format!("{}-prepare.json", workspace.id));
+            // Its own directory, not a -prepare.json sibling: list_workspaces`r
+            // scans meta/*.json and tells sidecars apart by suffix, which a
+            // workspace named ...-prepare would defeat.
+            let dir = self.workspaces.state_dir().join("meta").join("prepare");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(format!("{}.json", workspace.id));
             if let Err(err) = std::fs::write(&path, serde_json::to_vec_pretty(&reports).unwrap_or_default()) {
                 tracing::warn!("failed to persist prepare report to {}: {err:#}", path.display());
             }
@@ -974,7 +979,7 @@ impl Orchestrator {
     /// The prepare-command report recorded for this workspace at spawn
     /// time (issue #301), if any: same contract as `dependency_prep_report`.
     pub fn prepare_report(&self, id: &str) -> Option<Vec<PrepareReport>> {
-        let path = self.workspaces.state_dir().join("meta").join(format!("{id}-prepare.json"));
+        let path = self.workspaces.state_dir().join("meta").join("prepare").join(format!("{id}.json"));
         let contents = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&contents).ok()
     }
