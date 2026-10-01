@@ -37,8 +37,9 @@ pub struct ArbiterConfig {
 
 /// A durable, structured record of one real agent run -- see DESIGN.md
 /// ("pact-core > structured run metadata", issue #15). Persisted to
-/// `state_dir/meta/<id>-run.json`, sibling to the workspace's own
-/// `meta/<id>.json` and the dependency-prep report (issue #12). Before
+/// `state_dir/meta/runs/<id>.json` (issue #343; the dependency-prep
+/// report of issue #12 lives in `meta/deps/`), beside the workspace's own
+/// `meta/<id>.json`. Before
 /// this, none of these fields survived past the terminal output and the
 /// raw JSONL agent log -- there was no queryable "what actually
 /// happened" record for a real spawn.
@@ -217,6 +218,18 @@ pub struct PrepareReport {
     pub duration_ms: u64,
     /// Last lines of combined output; empty on success.
     pub output_tail: String,
+}
+
+/// Writes one of the per-workspace observability records (dependency
+/// prep, run metadata, prepare report) as pretty JSON, creating its
+/// directory under `meta/` on first use. Each kind has a directory of its
+/// own (issue #343) so the top of `meta/` holds workspace records only.
+fn write_sidecar<T: serde::Serialize>(path: &Path, record: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(record)?)?;
+    Ok(())
 }
 
 /// Runs `commands` in `dir` one after another (`cmd /C` on Windows,
@@ -925,7 +938,7 @@ impl Orchestrator {
     ///
     /// Skipped entirely under --deps none (issue #233's --no-deps): a task
     /// that doesn't touch dependencies at all shouldn't pay prep's full
-    /// cost for zero benefit. No -deps.json sidecar is written either --
+    /// cost for zero benefit. No deps sidecar is written either --
     /// "prep was never attempted" is a different fact than "prep ran and
     /// found nothing to do", and the sidecar's absence says so honestly.
     fn prepare_workspace_dependencies(
@@ -948,8 +961,8 @@ impl Orchestrator {
                 }
             }
             on_event(&AgentEvent::Phase(dependency_phase_summary(&dep_reports)));
-            let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
-            if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
+            let deps_path = self.workspaces.deps_report_path(&workspace.id);
+            if let Err(err) = write_sidecar(&deps_path, &dep_reports) {
                 tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
             }
             let linked_paths: Vec<String> = dep_reports.iter().flat_map(|r| r.linked_paths.iter().cloned()).collect();
@@ -964,13 +977,8 @@ impl Orchestrator {
         // task needs no install, not that generated files already exist.
         let reports = run_prepare_commands(&workspace.path, options.prepare, on_event);
         if !reports.is_empty() {
-            // Its own directory, not a -prepare.json sibling: list_workspaces`r
-            // scans meta/*.json and tells sidecars apart by suffix, which a
-            // workspace named ...-prepare would defeat.
-            let dir = self.workspaces.state_dir().join("meta").join("prepare");
-            let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join(format!("{}.json", workspace.id));
-            if let Err(err) = std::fs::write(&path, serde_json::to_vec_pretty(&reports).unwrap_or_default()) {
+            let path = self.workspaces.state_dir().join("meta").join("prepare").join(format!("{}.json", workspace.id));
+            if let Err(err) = write_sidecar(&path, &reports) {
                 tracing::warn!("failed to persist prepare report to {}: {err:#}", path.display());
             }
         }
@@ -1144,8 +1152,8 @@ impl Orchestrator {
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             log_path: log_path.clone(),
         };
-        let run_meta_path = self.workspaces.state_dir().join("meta").join(format!("{}-run.json", workspace.id));
-        if let Err(err) = std::fs::write(&run_meta_path, serde_json::to_vec_pretty(&run_metadata).unwrap_or_default()) {
+        let run_meta_path = self.workspaces.run_report_path(&workspace.id);
+        if let Err(err) = write_sidecar(&run_meta_path, &run_metadata) {
             tracing::warn!("failed to persist run metadata to {}: {err:#}", run_meta_path.display());
         }
 
@@ -1156,7 +1164,7 @@ impl Orchestrator {
     /// The ACP lane runtime's run phase (issue #331): this lane is one
     /// session inside the batch's shared agent process. Mirrors the
     /// process path's bookkeeping exactly (admission slot, pid and session
-    /// id in metadata, per-lane JSONL log, `-run.json`, coord check) so
+    /// id in metadata, per-lane JSONL log, run record, coord check) so
     /// nothing downstream can tell the runtimes apart except by the
     /// `runtime` field.
     #[allow(clippy::too_many_arguments)]
@@ -1290,8 +1298,8 @@ impl Orchestrator {
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             log_path,
         };
-        let run_meta_path = self.workspaces.state_dir().join("meta").join(format!("{}-run.json", workspace.id));
-        if let Err(err) = std::fs::write(&run_meta_path, serde_json::to_vec_pretty(&run_metadata).unwrap_or_default()) {
+        let run_meta_path = self.workspaces.run_report_path(&workspace.id);
+        if let Err(err) = write_sidecar(&run_meta_path, &run_metadata) {
             tracing::warn!("failed to persist run metadata to {}: {err:#}", run_meta_path.display());
         }
 
@@ -1320,8 +1328,7 @@ impl Orchestrator {
     /// file is missing/unreadable, not an error either way; this is
     /// purely informational, feeding `pact inspect` (issue #16).
     pub fn dependency_prep_report(&self, id: &str) -> Option<Vec<pact_deps::ManagerPrepReport>> {
-        let path = self.workspaces.state_dir().join("meta").join(format!("{id}-deps.json"));
-        let contents = std::fs::read_to_string(path).ok()?;
+        let contents = std::fs::read_to_string(self.workspaces.deps_report_path(id)).ok()?;
         serde_json::from_str(&contents).ok()
     }
 
@@ -1329,8 +1336,7 @@ impl Orchestrator {
     /// (issue #15), if any survives -- same "informational, not an
     /// error" contract as `dependency_prep_report`.
     pub fn run_metadata(&self, id: &str) -> Option<RunMetadata> {
-        let path = self.workspaces.state_dir().join("meta").join(format!("{id}-run.json"));
-        let contents = std::fs::read_to_string(path).ok()?;
+        let contents = std::fs::read_to_string(self.workspaces.run_report_path(id)).ok()?;
         serde_json::from_str(&contents).ok()
     }
 
