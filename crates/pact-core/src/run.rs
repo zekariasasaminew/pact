@@ -190,28 +190,77 @@ const PLAN_SCHEMA: &str = r#"{
 
 /// The planner's instructions. The planner works in the repo root with
 /// its own tools, so pact does not inline the tree; it inlines the rules
-/// the benchmark headers had to carry.
-pub fn planner_prompt(task: &str, max_units: usize) -> String {
+/// the benchmark headers had to carry, and the repository's existing
+/// tests as style anchors when there are any (`anchors`), so the briefs
+/// name a concrete file to imitate instead of hoping the planner finds
+/// one.
+pub fn planner_prompt(task: &str, max_units: usize, anchors: &[String]) -> String {
+    let anchors_section = if anchors.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nEXISTING TESTS IN THIS REPOSITORY (read them first; they set the conventions, and every brief that \
+             writes tests must name the closest one to imitate):\n{}\n",
+            anchors.iter().map(|a| format!("- {a}")).collect::<Vec<_>>().join("\n")
+        )
+    };
     format!(
         "You are planning parallel work for pact, a tool that runs several coding agents at once, each in its \
          own lane, all writing into one shared checkout of this repository. Read the repository as needed, \
          then decompose the task below into independent units that can run at the same time.\n\n\
-         TASK:\n{task}\n\n\
+         TASK:\n{task}\n{anchors_section}\n\
          RULES:\n\
-         - Between 1 and {max_units} units. Prefer more, smaller units when the work allows; the slowest unit \
-         decides how long the whole batch takes, so balance them.\n\
+         - Between 1 and {max_units} units. Prefer more, smaller units when the work allows.\n\
+         - Balance units by EFFORT, not by file count: the slowest unit decides how long the whole batch \
+         takes. A UI component or a route handler with mocked I/O costs several times a pure function \
+         module, so a unit of five components is not balanced against a unit of five helpers; give heavy \
+         files fewer companions, and split a unit rather than let it hold more than two or three heavy ones.\n\
          - Each unit lists every file it will create or edit under `files`, repo-relative. No file may appear \
          in two units. Files a unit only reads are not listed.\n\
          - Shared files that several units would need to edit (barrels, setup, config, lockfiles) go to exactly \
          one unit, or the task is restructured so nobody edits them.\n\
          - Each `brief` must be self-contained: a worker sees only its brief, this repository, and \
-         `shared_context`. Name the source files to read, the behaviour to cover, and the acceptance criteria.\n\
+         `shared_context`. Name the source files to read, the behaviour to cover (edge cases and error paths, \
+         not just the happy path), the acceptance criteria, and the existing file to imitate.\n\
          - Workers cannot install packages, run builds or start dev servers, and must not commit; pact \
          commits. Do not ask them to.\n\
          - Do not create, modify or delete any file yourself. Plan only.\n\n\
          Reply with one JSON object in a ```json fenced block and nothing after it, in this shape:\n\
          ```json\n{PLAN_SCHEMA}\n```"
     )
+}
+
+/// Tracked test files in the repository, shortest paths first and at most
+/// `limit` of them: the style anchors handed to the planner. Uses
+/// `git ls-files` so ignored and generated files never qualify.
+pub fn discover_test_anchors(repo_root: &Path, limit: usize) -> Vec<String> {
+    let Ok(output) = Command::new("git").args(["ls-files", "-z"]).current_dir(repo_root).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut anchors: Vec<String> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter(|path| looks_like_a_test_file(path))
+        .map(str::to_string)
+        .collect();
+    anchors.sort_by_key(|p| (p.len(), p.clone()));
+    anchors.truncate(limit);
+    anchors
+}
+
+fn looks_like_a_test_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    name.contains(".test.")
+        || name.contains(".spec.")
+        || name.starts_with("test_")
+        || name.ends_with("_test.go")
+        || name.ends_with("_test.py")
+        || lower.split('/').any(|seg| seg == "__tests__" || seg == "tests" || seg == "test")
 }
 
 /// The retry prompt: the previous plan and what was wrong with it.
@@ -489,7 +538,11 @@ impl Orchestrator {
         on_event: &mut impl FnMut(&AgentEvent),
     ) -> Result<(Plan, usize)> {
         let before = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
-        let mut prompt = planner_prompt(task, options.max_units);
+        let anchors = discover_test_anchors(&self.repo_root, 6);
+        if !anchors.is_empty() {
+            on_event(&AgentEvent::Phase(format!("handing the planner {} existing test file(s) to imitate", anchors.len())));
+        }
+        let mut prompt = planner_prompt(task, options.max_units, &anchors);
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -723,6 +776,45 @@ mod tests {
         let text = repair_prompt("{\"units\": []}", &["the plan has no units".into(), "x".into()]);
         assert!(text.contains("- the plan has no units\n- x"));
         assert!(text.contains("{\"units\": []}"));
+    }
+
+    #[test]
+    fn planner_prompt_asks_for_effort_balance_and_names_the_anchors_when_there_are_any() {
+        let bare = planner_prompt("do it", 8, &[]);
+        assert!(bare.contains("Balance units by EFFORT, not by file count"), "{bare}");
+        assert!(bare.contains("Between 1 and 8 units"), "{bare}");
+        assert!(!bare.contains("EXISTING TESTS"), "no anchors section without anchors:\n{bare}");
+        let with = planner_prompt("do it", 8, &["lib/a.test.ts".into(), "app/b.test.tsx".into()]);
+        assert!(with.contains("EXISTING TESTS IN THIS REPOSITORY"), "{with}");
+        assert!(with.contains("- lib/a.test.ts\n- app/b.test.tsx"), "{with}");
+        assert!(with.contains("the existing file to imitate"), "{with}");
+    }
+
+    #[test]
+    fn test_anchors_come_from_tracked_files_shortest_first_and_capped() {
+        let repo = std::env::temp_dir().join(format!("pact-run-anchors-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(repo.join("lib")).unwrap();
+        std::fs::create_dir_all(repo.join("app/(app)/hub")).unwrap();
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        for file in ["lib/a.ts", "lib/a.test.ts", "app/(app)/hub/skeleton.test.tsx", "tests/helpers.ts", "lib/b.spec.ts", "notes.md"] {
+            std::fs::write(repo.join(file), "x").unwrap();
+        }
+        std::fs::write(repo.join("untracked.test.ts"), "x").unwrap();
+        git(&["add", "lib", "app", "tests", "notes.md"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let anchors = discover_test_anchors(&repo, 10);
+        assert_eq!(anchors, vec!["lib/a.test.ts", "lib/b.spec.ts", "tests/helpers.ts", "app/(app)/hub/skeleton.test.tsx"], "tracked test files, shortest first; untracked and non-test files excluded");
+        assert_eq!(discover_test_anchors(&repo, 2).len(), 2, "capped");
+        assert!(discover_test_anchors(Path::new("/definitely/not/a/repo"), 5).is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

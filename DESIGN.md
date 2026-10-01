@@ -1291,6 +1291,26 @@ is something pact already knows. `pact run` moves the loop inside:
    workspace names; a rerun after a failed run needs `pact teardown`
    first, and the collision error says so.
 
+Arm R (issue #308) then ran it on the benchmark with the planner
+deciding the split: 16.3 min, level with Copilot's in-process
+sub-agents, cheaper, more tests, 57% less mean memory, and no human
+brief. Two things the run showed, both about the planner's input
+rather than pact's machinery. Lanes ran 4.1 to 11.8 min, and the tail
+was one unit holding five UI components: the prompt had said "balance
+them" and the planner balanced by file count, so it now says to
+balance by effort, that a component or a route handler costs several
+times a pure module, and to split rather than hold more than two or
+three heavy files. And the planner-written briefs produced 722 tests
+where the hand-written ones had produced 829 at the same floor
+compliance; the hand-written briefs had named the two existing smoke
+tests to imitate, so pact now finds the repository's tracked test files
+itself (`discover_test_anchors`, via `git ls-files` so generated and
+ignored files never qualify, shortest paths first, capped) and hands
+them to the planner with the instruction that every test-writing brief
+name the closest one. Line counts cannot weigh a test-writing plan
+(the owned files are new), which is why the balance rule lives in the
+prompt and `balance_warning` stays advisory.
+
 Not here: dependent units (waves, #282), gap-closing lanes after a
 failed verification, balancing beyond an advisory warning when the
 heaviest unit's existing lines exceed four times the lightest (new-file
