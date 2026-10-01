@@ -52,6 +52,14 @@ pact spawn-many --agent copilot \
   --task-file briefs/orders-endpoint.md \
   --task-file briefs/preferences-endpoint.md
 
+# When the units touch disjoint files (the common case for a well-split
+# task), skip per-lane worktrees and the merge phase entirely: all lanes
+# write into one shared tree, then commit-all captures it as one commit.
+pact spawn-many --agent copilot --shared-tree \
+  --task-file briefs/orders-endpoint.md \
+  --task-file briefs/preferences-endpoint.md
+pact commit-all
+
 pact list
 pact diff <workspace-id>
 pact coord-status
@@ -75,6 +83,15 @@ Key things that surprise people:
   a file and use `--task-file <path>` (or `<agent>:<path>`); its contents are
   the task text and its file stem is the workspace name. One file per unit is
   also the natural thing for an orchestrating agent to produce.
+- **Choose `--shared-tree` when the units are file-disjoint.** The default
+  gives every task its own worktree and merges them at the end, which is
+  what you want when tasks might edit the same files. When they don't (one
+  test file per source file, one new route per task, one module per
+  refactor), that isolation protects nothing and the merge phase is pure
+  cost: measured at 53.6 min isolated vs 26.7 min shared on the same
+  batch. `--shared-tree` runs every lane in one worktree; follow with
+  `commit-all` (one commit) instead of `merge-all`. It refuses if two tasks
+  mention the same file unless you pass `--allow-overlap`.
 - **Neither `spawn` nor `spawn-many` commits anything.** A workspace shows as
   `[dirty]` in `pact list` until `commit-all` or `merge-all` commits it —
   that's expected, not a stuck agent.

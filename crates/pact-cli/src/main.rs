@@ -296,6 +296,28 @@ enum Command {
         #[arg(long)]
         stagger_ms: Option<u64>,
 
+        /// Run every lane in ONE shared worktree instead of one worktree
+        /// per task (issue #315). For a batch whose tasks touch disjoint
+        /// files this removes per-lane isolation and the entire merge
+        /// phase: workers write into the same tree, pact commits it once
+        /// (`commit-all`), and you verify once. Measured on the benchmark
+        /// in issue #310: 53.6 min -> 26.7 min at equal quality. Each lane
+        /// still gets its own agent, log, coordination tools and run
+        /// record; lanes are told they share the tree and to claim their
+        /// files first. Refuses when the task texts mention the same file
+        /// unless --allow-overlap is given, since disjointness is the
+        /// premise. Not for tasks that must edit the same files: use the
+        /// default isolated mode and `merge-all` for those.
+        #[arg(long)]
+        shared_tree: bool,
+
+        /// With --shared-tree: proceed even though the overlap heuristic
+        /// found the same file mentioned by more than one task. You are
+        /// asserting the mentions are read-only or otherwise safe; the
+        /// lanes' leases are the only thing stopping a real collision.
+        #[arg(long, requires = "shared_tree")]
+        allow_overlap: bool,
+
         /// Explicit workspace name for the Nth --task, repeatable in the
         /// same order as --task -- same fix as `spawn --name` (issue
         /// #234), applied per task. Either give one --name per --task, or
@@ -701,6 +723,7 @@ fn main() -> Result<()> {
                 deps,
                 lean: !no_lean,
                 admission: pact_core::AdmissionPolicy::default(),
+                shared_tree: false,
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -729,6 +752,8 @@ fn main() -> Result<()> {
             max_concurrent,
             min_free_mem_mb,
             stagger_ms,
+            shared_tree,
+            allow_overlap,
             names,
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
@@ -822,6 +847,17 @@ fn main() -> Result<()> {
                     let indices: Vec<String> = overlap.task_indices.iter().map(|i| i.to_string()).collect();
                     eprintln!("  possible overlap: '{}' mentioned by tasks #{}", overlap.token, indices.join(", #"));
                 }
+                // In a shared tree there is no per-lane isolation to absorb a
+                // real collision, so the heuristic's warning becomes a refusal
+                // (issue #315) unless the caller takes responsibility.
+                if shared_tree && !allow_overlap {
+                    bail!(
+                        "--shared-tree refused: the tasks above mention the same file(s), and lanes in a \
+                         shared tree have no isolation if that is a real write overlap. Split the work so \
+                         each file belongs to one task, drop --shared-tree to use isolated worktrees and \
+                         merge-all, or pass --allow-overlap if these mentions are read-only."
+                    );
+                }
             }
 
             let coord_override = coord_command.map(|command| CoordServerOverride {
@@ -862,6 +898,7 @@ fn main() -> Result<()> {
                 deps,
                 lean: !no_lean,
                 admission,
+                shared_tree,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -942,6 +979,9 @@ fn main() -> Result<()> {
                     workspace.path.display()
                 );
                 println!("    task: {}", workspace.task);
+                if let Some(batch) = &workspace.shared_batch {
+                    println!("    shared tree: lane of batch {batch} (same worktree as its sibling lanes; commit-all/merge-all treat the batch as one workspace)");
+                }
                 if !workspace.linked_paths.is_empty() {
                     println!("    linked (shared with repo root): {}", workspace.linked_paths.join(", "));
                 }
@@ -993,7 +1033,17 @@ fn main() -> Result<()> {
         Command::CommitAll { id } => {
             let ids: Vec<String> = match id {
                 Some(id) => vec![id],
-                None => orchestrator.list()?.into_iter().map(|w| w.id).collect(),
+                None => {
+                    // One commit per shared tree (issue #315): the lanes of a
+                    // batch all point at the same worktree, so the batch
+                    // stands in for them and the lanes are skipped.
+                    let all = orchestrator.list()?;
+                    let present: std::collections::HashSet<String> = all.iter().map(|w| w.id.clone()).collect();
+                    all.into_iter()
+                        .filter(|w| !w.shared_batch.as_ref().is_some_and(|b| present.contains(b)))
+                        .map(|w| w.id)
+                        .collect()
+                }
             };
             if ids.is_empty() {
                 println!("no active workspaces");
@@ -1109,7 +1159,14 @@ fn main() -> Result<()> {
         } => {
             let ids: Vec<String> = match id {
                 Some(id) => vec![id],
-                None => orchestrator.list()?.into_iter().map(|w| w.id).collect(),
+                None => {
+                    // Lanes before their batch (issue #315): a batch refuses
+                    // teardown while any of its lanes still exists, so the
+                    // all-workspaces sweep has to drop the lanes first.
+                    let mut all = orchestrator.list()?;
+                    all.sort_by_key(|w| w.shared_batch.is_none());
+                    all.into_iter().map(|w| w.id).collect()
+                }
             };
             if ids.is_empty() {
                 println!("no active workspaces");
@@ -2542,6 +2599,7 @@ mod tests {
                 base_commit: "deadbeef".to_string(),
                 linked_paths: Vec::new(),
                 session_id: None,
+                shared_batch: None,
             },
             dirty: Some(false),
             agent_alive,

@@ -165,6 +165,12 @@ pub struct SpawnOptions<'a> {
     /// free memory -- see `AdmissionPolicy` (issue #285). Ignored by
     /// single `spawn`.
     pub admission: AdmissionPolicy,
+    /// `spawn_many` only (issue #315): run every lane in one shared
+    /// worktree instead of one worktree per task. For file-disjoint
+    /// batches this removes per-lane isolation and the whole merge phase
+    /// -- see DESIGN.md ("pact-core > Shared-tree batches"). Ignored by
+    /// single `spawn`.
+    pub shared_tree: bool,
 }
 
 impl Default for SpawnOptions<'_> {
@@ -175,6 +181,7 @@ impl Default for SpawnOptions<'_> {
             deps: DepsMode::default(),
             lean: true,
             admission: AdmissionPolicy::default(),
+            shared_tree: false,
         }
     }
 }
@@ -490,7 +497,7 @@ impl Orchestrator {
         on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let supervisor = Supervisor::new();
-        self.spawn_with_supervisor(&supervisor, agent, task, name, options, None, on_event)
+        self.spawn_with_supervisor(&supervisor, agent, task, name, options, None, None, on_event)
     }
 
     /// Runs every `(agent, task)` pair in `tasks` concurrently, one
@@ -511,6 +518,31 @@ impl Orchestrator {
     ) -> Vec<SpawnManyOutcome> {
         let supervisor = Supervisor::new();
         let admission = Admission::new(options.admission);
+
+        // Shared-tree batch (issue #315): one worktree, prepared once, that
+        // every lane runs in. Created up front so a failure here is one
+        // batch-level error rather than N identical per-lane ones.
+        let shared: Option<Result<Workspace>> = if options.shared_tree {
+            Some(self.create_shared_batch_workspace(&tasks, options, |event| {
+                on_event(0, &tasks.first().map(|t| t.agent).unwrap_or(AgentKind::Copilot), event)
+            }))
+        } else {
+            None
+        };
+        if let Some(Err(err)) = shared {
+            let message = format!("shared-tree batch could not be created: {err:#}");
+            return tasks
+                .iter()
+                .enumerate()
+                .map(|(index, spec)| SpawnManyOutcome {
+                    index,
+                    agent: spec.agent,
+                    result: Err(anyhow::anyhow!("{message}")),
+                })
+                .collect();
+        }
+        let shared_batch = shared.and_then(Result::ok);
+
         std::thread::scope(|scope| {
             // Index and agent are captured here, outside the closure's
             // return value, specifically so a panic (which loses whatever
@@ -523,6 +555,7 @@ impl Orchestrator {
                     let supervisor = &supervisor;
                     let admission = &admission;
                     let on_event = &on_event;
+                    let shared_batch = shared_batch.as_ref();
                     let handle = scope.spawn(move || {
                         self.spawn_with_supervisor(
                             supervisor,
@@ -531,6 +564,7 @@ impl Orchestrator {
                             spec.name.as_deref(),
                             options,
                             Some(admission),
+                            shared_batch,
                             |event| on_event(index, &spec.agent, event),
                         )
                     });
@@ -598,6 +632,7 @@ impl Orchestrator {
             base_commit: String::new(),
             linked_paths: Vec::new(),
             session_id: None,
+            shared_batch: None,
         };
         let coord_name = adapter.coord_server_name();
         let coord = self
@@ -635,6 +670,79 @@ impl Orchestrator {
         })
     }
 
+    /// Creates the one worktree a shared-tree `spawn_many` batch runs in
+    /// (issue #315) and prepares its dependencies once, so no lane pays
+    /// for either. The batch's task text is a summary of its lanes.
+    fn create_shared_batch_workspace(
+        &self,
+        tasks: &[SpawnManyTask],
+        options: &SpawnOptions<'_>,
+        mut on_event: impl FnMut(&AgentEvent),
+    ) -> Result<Workspace> {
+        on_event(&AgentEvent::Phase(format!("creating shared tree for {} lanes", tasks.len())));
+        let summary = format!(
+            "shared-tree batch of {} lanes: {}",
+            tasks.len(),
+            tasks
+                .iter()
+                .map(|t| t.name.clone().unwrap_or_else(|| t.task.lines().next().unwrap_or("").chars().take(40).collect()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut batch = self.workspaces.create_shared_batch(&summary, None)?;
+        self.prepare_workspace_dependencies(&batch, options, &mut on_event);
+        // Re-read so the lanes inherit `linked_paths` recorded by prep.
+        if let Ok(fresh) = self.workspaces.get_workspace(&batch.id) {
+            batch = fresh;
+        }
+        Ok(batch)
+    }
+
+    /// A dependency-prepare failure shouldn't destroy an otherwise valid
+    /// workspace -- the agent can still install for itself, just without
+    /// the head start. Persisted alongside the workspace's own metadata
+    /// (issue #12) so "what actually happened during prep" is queryable
+    /// later, not just a log line at spawn time.
+    ///
+    /// Skipped entirely under --deps none (issue #233's --no-deps): a task
+    /// that doesn't touch dependencies at all shouldn't pay prep's full
+    /// cost for zero benefit. No -deps.json sidecar is written either --
+    /// "prep was never attempted" is a different fact than "prep ran and
+    /// found nothing to do", and the sidecar's absence says so honestly.
+    fn prepare_workspace_dependencies(
+        &self,
+        workspace: &Workspace,
+        options: &SpawnOptions<'_>,
+        on_event: &mut impl FnMut(&AgentEvent),
+    ) {
+        if options.deps == DepsMode::None {
+            return;
+        }
+        on_event(&AgentEvent::Phase(format!("preparing dependencies ({})", options.deps)));
+        let dep_reports = pact_deps::prepare_with_mode(&workspace.path, &self.repo_root, options.deps);
+        for report in &dep_reports {
+            if !report.success {
+                tracing::warn!(
+                    "dependency prepare step for {} failed in workspace {}: {:?}",
+                    report.manager,
+                    workspace.id,
+                    report.warnings
+                );
+            }
+        }
+        on_event(&AgentEvent::Phase(dependency_phase_summary(&dep_reports)));
+        let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
+        if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
+            tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
+        }
+        let linked_paths: Vec<String> = dep_reports.iter().flat_map(|r| r.linked_paths.iter().cloned()).collect();
+        if !linked_paths.is_empty() {
+            if let Err(err) = self.workspaces.set_linked_paths(&workspace.id, linked_paths) {
+                tracing::warn!("failed to record linked paths for workspace {}: {err:#}", workspace.id);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_with_supervisor(
         &self,
@@ -644,50 +752,22 @@ impl Orchestrator {
         name: Option<&str>,
         options: &SpawnOptions<'_>,
         admission: Option<&Admission>,
+        shared_batch: Option<&Workspace>,
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
-        on_event(&AgentEvent::Phase("creating workspace".to_string()));
-        let workspace = self.workspaces.create_workspace(task, name)?;
+        let workspace = match shared_batch {
+            Some(batch) => {
+                on_event(&AgentEvent::Phase(format!("joining shared tree {}", batch.id)));
+                self.workspaces.create_lane(batch, task, name)?
+            }
+            None => {
+                on_event(&AgentEvent::Phase("creating workspace".to_string()));
+                let workspace = self.workspaces.create_workspace(task, name)?;
+                self.prepare_workspace_dependencies(&workspace, options, &mut on_event);
+                workspace
+            }
+        };
         let adapter = pact_agents::adapter(agent);
-
-        // A dependency-prepare failure shouldn't destroy an otherwise
-        // valid workspace -- the agent can still install for itself, just
-        // without the head start. Persisted alongside the workspace's own
-        // metadata (issue #12) so "what actually happened during prep" is
-        // queryable later, not just a log line at spawn time.
-        //
-        // Skipped entirely under --deps none (issue #233's --no-deps): a
-        // task that doesn't touch dependencies at all shouldn't pay prep's
-        // full cost for zero benefit. No -deps.json sidecar is written
-        // either -- "prep was never attempted" is a different fact than
-        // "prep ran and found nothing to do", and the sidecar's absence
-        // says so honestly.
-        if options.deps != DepsMode::None {
-            on_event(&AgentEvent::Phase(format!("preparing dependencies ({})", options.deps)));
-            let dep_reports = pact_deps::prepare_with_mode(&workspace.path, &self.repo_root, options.deps);
-            for report in &dep_reports {
-                if !report.success {
-                    tracing::warn!(
-                        "dependency prepare step for {} failed in workspace {}: {:?}",
-                        report.manager,
-                        workspace.id,
-                        report.warnings
-                    );
-                }
-            }
-            on_event(&AgentEvent::Phase(dependency_phase_summary(&dep_reports)));
-            let deps_path = self.workspaces.state_dir().join("meta").join(format!("{}-deps.json", workspace.id));
-            if let Err(err) = std::fs::write(&deps_path, serde_json::to_vec_pretty(&dep_reports).unwrap_or_default()) {
-                tracing::warn!("failed to persist dependency prep report to {}: {err:#}", deps_path.display());
-            }
-            let linked_paths: Vec<String> =
-                dep_reports.iter().flat_map(|r| r.linked_paths.iter().cloned()).collect();
-            if !linked_paths.is_empty() {
-                if let Err(err) = self.workspaces.set_linked_paths(&workspace.id, linked_paths) {
-                    tracing::warn!("failed to record linked paths for workspace {}: {err:#}", workspace.id);
-                }
-            }
-        }
 
         let coord_name = adapter.coord_server_name();
         let coord = match self.coord_config(&workspace, coord_name, options.coord_override) {
@@ -708,6 +788,18 @@ impl Orchestrator {
             tracing::warn!("failed to record session id for workspace {}: {err:#}", workspace.id);
         }
         let agent_home = self.agent_home_path(&workspace.id);
+        // A shared-tree lane's brief gets pact's one injected preamble: the
+        // other agents are in this same tree, so file discipline and the
+        // coordination tools stop being advisory niceties and become the
+        // thing that keeps lanes from overwriting each other (issue #315).
+        let lane_task;
+        let task = match shared_batch {
+            Some(batch) => {
+                lane_task = shared_tree_preamble(&workspace.id, batch, coord_name) + task;
+                lane_task.as_str()
+            }
+            None => task,
+        };
         let launch = adapter.build_launch(&LaunchRequest {
             task,
             safety_override: safety.as_deref(),
@@ -1221,6 +1313,27 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The text pact prepends to a shared-tree lane's task (issue #315). The
+/// only place pact injects words into an agent's brief: a lane needs to
+/// know other agents are writing into the same tree, which turns file
+/// discipline and the lease tools from etiquette into the mechanism that
+/// keeps lanes from clobbering each other. Names the coord server so the
+/// agent can find the namespaced tool (`mcp__pact-coord__claim_files`,
+/// `pact-coord-claim_files`, ...) in its own tool list.
+fn shared_tree_preamble(lane_id: &str, batch: &Workspace, coord_name: &str) -> String {
+    format!(
+        "[pact shared tree] You are lane `{lane_id}` of batch `{}`. Other agents are working \
+         concurrently in this SAME working directory. Rules: (1) Touch only the files your task \
+         names; never edit, create or delete anything else. (2) Before writing, claim your files \
+         with the `claim_files` tool from the `{coord_name}` MCP server (your CLI namespaces it, \
+         e.g. `{coord_name}-claim_files`); if the response has `has_conflicts: true`, do not write \
+         those files -- message the holder with `send_message` and wait. (3) Call `release_files` \
+         when done. (4) Do not run git commands, installs, builds or dev servers; do not commit. \
+         (5) Do not reformat or \"clean up\" files you did not create. Your task follows.\n\n",
+        batch.id
+    )
+}
+
 /// The `Phase` event text printed right after dependency prep finishes --
 /// issue #241: a real run's ~22-minute dependency-prep stall produced
 /// zero output the whole time.
@@ -1663,6 +1776,7 @@ mod tests {
             base_commit: "deadbeef".to_string(),
             linked_paths: Vec::new(),
             session_id: None,
+            shared_batch: None,
         }
     }
 

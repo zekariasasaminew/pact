@@ -67,6 +67,14 @@ pub struct Workspace {
     /// conversation even if pact itself died mid-run -- issue #284.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Set on a *lane* of a shared-tree batch (issue #315): the id of the
+    /// batch workspace whose worktree this lane runs in. A lane has its
+    /// own id, metadata, agent and log, but `path` and `branch` are the
+    /// batch's, so there is nothing to merge between lanes and only the
+    /// last lane torn down removes the worktree. `None` for an ordinary
+    /// isolated workspace and for the batch workspace itself.
+    #[serde(default)]
+    pub shared_batch: Option<String>,
 }
 
 /// What an agent has actually done in one workspace, split into the
@@ -444,12 +452,80 @@ impl WorkspaceManager {
             base_commit,
             linked_paths: Vec::new(),
             session_id: None,
+            shared_batch: None,
         };
 
         std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&workspace)?)
             .context("writing workspace metadata")?;
 
         Ok(workspace)
+    }
+
+    /// Creates the single worktree a shared-tree batch runs in (issue
+    /// #315): a real workspace named `batch-<suffix>` whose task text is
+    /// the batch summary. Lanes are then added with `create_lane`.
+    pub fn create_shared_batch(&self, summary: &str, name: Option<&str>) -> Result<Workspace> {
+        let batch_name = match name {
+            Some(n) => format!("batch-{n}"),
+            None => format!("batch-{}", &Uuid::new_v4().simple().to_string()[..8]),
+        };
+        self.create_workspace(summary, Some(&batch_name))
+    }
+
+    /// Adds a lane to a shared-tree batch (issue #315): metadata only, no
+    /// git state. The lane's `path`/`branch`/`base_commit` are the batch's,
+    /// so every per-lane consumer (agent launch, logs, coord config, run
+    /// metadata, `list`) works unchanged, while `commit_all`/`teardown`
+    /// recognise the shared worktree through `shared_batch`.
+    pub fn create_lane(&self, batch: &Workspace, task: &str, name: Option<&str>) -> Result<Workspace> {
+        if batch.shared_batch.is_some() {
+            bail!("workspace {} is itself a lane; lanes can only be added to a batch workspace", batch.id);
+        }
+        let id = workspace_id(task, name);
+        if self.meta_path(&id).exists() {
+            bail!("a workspace named '{id}' already exists -- lane names must be unique");
+        }
+        let lane = Workspace {
+            id: id.clone(),
+            path: batch.path.clone(),
+            branch: batch.branch.clone(),
+            task: task.to_string(),
+            created_at: now_unix(),
+            agent_pid: None,
+            base_commit: batch.base_commit.clone(),
+            linked_paths: batch.linked_paths.clone(),
+            session_id: None,
+            shared_batch: Some(batch.id.clone()),
+        };
+        std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&lane)?)
+            .context("writing lane metadata")?;
+        Ok(lane)
+    }
+
+    /// Every lane whose `shared_batch` is `batch_id`, oldest first.
+    pub fn lanes_of(&self, batch_id: &str) -> Result<Vec<Workspace>> {
+        Ok(self
+            .list_workspaces()?
+            .into_iter()
+            .filter(|w| w.shared_batch.as_deref() == Some(batch_id))
+            .collect())
+    }
+
+    /// For a workspace that is part of a shared-tree batch (a lane, or the
+    /// batch itself), every lane of that batch; `None` for an ordinary
+    /// isolated workspace.
+    fn shared_batch_members(&self, workspace: &Workspace) -> Result<Option<Vec<Workspace>>> {
+        let batch_id = match &workspace.shared_batch {
+            Some(batch_id) => batch_id.clone(),
+            None => {
+                let lanes = self.lanes_of(&workspace.id)?;
+                if lanes.is_empty() {
+                    return Ok(None);
+                }
+                workspace.id.clone()
+            }
+        };
+        Ok(Some(self.lanes_of(&batch_id)?))
     }
 
     /// Records (or clears, with `None`) the PID of the agent process running
@@ -491,6 +567,34 @@ impl WorkspaceManager {
     /// Workspace teardown").
     pub fn remove_workspace(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         let workspace = self.get_workspace(id)?;
+
+        // Shared-tree batch (issue #315): the worktree belongs to the batch
+        // and every lane. A lane's own teardown only drops its metadata
+        // while other members remain; whoever goes last takes the worktree
+        // with it. Tearing down the batch id directly refuses while any
+        // lane still exists, so a lane's agent is never pulled out from
+        // under it by a teardown aimed at the batch.
+        if workspace.shared_batch.is_none() {
+            let lanes = self.lanes_of(id)?;
+            if !lanes.is_empty() {
+                let ids: Vec<&str> = lanes.iter().map(|l| l.id.as_str()).collect();
+                bail!(
+                    "workspace {id} is a shared-tree batch with {} lane(s) still registered ({}) -- \
+                     tear the lanes down first (or `pact teardown` with no id to take everything)",
+                    lanes.len(),
+                    ids.join(", ")
+                );
+            }
+        }
+        if workspace.shared_batch.is_some() {
+            // A lane never owns the worktree: drop its metadata and stop
+            // its agent, and let the batch workspace's own teardown (which
+            // refuses while lanes remain) remove the tree once every lane
+            // is gone.
+            kill_if_alive(&workspace);
+            let _ = std::fs::remove_file(self.meta_path(id));
+            return Ok(());
+        }
 
         if !force {
             let dirty = self.dirty_status(&workspace.path)?;
@@ -747,7 +851,13 @@ impl WorkspaceManager {
             );
         }
 
-        let message = commit_message(id, &workspace.task);
+        // A shared-tree member (issue #315) commits the whole tree, which
+        // holds every lane's work, so the message names every lane rather
+        // than just the one that happened to be asked.
+        let message = match self.shared_batch_members(&workspace)? {
+            Some(lanes) => shared_commit_message(&lanes),
+            None => commit_message(id, &workspace.task),
+        };
         let commit = Command::new("git")
             .args(["commit", "-m", &message])
             .current_dir(&workspace.path)
@@ -788,6 +898,23 @@ impl WorkspaceManager {
             Some(ids) => ids.iter().map(|id| self.get_workspace(id)).collect::<Result<_>>()?,
             None => self.list_workspaces()?,
         };
+        // Shared-tree lanes (issue #315) all live on their batch's branch;
+        // the batch is merged once, as one workspace. Keep the batch entry
+        // where it is selected, otherwise promote the first lane to stand
+        // for the branch, and drop the rest.
+        {
+            let mut seen_branches = std::collections::HashSet::new();
+            let batch_ids: std::collections::HashSet<String> =
+                selected.iter().filter(|w| w.shared_batch.is_none()).map(|w| w.id.clone()).collect();
+            selected.retain(|w| {
+                if let Some(batch_id) = &w.shared_batch {
+                    if batch_ids.contains(batch_id) {
+                        return false;
+                    }
+                }
+                seen_branches.insert(w.branch.clone())
+            });
+        }
         if selected.is_empty() {
             bail!("no active workspaces to merge");
         }
@@ -1600,6 +1727,18 @@ fn commit_message(id: &str, task: &str) -> String {
     } else {
         format!("{subject}\n\n{task}")
     }
+}
+
+/// Commit message for a shared-tree batch (issue #315): one subject naming
+/// the lane count, then each lane's id and first task line, since the
+/// commit carries every lane's work at once.
+fn shared_commit_message(lanes: &[Workspace]) -> String {
+    let mut body = String::new();
+    for lane in lanes {
+        let first_line = lane.task.trim().lines().next().unwrap_or("").trim();
+        body.push_str(&format!("- {}: {first_line}\n", lane.id));
+    }
+    format!("agents ({} lanes, shared tree): combined work\n\n{}", lanes.len(), body.trim_end())
 }
 
 /// If `workspace` has a live agent process recorded, kills its whole
