@@ -43,7 +43,7 @@ agent CLI just means that adapter isn't usable yet, not that pact is broken.
 # One big task, pact does the whole loop: a planner session splits it into
 # file-disjoint units, pact validates the plan, writes every brief, runs the
 # units as lanes in one shared tree, commits once, verifies, reports.
-pact run --agent copilot --verify "npm test" \
+pact run --agent copilot --verify "npm test" --verify "npm run typecheck" \
   "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
 pact run --agent copilot --dry-run "..."     # see and persist the plan without spawning
 pact run --agent copilot --task-file task.md # long task statements go in a file

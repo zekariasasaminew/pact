@@ -410,10 +410,11 @@ enum Command {
         #[arg(long)]
         max_units: Option<usize>,
 
-        /// Shell command run once in the result tree after the commit,
-        /// e.g. "npm test". Overrides the plan's own `verify`.
-        #[arg(long)]
-        verify: Option<String>,
+        /// Shell command run once on the untouched tree (baseline) and once
+        /// in the result tree after the commit, e.g. "npm test". Repeat for
+        /// several checks; the list replaces the plan's own `verify`.
+        #[arg(long = "verify")]
+        verify: Vec<String>,
 
         /// Reuse a persisted plan (`meta/plans/*.json`, or your own file in
         /// the same shape) instead of calling the planner.
@@ -1216,7 +1217,7 @@ fn main() -> Result<()> {
             let run_options = pact_core::run::RunOptions {
                 agent: kind,
                 max_units,
-                verify: verify.as_deref(),
+                verify: &verify,
                 plan_path: plan.as_deref(),
                 dry_run,
                 plan_retries,
@@ -1229,8 +1230,10 @@ fn main() -> Result<()> {
             print_run_report(&report, &orchestrator);
             if !report.succeeded() {
                 // 3 for "could not judge", so a script can tell it from a real
-                // failure (1) and from clap's usage errors (2).
-                let inconclusive = report.verify.as_ref().is_some_and(|v| v.verdict() == pact_core::run::Verdict::Inconclusive);
+                // failure (1) and from clap's usage errors (2). The worst
+                // verdict across the commands decides, so one real failure
+                // beside an inconclusive check is still a failure.
+                let inconclusive = report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive);
                 std::process::exit(if inconclusive { 3 } else { 1 });
             }
         }
@@ -2626,30 +2629,30 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
             }
         );
     }
-    match &report.verify {
-        Some(v) => {
-            println!(
-                "verify `{}`: {} (exit {}, {:.1}s)",
-                v.command,
-                v.verdict(),
-                v.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
-                v.duration.as_secs_f32()
-            );
-            if !v.success {
-                for line in v.output_tail.lines() {
-                    println!("    {line}");
-                }
+    if report.verify.is_empty() {
+        println!("verify: no command (pass --verify or set `verify` in the plan)");
+    }
+    for v in &report.verify {
+        println!(
+            "verify `{}`: {} (exit {}, {:.1}s)",
+            v.command,
+            v.verdict(),
+            v.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            v.duration.as_secs_f32()
+        );
+        if !v.success {
+            for line in v.output_tail.lines() {
+                println!("    {line}");
             }
         }
-        None => println!("verify: no command (pass --verify or set `verify` in the plan)"),
     }
     if report.succeeded() {
         if let Some(batch) = &report.batch {
             println!("run: OK. Review with `pact diff {}`, land with `pact merge-all`, or push {}", batch.id, batch.branch);
         }
-    } else if report.verify.as_ref().is_some_and(|v| v.verdict() == pact_core::run::Verdict::Inconclusive) {
+    } else if report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive) {
         println!(
-            "run: INCONCLUSIVE. The lanes finished but the verification command fails on the base commit too, so it cannot judge them; \
+            "run: INCONCLUSIVE. The lanes finished but a verification command fails on the base commit too, so it cannot judge them; \
              judge the result yourself (`pact diff <id>`), or fix the command (a repo-declared prepare step for generated files, issue #301) and re-run with --plan"
         );
     } else {

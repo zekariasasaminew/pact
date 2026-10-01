@@ -41,10 +41,27 @@ pub struct Plan {
     #[serde(default)]
     pub shared_context: String,
     pub units: Vec<PlanUnit>,
-    /// Task-level acceptance command, run once in the batch worktree
-    /// after `commit-all`. `--verify` on the command line overrides it.
-    #[serde(default)]
-    pub verify: Option<String>,
+    /// Task-level acceptance commands, each run once in the batch
+    /// worktree after `commit-all` (and once on the untouched tree first,
+    /// for the baseline). A string or an array in the JSON (issue #360);
+    /// `--verify` on the command line replaces the list.
+    #[serde(default, deserialize_with = "string_or_list")]
+    pub verify: Vec<String>,
+}
+
+/// Accepts `"npm test"`, `["npm test", "npm run lint"]`, or `null`.
+fn string_or_list<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrList {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<StringOrList>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(StringOrList::One(s)) => vec![s],
+        Some(StringOrList::Many(list)) => list,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,7 +195,7 @@ pub fn parse_plan(reply: &str, task: &str) -> Result<Plan> {
 
 const PLAN_SCHEMA: &str = r#"{
   "shared_context": "repository facts every unit needs that the task text does not state, in a few sentences; empty string if there are none",
-  "verify": "one shell command that checks the whole task once everything is merged, e.g. npm test",
+  "verify": ["shell commands that check the whole task once everything is merged, e.g. npm test, npm run typecheck"],
   "units": [
     {
       "name": "short-kebab-case-name",
@@ -333,7 +350,7 @@ pub struct RunReport {
     pub outcomes: Vec<SpawnManyOutcome>,
     pub batch: Option<Workspace>,
     pub committed: Option<bool>,
-    pub verify: Option<VerifyOutcome>,
+    pub verify: Vec<VerifyOutcome>,
 }
 
 impl RunReport {
@@ -347,7 +364,14 @@ impl RunReport {
             && self.outcomes.iter().all(|o| matches!(&o.result, Ok((_, run)) if run.success));
         // An inconclusive verification is not a success: the user has to
         // judge the result some other way, and the exit code says so.
-        lanes_ok && self.verify.as_ref().map(|v| v.success).unwrap_or(true)
+        lanes_ok && self.verify.iter().all(|v| v.success)
+    }
+
+    /// The verdict that decides the exit code: the worst across the
+    /// verification commands, where a real failure outranks an
+    /// inconclusive one.
+    pub fn worst_verdict(&self) -> Option<Verdict> {
+        self.verify.iter().map(|v| v.verdict()).max_by_key(|v| v.severity())
     }
 }
 
@@ -374,6 +398,18 @@ pub enum Verdict {
     Inconclusive,
     /// Failed with no baseline to compare against.
     Failed,
+}
+
+impl Verdict {
+    /// Ordering for `RunReport::worst_verdict`: passing verdicts lowest,
+    /// then inconclusive, then the two real failures.
+    fn severity(self) -> u8 {
+        match self {
+            Verdict::Passed | Verdict::Fixed => 0,
+            Verdict::Inconclusive => 1,
+            Verdict::Regressed | Verdict::Failed => 2,
+        }
+    }
 }
 
 impl VerifyOutcome {
@@ -403,8 +439,8 @@ impl std::fmt::Display for Verdict {
 pub struct RunOptions<'a> {
     pub agent: AgentKind,
     pub max_units: usize,
-    /// Overrides the plan's own `verify`.
-    pub verify: Option<&'a str>,
+    /// Replaces the plan's own `verify` list when non-empty.
+    pub verify: &'a [String],
     /// Reuse a persisted plan instead of calling the planner.
     pub plan_path: Option<&'a Path>,
     pub dry_run: bool,
@@ -486,25 +522,25 @@ impl Orchestrator {
             }
         };
         let mut plan = plan;
-        if let Some(verify) = options.verify {
+        if !options.verify.is_empty() {
             // Recorded on the plan so the persisted file is the whole truth.
-            plan.verify = Some(verify.to_string());
+            plan.verify = options.verify.to_vec();
         }
         self.run_plan(plan, planning, prepared, &spawn_options, options, on_event)
     }
 
     /// The shared tree a run executes in, with its dependencies prepared
-    /// and, when the verification command is already known, the baseline
-    /// run on the untouched tree. Disjoint by validation, so the shared
-    /// tree is the right shape: no per-lane isolation to pay for and no
-    /// merge afterwards. The baseline exists so a command that already
-    /// fails on the base (generated files missing from a fresh worktree,
-    /// say) is never read as this run's doing.
+    /// and, when the verification commands are already known, their
+    /// baselines run on the untouched tree. Disjoint by validation, so
+    /// the shared tree is the right shape: no per-lane isolation to pay
+    /// for and no merge afterwards. The baseline exists so a command that
+    /// already fails on the base (generated files missing from a fresh
+    /// worktree, say) is never read as this run's doing.
     fn prepare_run_tree(
         &self,
         task: &str,
         spawn_options: &SpawnOptions<'_>,
-        verify: Option<&str>,
+        verify: &[String],
         on_event: &(impl Fn(&AgentEvent) + Sync),
     ) -> Result<PreparedTree> {
         let summary = format!("pact run: {}", task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(80).collect::<String>());
@@ -513,22 +549,25 @@ impl Orchestrator {
         let batch = self
             .create_shared_batch_workspace_named(&summary, spawn_options, &mut forward)
             .context("creating the shared tree for the plan")?;
-        let baseline = match verify.map(str::trim).filter(|v| !v.is_empty()) {
-            Some(command) => Some(self.run_baseline(&batch, command, on_event)?),
-            None => None,
-        };
-        Ok(PreparedTree { batch, baseline })
+        let baselines = if verify.is_empty() { None } else { Some(self.run_baselines(&batch, verify, on_event)?) };
+        Ok(PreparedTree { batch, baselines })
     }
 
-    fn run_baseline(&self, batch: &Workspace, command: &str, on_event: &impl Fn(&AgentEvent)) -> Result<VerifyOutcome> {
-        on_event(&AgentEvent::Phase(format!("verification baseline on the untouched tree: {command}")));
-        let outcome = run_shell_captured(&batch.path, command)?;
-        on_event(&AgentEvent::Phase(format!(
-            "baseline {} in {:.1}s",
-            if outcome.success { "passes" } else { "already FAILS before any lane runs" },
-            outcome.duration.as_secs_f32()
-        )));
-        Ok(outcome)
+    /// One baseline per verification command, on the untouched tree.
+    fn run_baselines(&self, batch: &Workspace, commands: &[String], on_event: &impl Fn(&AgentEvent)) -> Result<Vec<VerifyOutcome>> {
+        commands
+            .iter()
+            .map(|command| {
+                on_event(&AgentEvent::Phase(format!("verification baseline on the untouched tree: {command}")));
+                let outcome = run_shell_captured(&batch.path, command)?;
+                on_event(&AgentEvent::Phase(format!(
+                    "baseline `{command}` {} in {:.1}s",
+                    if outcome.success { "passes" } else { "already FAILS before any lane runs" },
+                    outcome.duration.as_secs_f32()
+                )));
+                Ok(outcome)
+            })
+            .collect()
     }
 
     fn persist_plan(&self, plan: &Plan) -> Result<PathBuf> {
@@ -579,17 +618,17 @@ impl Orchestrator {
                 outcomes: Vec::new(),
                 batch: None,
                 committed: None,
-                verify: None,
+                verify: Vec::new(),
             });
         }
 
         // The shared tree may already exist (prepared while the planner
         // worked, issue #353); otherwise it is created here. Either way
-        // the baseline, when the plan names a verification command, runs
+        // the baselines, when the plan names verification commands, run
         // on the untouched tree before any lane does.
         let planner_events = |event: &AgentEvent| on_event(PLANNER_LABEL, &options.agent, event);
-        let (batch, baseline) = match prepared {
-            Some(PreparedTree { batch, baseline }) => (batch, baseline),
+        let (batch, baselines) = match prepared {
+            Some(PreparedTree { batch, baselines }) => (batch, baselines),
             None => {
                 let batch = self
                     .create_shared_batch_workspace(&tasks, spawn_options, planner_events)
@@ -597,26 +636,26 @@ impl Orchestrator {
                 (batch, None)
             }
         };
-        let verify_command = plan.verify.clone().filter(|v| !v.trim().is_empty());
-        let baseline = match (baseline, &verify_command) {
-            (Some(outcome), _) => Some(outcome),
-            (None, Some(command)) => Some(self.run_baseline(&batch, command, &planner_events)?),
-            (None, None) => None,
+        let verify_commands: Vec<String> = plan.verify.iter().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect();
+        let baselines = match baselines {
+            Some(outcomes) => outcomes,
+            None if verify_commands.is_empty() => Vec::new(),
+            None => self.run_baselines(&batch, &verify_commands, &planner_events)?,
         };
         let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), &on_event);
         let batch = self.workspaces.get_workspace(&batch.id).ok();
 
         let mut committed = None;
-        let mut verify = None;
+        let mut verify = Vec::new();
         if let Some(batch) = &batch {
             planner_events(&AgentEvent::Phase(format!("committing the shared tree {}", batch.id)));
             committed = Some(self.workspaces.commit_all(&batch.id).context("committing the batch")?);
-            if let Some(command) = &verify_command {
+            for (index, command) in verify_commands.iter().enumerate() {
                 planner_events(&AgentEvent::Phase(format!("verifying in the batch worktree: {command}")));
                 let mut outcome = run_shell_captured(&batch.path, command)?;
-                outcome.baseline_success = baseline.as_ref().map(|b| b.success);
-                planner_events(&AgentEvent::Phase(format!("verification {} in {:.1}s", outcome.verdict(), outcome.duration.as_secs_f32())));
-                verify = Some(outcome);
+                outcome.baseline_success = baselines.get(index).map(|b| b.success);
+                planner_events(&AgentEvent::Phase(format!("verification `{command}` {} in {:.1}s", outcome.verdict(), outcome.duration.as_secs_f32())));
+                verify.push(outcome);
             }
         }
 
@@ -791,9 +830,9 @@ struct Planning {
 /// The shared tree prepared while the planner worked (issue #353).
 struct PreparedTree {
     batch: Workspace,
-    /// The verification baseline, when the command was known before the
-    /// plan was.
-    baseline: Option<VerifyOutcome>,
+    /// The verification baselines, one per command, when the commands
+    /// were known before the plan was.
+    baselines: Option<Vec<VerifyOutcome>>,
 }
 
 fn append_log_line(path: &Path, line: &serde_json::Value) -> Result<()> {
@@ -862,7 +901,53 @@ mod tests {
     }
 
     fn plan(units: Vec<PlanUnit>) -> Plan {
-        Plan { task: "big task".into(), shared_context: "use vitest".into(), units, verify: Some("npm test".into()) }
+        Plan { task: "big task".into(), shared_context: "use vitest".into(), units, verify: vec!["npm test".into()] }
+    }
+
+    /// Issue #360: `verify` is a list, and old plans with a single string
+    /// (or an explicit null) still load.
+    #[test]
+    fn plan_verify_accepts_a_string_a_list_or_null() {
+        let one: Plan = serde_json::from_str(r#"{"units": [], "verify": "npm test"}"#).unwrap();
+        assert_eq!(one.verify, vec!["npm test".to_string()]);
+        let many: Plan = serde_json::from_str(r#"{"units": [], "verify": ["npm test", "npm run lint"]}"#).unwrap();
+        assert_eq!(many.verify, vec!["npm test".to_string(), "npm run lint".to_string()]);
+        let null: Plan = serde_json::from_str(r#"{"units": [], "verify": null}"#).unwrap();
+        assert!(null.verify.is_empty());
+        let absent: Plan = serde_json::from_str(r#"{"units": []}"#).unwrap();
+        assert!(absent.verify.is_empty());
+        assert!(serde_json::to_string(&many).unwrap().contains(r#""verify":["npm test","npm run lint"]"#));
+    }
+
+    #[test]
+    fn the_worst_verdict_decides_and_a_real_failure_outranks_an_inconclusive_one() {
+        let outcome = |success: bool, baseline: Option<bool>| VerifyOutcome {
+            command: "x".into(),
+            success,
+            exit_code: Some(if success { 0 } else { 1 }),
+            output_tail: String::new(),
+            duration: Duration::ZERO,
+            baseline_success: baseline,
+        };
+        let report = |verify: Vec<VerifyOutcome>| RunReport {
+            plan: plan(vec![]),
+            plan_path: PathBuf::new(),
+            planner_attempts: 1,
+            planner_log: None,
+            planning: Duration::ZERO,
+            balance_warning: None,
+            brief_paths: vec![],
+            dry_run: false,
+            outcomes: vec![],
+            batch: None,
+            committed: None,
+            verify,
+        };
+        assert_eq!(report(vec![]).worst_verdict(), None);
+        assert_eq!(report(vec![outcome(true, Some(true)), outcome(true, Some(false))]).worst_verdict(), Some(Verdict::Fixed));
+        assert_eq!(report(vec![outcome(true, None), outcome(false, Some(false))]).worst_verdict(), Some(Verdict::Inconclusive));
+        assert_eq!(report(vec![outcome(false, Some(false)), outcome(false, Some(true))]).worst_verdict(), Some(Verdict::Regressed));
+        assert_eq!(report(vec![outcome(false, None), outcome(false, Some(false))]).worst_verdict(), Some(Verdict::Failed));
     }
 
     #[test]
