@@ -267,15 +267,18 @@ Known limitations for why that's not per-task yet.
 worktree and dependencies are prepared up front (cheap in link mode), but
 at most `--max-concurrent` agents (default 2) are running at once, a new
 one launches only when at least `--min-free-mem-mb` (default 1500) of
-memory is available after subtracting `--per-lane-reserve-mb` (default
-1200) for every agent already running, and launches are at least
+memory is available after subtracting `--per-lane-reserve-mb` for every
+agent already running, and launches are at least
 `--stagger-ms` (default 2000) apart so a provider never sees a burst of
 new sessions. The reservation is what stops N agents being admitted
 against the same not-yet-consumed headroom: a lean agent sits at
 0.3-0.45 GB while authoring and then runs a 1.5-1.9 GB test suite, so a
 gate reading instantaneous free memory admits everyone and they peak
 together (measured: 8 lanes into 5 GB free drove a 14 GB laptop to 112 MB
-free). A task that
+free). Its default follows `--runtime` (issue #332): 1200 MB for
+`process` lanes, 400 MB for `acp` lanes, whose agent memory is shared
+and which only grow into their own test runs (measured: 8 ACP lanes
+peaked at 3.9 GB together with 3.3 GB still free). A task that
 can't launch yet says `queued: ...` in the stream every 15 s and waits;
 on a machine short of memory that can mean zero agents running until
 something frees up, which is the point (measured per-process peaks on a

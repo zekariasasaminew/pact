@@ -224,10 +224,27 @@ fn runtime_acp_dry_run_names_the_shared_process_and_refuses_agents_without_acp()
         "dry run names the process grouping:\n{}",
         stdout(&dry)
     );
+    assert!(
+        stdout(&dry).contains("each running agent reserves 400 MB against that, the default for the acp runtime"),
+        "the memory reserve default follows the runtime (issue #332):\n{}",
+        stdout(&dry)
+    );
     assert!(pact_vcs::WorkspaceManager::open(&repo).unwrap().list_workspaces().unwrap().is_empty(), "dry-run creates nothing");
 
     let plain = pact(&repo, &shim, &["spawn-many", "--agent", "copilot", "--task", &task(&[("a.txt", "a")], "a"), "--dry-run"]);
     assert!(stdout(&plain).contains("runtime: process"), "the default is still the process runtime:\n{}", stdout(&plain));
+    assert!(
+        stdout(&plain).contains("each running agent reserves 1200 MB against that, the default for the process runtime"),
+        "process lanes keep the 1200 MB default:\n{}",
+        stdout(&plain)
+    );
+
+    let explicit = pact(&repo, &shim, &["spawn-many", "--agent", "copilot", "--runtime", "acp", "--per-lane-reserve-mb", "900", "--task", &task(&[("a.txt", "a")], "a"), "--dry-run"]);
+    assert!(
+        stdout(&explicit).contains("each running agent reserves 900 MB against that), "),
+        "an explicit reserve is reported without the default note:\n{}",
+        stdout(&explicit)
+    );
 
     let refused = pact(&repo, &shim, &["spawn-many", "--agent", "claude", "--runtime", "acp", "--task", &task(&[("a.txt", "a")], "a")]);
     assert!(!refused.status.success(), "claude has no ACP mode yet");

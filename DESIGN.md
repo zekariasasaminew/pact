@@ -1309,6 +1309,22 @@ enough to need live verification against each CLI. The reservation
 removes the measured failure with a pure-logic change and deterministic
 tests; the governor stays open on #320 for the residual case.
 
+The reserve is a statement about what a lane still grows into, so its
+default has to know what a lane *is* (issue #332). Under the process
+runtime a lane is a whole agent CLI plus the test run it later triggers,
+and 1200 stands. Under the ACP runtime (#331) the agent's memory is one
+shared process, and a lane's own growth is its test run or build alone.
+Arm Q measured it: eight ACP lanes peaked at 3.9 GB together, about
+490 MB each at the batch's peak, with 3.3 GB still free; the process
+default would have admitted five of them on that machine and queued
+three, for no reason the memory could show. `AdmissionPolicy::
+default_per_lane_reserve_mb(runtime)` is 1200 for `process` and 400 for
+`acp`; `for_runtime` builds the default policy with it; the CLI uses it
+only when neither the flag nor `pact.toml` sets a reserve, and the dry
+run says which default it took. The unit test replays arm Q's numbers
+through `decide` for both runtimes. The figure is a measured point, not
+a derivation: the next benchmark on a bigger suite recalibrates it.
+
 ### Coordination config wiring
 
 `coord_config` builds the adapter-agnostic description of the

@@ -311,9 +311,12 @@ enum Command {
         /// instantaneous free memory admits N agents against the same
         /// headroom and they peak together (measured: 8 lanes into 5 GB
         /// free drove the machine to 112 MB free). Each running agent
-        /// reserves this much against --min-free-mem-mb. Default 1200;
-        /// 0 disables the reservation. Falls back to `pact.toml`'s
-        /// `defaults.per_lane_reserve_mb`.
+        /// reserves this much against --min-free-mem-mb. Default depends
+        /// on --runtime (issue #332): 1200 for `process`, 400 for `acp`,
+        /// where the agent's own memory is shared and a lane only grows
+        /// into its test run (measured: 8 ACP lanes peaked at 3.9 GB
+        /// together). 0 disables the reservation. Falls back to
+        /// `pact.toml`'s `defaults.per_lane_reserve_mb`.
         #[arg(long)]
         per_lane_reserve_mb: Option<u64>,
 
@@ -799,11 +802,16 @@ fn main() -> Result<()> {
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let runtime = resolve_runtime(runtime, &config)?;
+            // The reserve default depends on what a lane is (issue #332): a
+            // whole agent process, or a session sharing one.
+            let reserve_overridden = per_lane_reserve_mb.is_some() || config.default_per_lane_reserve_mb().is_some();
             let admission = pact_core::AdmissionPolicy {
                 max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
                 min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
                 stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
-                per_lane_reserve_mb: per_lane_reserve_mb.or(config.default_per_lane_reserve_mb()).unwrap_or(1200),
+                per_lane_reserve_mb: per_lane_reserve_mb
+                    .or(config.default_per_lane_reserve_mb())
+                    .unwrap_or_else(|| pact_core::AdmissionPolicy::default_per_lane_reserve_mb(runtime)),
             };
             if tasks.is_empty() && task_files.is_empty() {
                 bail!("at least one --task or --task-file is required");
@@ -911,11 +919,12 @@ fn main() -> Result<()> {
             if dry_run {
                 println!(
                     "admission: at most {} agent{} running at once, {} MB free memory required before each launch \
-                     (each running agent reserves {} MB against that), {} ms between launches",
+                     (each running agent reserves {} MB against that{}), {} ms between launches",
                     admission.max_concurrent,
                     if admission.max_concurrent == 1 { "" } else { "s" },
                     admission.min_free_mem_mb,
                     admission.per_lane_reserve_mb,
+                    if reserve_overridden { String::new() } else { format!(", the default for the {runtime} runtime") },
                     admission.stagger.as_millis()
                 );
                 for (index, task) in batch.iter().enumerate() {
@@ -2156,7 +2165,7 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # max_concurrent = 2  # spawn-many: agents running at once (workspace prep is not counted)\n\
          # min_free_mem_mb = 1500  # spawn-many: wait for this much free memory before each launch; 0 disables\n\
          # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n\
-         # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; 0 disables\n\
+         # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; default 1200 (process) or 400 (acp); 0 disables\n\
          # runtime = \"process\"  # process (one agent CLI per lane) or acp (one shared Copilot process, one session per lane)\n"
     );
 
