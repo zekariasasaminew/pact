@@ -1415,6 +1415,23 @@ exit code with a real failure outranking an inconclusive check. With
 that in place the project-wide checks can belong to pact (#361) and a
 repair lane can close what the workers no longer catch (#362).
 
+The second piece (issue #361) is the division of labour itself. When
+the plan carries project-wide checks, the rendered brief's rules say
+that pact runs them once on the combined result after every unit
+finishes, names them, tells the worker not to run the whole suite,
+type-check or lint in any form because every lane doing so at once
+slows every lane, and scopes the worker's own check to its files (the
+unit's `verify`, or "your own test files alone" when the planner gave
+none). The planner prompt says the same from its side: every check the
+task demands of the whole goes in the plan's `verify` list, a unit's
+`verify` is cheap and scoped. When the plan has no project-wide
+checks the brief keeps the old "check your own work with" line and
+promises nothing pact cannot keep. The rule is in the brief rather
+than enforced by the lean profile's allowlist because the worker
+still needs to run its own tests, and the difference between
+`vitest run a.test.ts` and `vitest run` is not one a shell allowlist
+can draw.
+
 Not here: dependent units (waves, #282), gap-closing lanes after a
 failed verification, balancing beyond an advisory warning when the
 heaviest unit's existing lines exceed four times the lightest (new-file

@@ -201,7 +201,7 @@ const PLAN_SCHEMA: &str = r#"{
       "name": "short-kebab-case-name",
       "files": ["repo/relative/path/this/unit/creates-or-edits.ts"],
       "brief": "two or three sentences: the existing file to imitate, the one or two non-obvious things you found, the acceptance criteria",
-      "verify": "optional shell command scoped to this unit's files"
+      "verify": "optional cheap shell command scoped to this unit's own files (its test files alone); never the whole suite, type-check or lint"
     }
   ]
 }"#;
@@ -249,6 +249,11 @@ pub fn planner_prompt(task: &str, max_units: usize, anchors: &[String]) -> Strin
          (an unexported symbol, an awkward dependency to mock), and the acceptance criteria.\n\
          - Your reply is not read by a person; it is parsed, and every worker waits for it to finish. \
          Keep it short.\n\
+         - Project-wide checks are pact's job, run once on the combined result after every unit finishes: \
+         put every check the task demands of the whole (the full test suite, type-check, lint, coverage) in \
+         the plan's `verify` list. A unit's own `verify` must be cheap and scoped to its files (run its test \
+         files alone); workers are told not to run anything project-wide, because many lanes doing so at \
+         once is slower than one run at the end.\n\
          - Workers cannot install packages, run builds or start dev servers, and must not commit; pact \
          commits. Do not ask them to.\n\
          - Do not create, modify or delete any file yourself. Plan only.\n\n\
@@ -324,8 +329,25 @@ pub fn render_brief(plan: &Plan, unit: &PlanUnit) -> String {
          - Do not commit, stage, or run any `git` command; pact commits your work.\n\
          - Other workers are editing other files in this same checkout right now. Do not touch files outside your list, and do not revert or reformat anything you did not write.\n",
     );
-    if let Some(verify) = unit.verify.as_deref().filter(|v| !v.trim().is_empty()) {
-        brief.push_str(&format!("- Check your own work before finishing with: `{}`\n", verify.trim()));
+    let unit_check = unit.verify.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let project_checks: Vec<&str> = plan.verify.iter().map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
+    if project_checks.is_empty() {
+        if let Some(verify) = unit_check {
+            brief.push_str(&format!("- Check your own work before finishing with: `{verify}`\n"));
+        }
+    } else {
+        // Issue #361: project-wide checks are pact's, once, on the combined
+        // result. Workers running them from every lane at once is what made
+        // finer splits no faster (arm R3).
+        brief.push_str(&format!(
+            "- pact runs the project-wide checks once on the combined result after every unit finishes: {}. Do not run them yourself, \
+             and do not run the whole test suite, type-check or lint in any form: every lane doing so at once slows every lane. ",
+            project_checks.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
+        ));
+        match unit_check {
+            Some(verify) => brief.push_str(&format!("Check only your own files, with: `{verify}`\n")),
+            None => brief.push_str("Check only your own files (run your own test files alone, not the suite).\n"),
+        }
     }
     brief.push_str("- When finished, reply DONE followed by two lines: what you produced and anything left undone.\n");
     brief
@@ -1002,6 +1024,27 @@ mod tests {
         }
     }
 
+    /// Issue #361: with project-wide checks on the plan, the brief says
+    /// pact runs them and the worker checks only its own files; without
+    /// any, the unit's own check is all the brief can ask for.
+    #[test]
+    fn briefs_hand_the_project_wide_checks_to_pact_and_scope_the_worker_to_its_own_files() {
+        let mut p = plan(vec![PlanUnit { name: "u".into(), files: vec!["a.ts".into()], brief: "x".into(), verify: Some("npx vitest run a".into()) }, unit("v", &["b.ts"])]);
+        p.verify = vec!["npm test".into(), "npm run typecheck".into(), " ".into()];
+        let with_check = render_brief(&p, &p.units[0]);
+        assert!(with_check.contains("pact runs the project-wide checks once on the combined result after every unit finishes: `npm test`, `npm run typecheck`."), "{with_check}");
+        assert!(with_check.contains("do not run the whole test suite, type-check or lint in any form"), "{with_check}");
+        assert!(with_check.contains("Check only your own files, with: `npx vitest run a`"), "{with_check}");
+        assert!(!with_check.contains("Check your own work before finishing"), "{with_check}");
+        let without_check = render_brief(&p, &p.units[1]);
+        assert!(without_check.contains("Check only your own files (run your own test files alone, not the suite)."), "{without_check}");
+
+        p.verify = Vec::new();
+        let no_project_checks = render_brief(&p, &p.units[0]);
+        assert!(no_project_checks.contains("Check your own work before finishing with: `npx vitest run a`"), "{no_project_checks}");
+        assert!(!no_project_checks.contains("pact runs the project-wide checks"), "no promise pact cannot keep:\n{no_project_checks}");
+    }
+
     #[test]
     fn planner_prompt_tells_the_planner_workers_get_the_task_verbatim_and_to_keep_the_reply_short() {
         let text = planner_prompt("do it", 8, &[]);
@@ -1013,6 +1056,9 @@ mod tests {
             "leave it empty when there are none",
             "Keep it short.",
             "repository facts every unit needs that the task text does not state",
+            "Project-wide checks are pact's job",
+            "put every check the task demands of the whole (the full test suite, type-check, lint, coverage) in the plan's `verify` list",
+            "A unit's own `verify` must be cheap and scoped to its files",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
         }
