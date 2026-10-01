@@ -1735,10 +1735,39 @@ fn commit_message(id: &str, task: &str) -> String {
 fn shared_commit_message(lanes: &[Workspace]) -> String {
     let mut body = String::new();
     for lane in lanes {
-        let first_line = lane.task.trim().lines().next().unwrap_or("").trim();
-        body.push_str(&format!("- {}: {first_line}\n", lane.id));
+        body.push_str(&format!("- {}: {}\n", lane.id, lane_distinguishing_line(lane, lanes)));
     }
     format!("agents ({} lanes, shared tree): combined work\n\n{}", lanes.len(), body.trim_end())
+}
+
+/// The first non-blank line of `lane`'s task that is not shared verbatim
+/// by every other lane in the batch, capped at 72 chars -- issue #321.
+/// Briefs written as files for a batch open with a common preamble (the
+/// repo description, the conventions), so "first line of the task" is
+/// the same sentence for every lane and a per-lane list built from it is
+/// unreadable. Skipping lines every lane shares finds the line that is
+/// actually about this lane. Falls back to the first line when every
+/// line is shared (a degenerate batch of identical tasks).
+fn lane_distinguishing_line(lane: &Workspace, lanes: &[Workspace]) -> String {
+    let own: Vec<&str> = lane.task.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let shared_by_all = |line: &str| {
+        lanes.len() > 1 && lanes.iter().all(|other| other.task.lines().map(str::trim).any(|l| l == line))
+    };
+    let picked = own
+        .iter()
+        .copied()
+        .find(|line| !shared_by_all(line))
+        .or_else(|| own.first().copied())
+        .unwrap_or("");
+    truncate_for_subject(picked, 72)
+}
+
+fn truncate_for_subject(line: &str, max: usize) -> String {
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(max.saturating_sub(3)).collect();
+    format!("{}...", cut.trim_end())
 }
 
 /// If `workspace` has a live agent process recorded, kills its whole
@@ -2168,6 +2197,66 @@ mod tests {
             commit_message("ab12cd34", "  add chunk.ts utility  \n"),
             "agent ab12cd34: add chunk.ts utility"
         );
+    }
+
+    fn lane(id: &str, task: &str) -> Workspace {
+        Workspace {
+            id: id.to_string(),
+            path: PathBuf::from("batch"),
+            branch: "pact/batch-x".to_string(),
+            task: task.to_string(),
+            created_at: 0,
+            agent_pid: None,
+            base_commit: String::new(),
+            linked_paths: Vec::new(),
+            session_id: None,
+            shared_batch: Some("batch-x".to_string()),
+        }
+    }
+
+    /// Issue #321: the real arm-P commit body repeated the briefs' shared
+    /// 400-char preamble eight times. The per-lane line must be the line
+    /// that is actually about that lane.
+    #[test]
+    fn shared_commit_message_skips_the_preamble_every_lane_shares() {
+        let preamble = "Add Vitest tests to capture-hub, a Next.js 16 app. Vitest is already set up: read the config, never edit it.";
+        let rules = "- Do not edit package.json or the vitest config.";
+        let lanes = vec![
+            lane("u1-parser", &format!("{preamble}\n{rules}\nYour unit: lib/items/quick-add-parser.ts and lib/items/search.ts")),
+            lane("u2-brag", &format!("{preamble}\n{rules}\nYour unit: app/(app)/brag/win-card.tsx and brag-stats.tsx")),
+            lane("u3-auth", &format!("{preamble}\n{rules}\nYour unit: lib/auth/pin.ts, lib/auth/session.ts")),
+        ];
+        let message = shared_commit_message(&lanes);
+        assert!(message.starts_with("agents (3 lanes, shared tree): combined work\n\n"), "got:\n{message}");
+        assert!(message.contains("- u1-parser: Your unit: lib/items/quick-add-parser.ts"), "got:\n{message}");
+        assert!(message.contains("- u2-brag: Your unit: app/(app)/brag/win-card.tsx"), "got:\n{message}");
+        assert!(message.contains("- u3-auth: Your unit: lib/auth/pin.ts"), "got:\n{message}");
+        assert!(!message.contains("Next.js 16 app"), "the shared preamble must not appear per lane:\n{message}");
+        assert!(!message.contains("Do not edit package.json"), "a shared rule line must not be picked either:\n{message}");
+    }
+
+    #[test]
+    fn shared_commit_message_falls_back_to_the_first_line_when_every_line_is_shared() {
+        let lanes = vec![lane("a", "do the thing\nsame rules"), lane("b", "do the thing\nsame rules")];
+        let message = shared_commit_message(&lanes);
+        assert!(message.contains("- a: do the thing") && message.contains("- b: do the thing"), "got:\n{message}");
+    }
+
+    #[test]
+    fn shared_commit_message_caps_each_lane_line_at_72_chars() {
+        let long = "x".repeat(200);
+        let lanes = vec![lane("a", &format!("shared\n{long}")), lane("b", "shared\nshort")];
+        let message = shared_commit_message(&lanes);
+        let a_line = message.lines().find(|l| l.starts_with("- a: ")).unwrap();
+        assert!(a_line.len() <= "- a: ".len() + 72, "got {} chars: {a_line}", a_line.len());
+        assert!(a_line.ends_with("..."));
+    }
+
+    #[test]
+    fn shared_commit_message_with_one_lane_uses_its_first_line() {
+        // With a single lane nothing is "shared by all others"; the first line is the summary.
+        let lanes = vec![lane("solo", "first line\nsecond line")];
+        assert!(shared_commit_message(&lanes).contains("- solo: first line"));
     }
 
     #[test]
