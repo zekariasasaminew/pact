@@ -177,13 +177,13 @@ pub fn parse_plan(reply: &str, task: &str) -> Result<Plan> {
 }
 
 const PLAN_SCHEMA: &str = r#"{
-  "shared_context": "repository facts every unit needs that the task text does not state; empty string if there are none",
+  "shared_context": "repository facts every unit needs that the task text does not state, in a few sentences; empty string if there are none",
   "verify": "one shell command that checks the whole task once everything is merged, e.g. npm test",
   "units": [
     {
       "name": "short-kebab-case-name",
       "files": ["repo/relative/path/this/unit/creates-or-edits.ts"],
-      "brief": "only what the task text does not already say for these files: the existing file to imitate, non-obvious findings in the sources, the acceptance criteria",
+      "brief": "two or three sentences: the existing file to imitate, the one or two non-obvious things you found, the acceptance criteria",
       "verify": "optional shell command scoped to this unit's files"
     }
   ]
@@ -223,12 +223,13 @@ pub fn planner_prompt(task: &str, max_units: usize, anchors: &[String]) -> Strin
          - Shared files that several units would need to edit (barrels, setup, config, lockfiles) go to exactly \
          one unit, or the task is restructured so nobody edits them.\n\
          - Every worker receives the complete TASK text above verbatim, together with its own `files` list, \
-         `brief` and `shared_context`. Do not restate anything the task already says: not its rules, not its \
-         conventions, not its per-file requirements. `shared_context` is for repository facts every unit \
-         needs that the task does not state; leave it empty when there are none. A `brief` adds only what \
-         the task does not already say for this unit's files: the existing file to imitate, non-obvious \
-         things you found in the sources (unexported symbols, awkward dependencies to mock), and the \
-         acceptance criteria. A few sentences per unit is the norm.\n\
+         `brief` and `shared_context`, and reads its source files itself. Do not restate anything the task \
+         already says: not its rules, not its conventions, not its per-file requirements. Do not summarize a \
+         file's contents: the worker reads the file in seconds and your summary costs every worker the \
+         time you spend writing it. `shared_context` is for repository facts every unit needs that the \
+         task does not state, in a few sentences; leave it empty when there are none. A `brief` is two or \
+         three sentences: the existing file to imitate, the one or two non-obvious things you found \
+         (an unexported symbol, an awkward dependency to mock), and the acceptance criteria.\n\
          - Your reply is not read by a person; it is parsed, and every worker waits for it to finish. \
          Keep it short.\n\
          - Workers cannot install packages, run builds or start dev servers, and must not commit; pact \
@@ -922,6 +923,8 @@ mod tests {
         for expected in [
             "Every worker receives the complete TASK text above verbatim",
             "Do not restate anything the task already says",
+            "Do not summarize a file's contents",
+            "A `brief` is two or three sentences",
             "leave it empty when there are none",
             "Keep it short.",
             "repository facts every unit needs that the task text does not state",

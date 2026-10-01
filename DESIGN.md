@@ -1335,6 +1335,20 @@ task text from the brief when the planner restates it, would have
 fought the planner instead of informing it, and a planner that reads
 the task once and adds only its findings is also the cheaper one.
 
+Arm R2 measured that change (issue #352): 117 s of planning against
+127, with the reply down from 26 KB to 12 KB plus 4 KB of reasoning.
+Halving the output saved a fifth of the time because generation runs
+at about 40 tokens a second whatever is being generated, and the
+briefs had become 0.8 to 1.2 KB source summaries ("GET has two
+branches: the unfiltered branch...") that a worker re-reads from the
+file in seconds. The prompt now says that too: workers read their
+sources themselves, a summary of a file costs every worker the time
+spent writing it, and a brief is two or three sentences (the file to
+imitate, the one or two non-obvious findings, the acceptance
+criteria). The constraint is a prompt rule rather than a validation
+limit on purpose: a rejected plan costs a whole planner turn, which is
+the very thing being saved.
+
 Reading that session meant finding Copilot's own event file by
 directory timestamps, because the ACP path of `ask_agent` logged
 nothing while the process path and every lane did (issue #348). The
