@@ -2511,6 +2511,19 @@ const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
     // to itself -- duplicates what the `[tool]`/`[assistant]` events
     // already surfaced (issue #100).
     "user",
+    // ACP lane runtime (issue #339): everything a session streams that
+    // pact does not model arrives as `acp.<sessionUpdate>`. These are the
+    // kinds the first 8-lane run showed to be pure volume for a human
+    // watching live: thought fragments, tool progress/output (the
+    // `tool_call` itself is already a `[tool]` line), context-fill ticks,
+    // and session metadata. The per-lane JSONL log keeps every one.
+    "acp.agent_thought_chunk",
+    "acp.tool_call_update",
+    "acp.usage_update",
+    "acp.available_commands_update",
+    "acp.config_option_update",
+    "acp.session_info_update",
+    "acp.current_mode_update",
 ];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
@@ -2918,6 +2931,20 @@ mod tests {
 
         let value = serde_json::json!({"type": "user", "message": {}});
         assert!(!should_print_other(&value, false));
+    }
+
+    /// Issue #339: the ACP runtime tags unmodelled session updates as
+    /// `acp.<kind>`; the kinds the first 8-lane run showed to be pure
+    /// volume are suppressed by default, an unknown ACP kind still prints.
+    #[test]
+    fn should_print_other_suppresses_the_noisy_acp_update_kinds_but_not_unknown_ones() {
+        for kind in ["agent_thought_chunk", "tool_call_update", "usage_update", "available_commands_update", "config_option_update", "session_info_update", "current_mode_update"] {
+            let value = serde_json::json!({"type": format!("acp.{kind}"), "sessionId": "s", "update": {}});
+            assert!(!should_print_other(&value, false), "acp.{kind} must be suppressed by default");
+            assert!(should_print_other(&value, true), "acp.{kind} must show under --verbose");
+        }
+        let value = serde_json::json!({"type": "acp.something_new", "sessionId": "s", "update": {}});
+        assert!(should_print_other(&value, false), "an ACP kind pact has never seen stays visible");
     }
 
     /// Regression test for issue #102: `system` events with a subtype

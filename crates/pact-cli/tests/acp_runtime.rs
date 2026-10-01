@@ -117,6 +117,14 @@ fn runtime_acp_runs_every_lane_as_a_session_in_one_shared_process() {
     assert!(spawn.status.success(), "spawn-many failed:\nstdout: {}\nstderr: {}", stdout(&spawn), stderr(&spawn));
     let text = stdout(&spawn);
     assert_eq!(text.matches("done: stop reason end_turn").count(), 3, "every lane ends its turn:\n{text}");
+    // Issue #339: the fake streams usage_update and tool_call_update and
+    // splits each summary into two chunks. By default none of that is
+    // noise on the console, and each summary is one whole line.
+    assert!(!text.contains("[other]"), "unmodelled ACP updates are suppressed by default:\n{text}");
+    for summary in ["wrote alpha", "wrote beta", "wrote gamma"] {
+        assert_eq!(text.matches(&format!("[assistant] {summary}\n")).count(), 1, "one whole message line for {summary:?}:\n{text}");
+    }
+    assert_eq!(text.matches("[assistant]").count(), 3, "no fragment lines:\n{text}");
 
     let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
     let mut workspaces = manager.list_workspaces().unwrap();
@@ -291,6 +299,15 @@ fn a_copilot_batch_runs_as_acp_sessions_by_default() {
     sessions.sort();
     assert_eq!(sessions, vec!["sess-1", "sess-2"], "auto chose the ACP runtime without being asked");
     assert_eq!(run_record(&repo, "lane-a")["runtime"], "acp");
+
+    // --verbose puts the suppressed updates back (issue #339).
+    let verbose = pact(
+        &repo,
+        &shim,
+        &["--verbose", "spawn-many", "--agent", "copilot", "--name", "lane-c", "--task", &task(&[("c.txt", "C")], "c")],
+    );
+    assert!(verbose.status.success(), "verbose spawn failed:\nstdout: {}\nstderr: {}", stdout(&verbose), stderr(&verbose));
+    assert!(stdout(&verbose).contains("[other] {\"type\":\"acp.usage_update\""), "verbose shows the typed updates:\n{}", stdout(&verbose));
     cleanup(&repo);
     cleanup(&shim);
 }

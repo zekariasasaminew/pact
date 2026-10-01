@@ -193,7 +193,9 @@ impl AcpBatch {
 
 /// The `AgentEvent` a `session/update` stands for, so the ACP path feeds
 /// the same per-lane log, status and summary machinery as the process
-/// path. Everything unmodelled is `Other`, never dropped.
+/// path. Everything unmodelled is `Other`, never dropped; its `type` is
+/// `acp.<sessionUpdate>` so the CLI's existing noise suppression can key
+/// on it (issue #339).
 pub(crate) fn event_for_update(update: &SessionUpdate) -> AgentEvent {
     match update.kind.as_str() {
         "agent_message_chunk" => AgentEvent::AssistantText(update.text().unwrap_or("").to_string()),
@@ -206,7 +208,43 @@ pub(crate) fn event_for_update(update: &SessionUpdate) -> AgentEvent {
                 .unwrap_or_else(|| update.tool_title().unwrap_or("tool").to_string()),
             input: update.raw.get("rawInput").cloned().unwrap_or(serde_json::Value::Null),
         },
-        _ => AgentEvent::Other(serde_json::json!({ "sessionId": update.session_id, "update": update.raw })),
+        kind => AgentEvent::Other(serde_json::json!({
+            "type": format!("acp.{kind}"),
+            "sessionId": update.session_id,
+            "update": update.raw,
+        })),
+    }
+}
+
+/// Joins streamed `agent_message_chunk`s into whole messages (issue
+/// #339): the agent sends a sentence as several fragments, and printing
+/// each as its own `[assistant]` line made the stream unreadable. Text
+/// accumulates until an update of any other kind arrives, or the turn
+/// ends, and is then emitted once.
+pub(crate) struct ChunkCoalescer {
+    pending: String,
+}
+
+impl ChunkCoalescer {
+    pub(crate) fn new() -> Self {
+        ChunkCoalescer { pending: String::new() }
+    }
+
+    /// Feeds one update; calls `emit` for every event that is ready.
+    pub(crate) fn push(&mut self, update: &SessionUpdate, emit: &mut impl FnMut(&AgentEvent)) {
+        if update.kind == "agent_message_chunk" {
+            self.pending.push_str(update.text().unwrap_or(""));
+            return;
+        }
+        self.flush(emit);
+        emit(&event_for_update(update));
+    }
+
+    pub(crate) fn flush(&mut self, emit: &mut impl FnMut(&AgentEvent)) {
+        if !self.pending.is_empty() {
+            let text = std::mem::take(&mut self.pending);
+            emit(&AgentEvent::AssistantText(text));
+        }
     }
 }
 
@@ -262,8 +300,44 @@ mod tests {
             raw: serde_json::json!({ "sessionUpdate": "usage_update", "used": 10, "size": 1000 }),
         };
         match event_for_update(&usage) {
-            AgentEvent::Other(value) => assert_eq!(value["update"]["used"], 10, "unmodelled updates survive as Other"),
+            AgentEvent::Other(value) => {
+                assert_eq!(value["update"]["used"], 10, "unmodelled updates survive as Other");
+                assert_eq!(value["type"], "acp.usage_update", "typed so the CLI's suppression list can name it");
+            }
             other => panic!("expected Other, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chunks_coalesce_into_one_message_flushed_by_the_next_kind_or_the_end_of_turn() {
+        let chunk = |text: &str| SessionUpdate {
+            session_id: "s".into(),
+            kind: "agent_message_chunk".into(),
+            raw: serde_json::json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": text } }),
+        };
+        let usage = SessionUpdate {
+            session_id: "s".into(),
+            kind: "usage_update".into(),
+            raw: serde_json::json!({ "sessionUpdate": "usage_update", "used": 1, "size": 10 }),
+        };
+        let seen: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let mut record = |event: &AgentEvent| {
+            seen.borrow_mut().push(match event {
+                AgentEvent::AssistantText(t) => format!("text:{t}"),
+                AgentEvent::Other(v) => format!("other:{}", v["type"].as_str().unwrap_or("")),
+                other => format!("{other:?}"),
+            })
+        };
+        let mut coalescer = ChunkCoalescer::new();
+        coalescer.push(&chunk("Sources read. "), &mut record);
+        coalescer.push(&chunk("Writing the tests."), &mut record);
+        assert!(seen.borrow().is_empty(), "nothing is emitted while chunks keep arriving");
+        coalescer.push(&usage, &mut record);
+        assert_eq!(*seen.borrow(), vec!["text:Sources read. Writing the tests.", "other:acp.usage_update"], "the message flushes whole, before the update that ended it");
+        coalescer.push(&chunk("DONE"), &mut record);
+        coalescer.flush(&mut record);
+        coalescer.flush(&mut record);
+        assert_eq!(seen.borrow().last().map(String::as_str), Some("text:DONE"));
+        assert_eq!(seen.borrow().len(), 3, "an empty flush emits nothing");
     }
 }
