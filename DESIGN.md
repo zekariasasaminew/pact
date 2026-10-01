@@ -1356,7 +1356,12 @@ planner now appends every raw update to `logs/planner-<stamp>.jsonl`
 in the lane log's one-JSON-line shape, each attempt opened by a
 `{"pact": {"planner_attempt": n, "prompt_chars": ...}}` marker so the
 retries can be told apart; the report carries the path and the
-planning wall time, and the CLI prints both on the plan line.
+planning wall time, and the CLI prints both on the plan line. Every
+line pact writes to these logs, lane or planner, carries `t`, the
+wall-clock in Unix milliseconds (issue #358): Copilot's updates have
+no timestamp of their own, and without one the log said what happened
+but not when, which sent the first timing analysis back to Copilot's
+own event file, the thing the log was meant to replace.
 
 The same timeline showed the shared tree, its dependency prep and the
 29 s baseline waiting behind planning for no reason (issue #353): none

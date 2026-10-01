@@ -150,6 +150,10 @@ fn runtime_acp_runs_every_lane_as_a_session_in_one_shared_process() {
         assert!(record["args"].as_array().unwrap().iter().any(|a| a == "--acp"), "the record names the shared process launch: {}", record["args"]);
         let log = std::fs::read_to_string(record["log_path"].as_str().unwrap()).unwrap();
         assert!(log.contains("\"sessionUpdate\":\"tool_call\"") || log.contains("\"sessionUpdate\": \"tool_call\""), "the lane log holds the raw session updates:\n{log}");
+        let stamped = log.lines().filter(|l| !l.trim().is_empty()).all(|l| {
+            serde_json::from_str::<serde_json::Value>(l).ok().and_then(|v| v["t"].as_u64()).is_some_and(|t| t > 1_700_000_000_000)
+        });
+        assert!(stamped, "every lane log line carries Unix milliseconds (#358):\n{log}");
     }
 
     let list = stdout(&pact(&repo, &shim, &["list"]));

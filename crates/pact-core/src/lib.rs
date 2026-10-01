@@ -1253,7 +1253,7 @@ impl Orchestrator {
                 });
                 let mut coalescer = acp_runtime::ChunkCoalescer::new();
                 let outcome = runtime.prompt(&mut session, task, |update| {
-                    let line = serde_json::json!({ "sessionId": update.session_id, "update": update.raw });
+                    let line = acp_runtime::log_line(&update);
                     let _ = writeln!(log, "{line}");
                     coalescer.push(&update, on_event);
                 });

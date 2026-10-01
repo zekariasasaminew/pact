@@ -216,6 +216,19 @@ pub(crate) fn event_for_update(update: &SessionUpdate) -> AgentEvent {
     }
 }
 
+/// One line of an ACP lane or planner log: the raw `session/update`
+/// with the session it belongs to and the wall-clock it arrived at in
+/// Unix milliseconds (issue #358), so cadence can be read from pact's
+/// own files instead of the agent's.
+pub(crate) fn log_line(update: &SessionUpdate) -> serde_json::Value {
+    serde_json::json!({ "t": unix_millis(), "sessionId": update.session_id, "update": update.raw })
+}
+
+/// Unix milliseconds now, for log lines.
+pub(crate) fn unix_millis() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
 /// Joins streamed `agent_message_chunk`s into whole messages (issue
 /// #339): the agent sends a sentence as several fragments, and printing
 /// each as its own `[assistant]` line made the stream unreadable. Text
