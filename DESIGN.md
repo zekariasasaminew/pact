@@ -1889,6 +1889,45 @@ agent spawn needed, pure function): an accepted attempt's full field
 set, a rejected attempt's reason surfacing correctly, and the
 `test_passed: Some(false)` vs. `None` distinction specifically.
 
+### Repo-declared prepare commands (issue #301)
+
+`pact-deps` makes a fresh worktree's dependencies ready; this is the
+other half of "a worktree is not a working project". Found while
+preparing the benchmark kit and met again in the first live `pact run`:
+on capture-hub, `next-env.d.ts` is gitignored and imports generated
+route types, so `npx tsc --noEmit` cannot type-check a route in any new
+worktree until `npx next typegen` has run. The benchmark kit worked
+around it with an npm script; `pact run`'s verification baseline read it
+honestly as inconclusive. Neither is the fix. Prisma clients, codegen
+output and `build.rs` artifacts have the same shape.
+
+`SpawnOptions::prepare` (from `pact.toml` `defaults.prepare` or
+`--prepare`, the flag replacing the list so a one-off run can opt out)
+is a list of shell commands run by `run_prepare_commands` in the
+workspace after dependency prep, inside `prepare_workspace_dependencies`
+so an isolated workspace and a `--shared-tree` batch both get it exactly
+once, and inside `merge_all`'s `dependency_prep` hook so the integration
+worktree is a working project before the gate's preflight. It runs
+regardless of `--deps none`: that flag says the task needs no install,
+not that generated files already exist. A failure is a warning and the
+next command still runs, matching dependency prep's posture (a
+half-prepared workspace is still more useful to the agent than none),
+with each command's result persisted as `meta/prepare/<id>.json` for
+`inspect` (its own directory, because `list_workspaces` tells sidecars
+in `meta/` apart by suffix and a workspace named `...-prepare` would
+defeat that). The orchestrator runs these, not the workers, because the
+lean profile would have to widen its allowlist to let a worker run
+arbitrary setup, and because every lane would otherwise pay for the
+same generation in a shared tree.
+
+Tested end to end with a gitignored file produced by a stand-in command:
+it appears in the worktree and not in the repo root; a failing command
+is reported and the next one and the agent still run; the config default
+applies to `spawn` and `spawn-many` and the flag replaces it; and
+`merge-all --require-passing-tests` with a gate that needs the generated
+file aborts at the preflight without `--prepare` and merges both
+workspaces with it.
+
 ### Structured run metadata (issue #15)
 
 From an outside code review (2026-07-24), verified against source:
