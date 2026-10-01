@@ -1344,6 +1344,18 @@ in the lane log's one-JSON-line shape, each attempt opened by a
 retries can be told apart; the report carries the path and the
 planning wall time, and the CLI prints both on the plan line.
 
+The same timeline showed the shared tree, its dependency prep and the
+29 s baseline waiting behind planning for no reason (issue #353): none
+of them depend on the plan, and the batch workspace only used the plan
+for its summary string. `run_task` now prepares them on a second
+thread while the planner works, whenever the planner is consulted and
+something will be spawned; the batch is named `pact run: <task's first
+line>`, and the baseline runs there only when `--verify` is known up
+front (a plan-supplied `verify` still runs it after planning). If
+planning fails the prepared tree is removed; if preparation fails the
+plan is persisted and the error says how to rerun it with `--plan`.
+The `--plan` path stays sequential, since it has nothing to overlap.
+
 Not here: dependent units (waves, #282), gap-closing lanes after a
 failed verification, balancing beyond an advisory warning when the
 heaviest unit's existing lines exceed four times the lightest (new-file

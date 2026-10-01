@@ -909,9 +909,8 @@ impl Orchestrator {
         &self,
         tasks: &[SpawnManyTask],
         options: &SpawnOptions<'_>,
-        mut on_event: impl FnMut(&AgentEvent),
+        on_event: impl FnMut(&AgentEvent),
     ) -> Result<Workspace> {
-        on_event(&AgentEvent::Phase(format!("creating shared tree for {} lanes", tasks.len())));
         let summary = format!(
             "shared-tree batch of {} lanes: {}",
             tasks.len(),
@@ -921,7 +920,22 @@ impl Orchestrator {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let mut batch = self.workspaces.create_shared_batch(&summary, None)?;
+        let mut on_event = on_event;
+        on_event(&AgentEvent::Phase(format!("creating shared tree for {} lanes", tasks.len())));
+        self.create_shared_batch_workspace_named(&summary, options, on_event)
+    }
+
+    /// `create_shared_batch_workspace` with the batch's task text given,
+    /// for a caller that has no lanes yet (`pact run` prepares the tree
+    /// while the planner is still deciding them, issue #353). The caller
+    /// announces the phase.
+    pub(crate) fn create_shared_batch_workspace_named(
+        &self,
+        summary: &str,
+        options: &SpawnOptions<'_>,
+        mut on_event: impl FnMut(&AgentEvent),
+    ) -> Result<Workspace> {
+        let mut batch = self.workspaces.create_shared_batch(summary, None)?;
         self.prepare_workspace_dependencies(&batch, options, &mut on_event);
         // Re-read so the lanes inherit `linked_paths` recorded by prep.
         if let Ok(fresh) = self.workspaces.get_workspace(&batch.id) {

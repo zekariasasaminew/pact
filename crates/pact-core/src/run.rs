@@ -418,6 +418,13 @@ impl Orchestrator {
     /// Plans, briefs, executes, commits and verifies `task`. Events are
     /// labelled by lane index; the planner's own events use
     /// `usize::MAX` as the index.
+    ///
+    /// When the planner is consulted (no `--plan`) and something will be
+    /// spawned (no `--dry-run`), the shared tree, its dependencies and,
+    /// when `--verify` is known up front, the baseline are prepared on a
+    /// second thread while the planner works (issue #353): none of them
+    /// depend on the plan, and together they are half a minute the lanes
+    /// would otherwise wait for after planning.
     pub fn run_task(
         &self,
         task: &str,
@@ -425,7 +432,9 @@ impl Orchestrator {
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Result<RunReport> {
         let planning_started = std::time::Instant::now();
-        let (plan, planner_attempts, planner_log) = match options.plan_path {
+        let planner_events = |event: &AgentEvent| on_event(PLANNER_LABEL, &options.agent, event);
+        let spawn_options = SpawnOptions { shared_tree: true, ..options.spawn };
+        let (plan, planning, prepared) = match options.plan_path {
             Some(path) => {
                 let text = std::fs::read_to_string(path).with_context(|| format!("reading plan {}", path.display()))?;
                 let mut plan: Plan = serde_json::from_str(&text).with_context(|| format!("parsing plan {}", path.display()))?;
@@ -436,35 +445,110 @@ impl Orchestrator {
                 if !problems.is_empty() {
                     bail!("plan {} cannot run:\n{}", path.display(), problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"));
                 }
-                (plan, 0, None)
+                (plan, Planning { attempts: 0, log: None, elapsed: Duration::ZERO }, None)
+            }
+            None if options.dry_run => {
+                let (plan, attempts, log) = self.plan_task(task, options, &mut |event| planner_events(event))?;
+                (plan, Planning { attempts, log: Some(log), elapsed: planning_started.elapsed() }, None)
             }
             None => {
-                let (plan, attempts, log) = self.plan_task(task, options, &mut |event| on_event(PLANNER_LABEL, &options.agent, event))?;
-                (plan, attempts, Some(log))
+                let (planned, prepared) = std::thread::scope(|scope| {
+                    let prep = scope.spawn(|| self.prepare_run_tree(task, &spawn_options, options.verify, &planner_events));
+                    let planned = self.plan_task(task, options, &mut |event| planner_events(event));
+                    (planned, prep.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the thread preparing the shared tree panicked"))))
+                });
+                let elapsed = planning_started.elapsed();
+                let (plan, attempts, log) = match planned {
+                    Ok(planned) => planned,
+                    Err(err) => {
+                        if let Ok(prepared) = prepared {
+                            planner_events(&AgentEvent::Phase(format!("planning failed; removing the prepared shared tree {}", prepared.batch.id)));
+                            if let Err(cleanup) = self.workspaces.remove_workspace(&prepared.batch.id, false, true) {
+                                tracing::warn!("removing shared tree {} after a failed plan: {cleanup:#}", prepared.batch.id);
+                            }
+                        }
+                        return Err(err);
+                    }
+                };
+                let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(err) => {
+                        let plan_path = self.persist_plan(&plan)?;
+                        return Err(err.context(format!(
+                            "preparing the shared tree while planning; the plan is saved at {} and can be rerun with `pact run --plan {}`",
+                            plan_path.display(),
+                            plan_path.display()
+                        )));
+                    }
+                };
+                (plan, Planning { attempts, log: Some(log), elapsed }, Some(prepared))
             }
         };
-        let planning = Planning { attempts: planner_attempts, log: planner_log, elapsed: planning_started.elapsed() };
+        let mut plan = plan;
         if let Some(verify) = options.verify {
             // Recorded on the plan so the persisted file is the whole truth.
-            let mut plan = plan;
             plan.verify = Some(verify.to_string());
-            return self.run_plan(plan, planning, options, on_event);
         }
-        self.run_plan(plan, planning, options, on_event)
+        self.run_plan(plan, planning, prepared, &spawn_options, options, on_event)
+    }
+
+    /// The shared tree a run executes in, with its dependencies prepared
+    /// and, when the verification command is already known, the baseline
+    /// run on the untouched tree. Disjoint by validation, so the shared
+    /// tree is the right shape: no per-lane isolation to pay for and no
+    /// merge afterwards. The baseline exists so a command that already
+    /// fails on the base (generated files missing from a fresh worktree,
+    /// say) is never read as this run's doing.
+    fn prepare_run_tree(
+        &self,
+        task: &str,
+        spawn_options: &SpawnOptions<'_>,
+        verify: Option<&str>,
+        on_event: &(impl Fn(&AgentEvent) + Sync),
+    ) -> Result<PreparedTree> {
+        let summary = format!("pact run: {}", task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(80).collect::<String>());
+        on_event(&AgentEvent::Phase("creating the shared tree while the planner works".to_string()));
+        let mut forward = |event: &AgentEvent| on_event(event);
+        let batch = self
+            .create_shared_batch_workspace_named(&summary, spawn_options, &mut forward)
+            .context("creating the shared tree for the plan")?;
+        let baseline = match verify.map(str::trim).filter(|v| !v.is_empty()) {
+            Some(command) => Some(self.run_baseline(&batch, command, on_event)?),
+            None => None,
+        };
+        Ok(PreparedTree { batch, baseline })
+    }
+
+    fn run_baseline(&self, batch: &Workspace, command: &str, on_event: &impl Fn(&AgentEvent)) -> Result<VerifyOutcome> {
+        on_event(&AgentEvent::Phase(format!("verification baseline on the untouched tree: {command}")));
+        let outcome = run_shell_captured(&batch.path, command)?;
+        on_event(&AgentEvent::Phase(format!(
+            "baseline {} in {:.1}s",
+            if outcome.success { "passes" } else { "already FAILS before any lane runs" },
+            outcome.duration.as_secs_f32()
+        )));
+        Ok(outcome)
+    }
+
+    fn persist_plan(&self, plan: &Plan) -> Result<PathBuf> {
+        let plans_dir = self.workspaces.state_dir().join("meta").join("plans");
+        std::fs::create_dir_all(&plans_dir)?;
+        let plan_path = plans_dir.join(format!("{}-{}.json", unix_now(), short_slug(&plan.task)));
+        std::fs::write(&plan_path, serde_json::to_vec_pretty(plan)?).with_context(|| format!("writing {}", plan_path.display()))?;
+        Ok(plan_path)
     }
 
     fn run_plan(
         &self,
         plan: Plan,
         planning: Planning,
+        prepared: Option<PreparedTree>,
+        spawn_options: &SpawnOptions<'_>,
         options: &RunOptions<'_>,
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Result<RunReport> {
-        let plans_dir = self.workspaces.state_dir().join("meta").join("plans");
-        std::fs::create_dir_all(&plans_dir)?;
         let stamp = unix_now();
-        let plan_path = plans_dir.join(format!("{stamp}-{}.json", short_slug(&plan.task)));
-        std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan)?).with_context(|| format!("writing {}", plan_path.display()))?;
+        let plan_path = self.persist_plan(&plan)?;
 
         let weights = unit_weights(&plan, &self.repo_root);
         let balance = balance_warning(&weights);
@@ -498,32 +582,27 @@ impl Orchestrator {
             });
         }
 
-        // Disjoint by validation, so the shared tree is the right shape:
-        // no per-lane isolation to pay for and no merge afterwards. The
-        // batch is created here rather than inside `spawn_many` so the
-        // verification command can be run once on the untouched tree: a
-        // command that already fails on the base (generated files missing
-        // from a fresh worktree, say) must not be read as this run's doing.
-        let spawn_options = SpawnOptions { shared_tree: true, ..options.spawn };
+        // The shared tree may already exist (prepared while the planner
+        // worked, issue #353); otherwise it is created here. Either way
+        // the baseline, when the plan names a verification command, runs
+        // on the untouched tree before any lane does.
         let planner_events = |event: &AgentEvent| on_event(PLANNER_LABEL, &options.agent, event);
-        let batch = self
-            .create_shared_batch_workspace(&tasks, &spawn_options, planner_events)
-            .context("creating the shared tree for the plan")?;
-        let verify_command = plan.verify.clone().filter(|v| !v.trim().is_empty());
-        let baseline = match &verify_command {
-            Some(command) => {
-                planner_events(&AgentEvent::Phase(format!("verification baseline on the untouched tree: {command}")));
-                let outcome = run_shell_captured(&batch.path, command)?;
-                planner_events(&AgentEvent::Phase(format!(
-                    "baseline {} in {:.1}s",
-                    if outcome.success { "passes" } else { "already FAILS before any lane runs" },
-                    outcome.duration.as_secs_f32()
-                )));
-                Some(outcome)
+        let (batch, baseline) = match prepared {
+            Some(PreparedTree { batch, baseline }) => (batch, baseline),
+            None => {
+                let batch = self
+                    .create_shared_batch_workspace(&tasks, spawn_options, planner_events)
+                    .context("creating the shared tree for the plan")?;
+                (batch, None)
             }
-            None => None,
         };
-        let outcomes = self.spawn_many_in(tasks, &spawn_options, Some(batch.clone()), &on_event);
+        let verify_command = plan.verify.clone().filter(|v| !v.trim().is_empty());
+        let baseline = match (baseline, &verify_command) {
+            (Some(outcome), _) => Some(outcome),
+            (None, Some(command)) => Some(self.run_baseline(&batch, command, &planner_events)?),
+            (None, None) => None,
+        };
+        let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), &on_event);
         let batch = self.workspaces.get_workspace(&batch.id).ok();
 
         let mut committed = None;
@@ -706,6 +785,14 @@ struct Planning {
     attempts: usize,
     log: Option<PathBuf>,
     elapsed: Duration,
+}
+
+/// The shared tree prepared while the planner worked (issue #353).
+struct PreparedTree {
+    batch: Workspace,
+    /// The verification baseline, when the command was known before the
+    /// plan was.
+    baseline: Option<VerifyOutcome>,
 }
 
 fn append_log_line(path: &Path, line: &serde_json::Value) -> Result<()> {
