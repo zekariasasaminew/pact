@@ -88,7 +88,7 @@ let alone landing their work back together afterward.
 
 ## Overview
 
-Six crates, each with one job:
+Seven crates, each with one job:
 
 ```mermaid
 graph TD
@@ -97,20 +97,26 @@ graph TD
     VCS["pact-vcs<br/>(PidLock + git worktree lifecycle)"]
     Deps["pact-deps<br/>(dependency broker: detect + passthrough to each ecosystem's own cache)"]
     Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex + Antigravity live-verified, Gemini CLI not yet)"]
-    Coord["pact-coord<br/>(leases + messages, its own MCP server process)"]
+    Coord["pact-coord<br/>(leases + messages, its own MCP server process, or served over HTTP in-process)"]
+    Acp["pact-acp<br/>(Agent Client Protocol client: one agent process, one session per lane)"]
 
     CLI --> Core
     Core --> VCS
     Core --> Deps
     Core --> Agents
+    Core -.-> |"--runtime acp (issue #331)"| Acp
     Deps -.reuses.-> VCS
     Core -.writes coord config for.-> Coord
     Agent2["chosen agent CLI (child process)"] -.launches as its own child, over stdio.-> Coord
+    Acp -.one `--acp` process, many sessions.-> Agent2
 ```
 
 `pact-coord` is not called in-process by `pact-core`
 at all -- the orchestrator only writes the config file that tells the
 agent CLI to launch it itself, over stdio, as its own separate process.
+(The ACP lane runtime, issue #306, serves it in-process over HTTP instead;
+`pact-acp` is the client side of that runtime and is not wired into
+`spawn-many` yet.)
 
 Sequence diagrams for the spawn/teardown and cross-agent coordination
 flows, plus the on-disk state layout, are in the Architecture reference

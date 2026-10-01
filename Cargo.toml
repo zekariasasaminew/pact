@@ -4,6 +4,7 @@ members = [
     "crates/pact-vcs",
     "crates/pact-deps",
     "crates/pact-coord",
+    "crates/pact-acp",
     "crates/pact-agents",
     "crates/pact-core",
     "crates/pact-cli",
@@ -42,5 +43,6 @@ junction = "2"
 pact-vcs = { path = "crates/pact-vcs" }
 pact-deps = { path = "crates/pact-deps" }
 pact-coord = { path = "crates/pact-coord" }
+pact-acp = { path = "crates/pact-acp" }
 pact-agents = { path = "crates/pact-agents" }
 pact-core = { path = "crates/pact-core" }

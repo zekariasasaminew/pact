@@ -3417,6 +3417,107 @@ applies to the Gemini adapter, the Homebrew tap, and the winget
 manifest. Worth a real look on a machine with an actual display before
 calling this fully done.
 
+## pact-acp — Agent Client Protocol client
+
+### Why a protocol client instead of N processes (issues #306, #330)
+
+Measured on 2026-10-01 with Copilot CLI 1.0.90 on the lean profile and a
+trivial one-file task (`C:\Users\Zekar\pact-bench\acp_probe.py`):
+
+| lanes | N separate `copilot -p` processes | one `copilot --acp`, N sessions |
+|---|---|---|
+| 1 | ~6 s, ~300 MB | 5.6 s, 299 MB |
+| 4 | 24.5 s, 1,285 MB | 4.9 s, 384 MB |
+| 8 | 50.9 s, 2,456 MB | 5.6 s, 445 MB |
+
+Per-process cost is linear and all startup: about 6 s and 330 MB per
+lane. Per-session cost inside one process is flat: about 20 MB and no
+startup. That gap is what was left between pact's shared-tree run
+(31.3 min) and Copilot's own in-process sub-agents (15.8 min) on the
+capture-hub benchmark, and it is why the arm P run came within 112 MB of
+exhausting memory. The Agent Client Protocol
+(<https://agentclientprotocol.com>) is how an agent process exposes many
+independent sessions, each with its own working directory and MCP
+servers, which is exactly a pact lane. Copilot ships it as `copilot
+--acp`; Gemini CLI speaks it natively; Zed ships adapters for Claude Code
+and Codex. So one client here can eventually replace one bespoke stdout
+parser per agent CLI in pact-agents.
+
+### Shape
+
+Three layers, each the smallest that does its job. `protocol` is the
+typed subset pact uses: `initialize`, `session/new`, `session/prompt`,
+`session/cancel`, `session/close` outbound; `session/update` and
+`session/request_permission` inbound. Everything the agent sends that
+pact does not model travels as a raw `serde_json::Value` on
+`SessionUpdate::raw` rather than being dropped, so callers can read
+fields pact never anticipated without pact growing a type for each.
+`client` is the async half: one `AcpClient` is one agent process, with
+JSON-RPC requests multiplexed by id, the agent's own requests answered
+inline by a permission policy, and `session/update` fanned out to the
+channel registered for that session. `runtime` is the blocking facade
+pact-core's lane threads will call: an `AcpRuntime` owns the process and
+a two-thread tokio runtime, and `prompt` blocks the calling thread while
+delivering updates to a callback on that same thread, so the orchestrator
+above it stays as synchronous as it is today.
+
+Decisions made on evidence from the probes rather than from the spec:
+
+- pact advertises no `fs` or `terminal` client capabilities. With them
+  off, the agent uses its own file and shell tools, which is what makes a
+  session behave exactly like a headless `copilot -p` run. The probe
+  showed no `session/request_permission` traffic at all with
+  `--allow-all-tools` on the process, but the client still answers it,
+  because an unattended lane has nobody else to ask: the default policy
+  picks `allow_always` over `allow_once` over anything, and cancels if
+  nothing allows.
+- `McpServer::http` carries `"type": "http"`; the stdio shape stays
+  untagged, matching ACP v1's wire format. Copilot rejects stdio servers
+  from the client outright (its log: `Rejecting non-http/sse MCP server
+  "pact-coord" from client`), which is what made pact-coord grow an HTTP
+  mode (issue #329).
+- `StopReason` has an `#[serde(other)]` arm. The spec lists five reasons
+  today; a sixth must not turn into a parse failure that looks like an
+  agent crash.
+- When the process exits, the reader task fails every pending request
+  with `RuntimeExited` carrying the exit status and the last twenty
+  stderr lines, closes every session's update stream, and makes later
+  requests fail the same way immediately. A lane thread must never wait
+  on a dead agent; the test `an_agent_that_dies_mid_turn_...` kills the
+  fake after its first `tool_call` and checks that the update sent before
+  the crash was still delivered, that the prompt failed, and that the
+  next call fails without blocking.
+- `session/close` answered with -32601 is success: an agent without the
+  `close` capability has nothing to free, and pact should not treat a
+  capability gap as a lane failure.
+- `prompt` drains the update channel with `biased` priority before
+  polling the turn's response, then drains once more after the response
+  arrives, so a chunk the agent emitted just before `stopReason` is
+  delivered before `prompt` returns rather than at the start of the next
+  prompt.
+
+Verified against the real CLI once by hand (`examples/copilot_probe.rs`,
+never from the suite): `initialize` 2.2 s, two sessions in 1.1 s each,
+both prompted concurrently and ending `EndTurn` in 3.3 s with the right
+file contents, `session/close` honoured, 7.2 s total including startup.
+Session ids are Copilot's own UUIDs, so each lane's session persists in
+the lean home's session store and cost accounting keeps working.
+
+### Testing without an agent
+
+`fake_acp_agent` is a test binary that speaks just enough ACP: it
+creates sessions, treats each prompt's text as a JSON task naming files
+to write into the session's `cwd`, streams `usage_update`, `tool_call`,
+`tool_call_update` and two `agent_message_chunk`s, optionally sends a
+`session/request_permission` first and honours the answer, optionally
+exits mid-turn, and logs every method it receives when `FAKE_ACP_LOG` is
+set. The one awkward part is that it is single-threaded: while waiting
+for a permission answer it buffers any other message that arrives and
+replays it after the turn, which is enough for two sessions prompted
+concurrently to both complete. The integration tests drive the blocking
+`AcpRuntime` from real threads, because that is the surface pact-core
+will use.
+
 ## pact-deps — dependency materialization
 
 Detects a workspace's package manager(s) and makes sure dependencies are
