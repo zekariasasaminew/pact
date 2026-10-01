@@ -176,13 +176,13 @@ pub fn parse_plan(reply: &str, task: &str) -> Result<Plan> {
 }
 
 const PLAN_SCHEMA: &str = r#"{
-  "shared_context": "conventions every unit must follow verbatim (test framework, mocking style, what never to edit)",
+  "shared_context": "repository facts every unit needs that the task text does not state; empty string if there are none",
   "verify": "one shell command that checks the whole task once everything is merged, e.g. npm test",
   "units": [
     {
       "name": "short-kebab-case-name",
       "files": ["repo/relative/path/this/unit/creates-or-edits.ts"],
-      "brief": "exactly what this unit must produce, self-contained, naming the source files to read",
+      "brief": "only what the task text does not already say for these files: the existing file to imitate, non-obvious findings in the sources, the acceptance criteria",
       "verify": "optional shell command scoped to this unit's files"
     }
   ]
@@ -193,7 +193,9 @@ const PLAN_SCHEMA: &str = r#"{
 /// the benchmark headers had to carry, and the repository's existing
 /// tests as style anchors when there are any (`anchors`), so the briefs
 /// name a concrete file to imitate instead of hoping the planner finds
-/// one.
+/// one. Workers receive the task text verbatim (`render_brief`), and the
+/// prompt says so: a plan that restates the task is output tokens every
+/// worker waits for (issue #347).
 pub fn planner_prompt(task: &str, max_units: usize, anchors: &[String]) -> String {
     let anchors_section = if anchors.is_empty() {
         String::new()
@@ -219,9 +221,15 @@ pub fn planner_prompt(task: &str, max_units: usize, anchors: &[String]) -> Strin
          in two units. Files a unit only reads are not listed.\n\
          - Shared files that several units would need to edit (barrels, setup, config, lockfiles) go to exactly \
          one unit, or the task is restructured so nobody edits them.\n\
-         - Each `brief` must be self-contained: a worker sees only its brief, this repository, and \
-         `shared_context`. Name the source files to read, the behaviour to cover (edge cases and error paths, \
-         not just the happy path), the acceptance criteria, and the existing file to imitate.\n\
+         - Every worker receives the complete TASK text above verbatim, together with its own `files` list, \
+         `brief` and `shared_context`. Do not restate anything the task already says: not its rules, not its \
+         conventions, not its per-file requirements. `shared_context` is for repository facts every unit \
+         needs that the task does not state; leave it empty when there are none. A `brief` adds only what \
+         the task does not already say for this unit's files: the existing file to imitate, non-obvious \
+         things you found in the sources (unexported symbols, awkward dependencies to mock), and the \
+         acceptance criteria. A few sentences per unit is the norm.\n\
+         - Your reply is not read by a person; it is parsed, and every worker waits for it to finish. \
+         Keep it short.\n\
          - Workers cannot install packages, run builds or start dev servers, and must not commit; pact \
          commits. Do not ask them to.\n\
          - Do not create, modify or delete any file yourself. Plan only.\n\n\
@@ -284,7 +292,10 @@ pub fn render_brief(plan: &Plan, unit: &PlanUnit) -> String {
     for file in &unit.files {
         brief.push_str(&format!("- `{file}`\n"));
     }
-    brief.push_str(&format!("\n## What to produce\n\n{}\n", unit.brief.trim()));
+    brief.push_str(&format!(
+        "\n## What to produce\n\nDo the task above for the files you own, and only those. The planner adds, for your unit:\n\n{}\n",
+        unit.brief.trim()
+    ));
     if !plan.shared_context.trim().is_empty() {
         brief.push_str(&format!("\n## Conventions (shared by every unit)\n\n{}\n", plan.shared_context.trim()));
     }
@@ -759,9 +770,24 @@ mod tests {
     fn briefs_carry_files_brief_shared_context_and_the_rules_workers_kept_breaking() {
         let p = plan(vec![PlanUnit { name: "parser".into(), files: vec!["lib/parse.test.ts".into()], brief: "Cover parse()".into(), verify: Some("npx vitest run lib".into()) }]);
         let brief = render_brief(&p, &p.units[0]);
-        for expected in ["# Unit `parser`", "> big task", "- `lib/parse.test.ts`", "Cover parse()", "use vitest", "Do not install packages", "Do not commit", "`npx vitest run lib`", "reply DONE"] {
+        for expected in ["# Unit `parser`", "> big task", "- `lib/parse.test.ts`", "Do the task above for the files you own", "Cover parse()", "use vitest", "Do not install packages", "Do not commit", "`npx vitest run lib`", "reply DONE"] {
             assert!(brief.contains(expected), "missing {expected:?} in:\n{brief}");
         }
+    }
+
+    #[test]
+    fn planner_prompt_tells_the_planner_workers_get_the_task_verbatim_and_to_keep_the_reply_short() {
+        let text = planner_prompt("do it", 8, &[]);
+        for expected in [
+            "Every worker receives the complete TASK text above verbatim",
+            "Do not restate anything the task already says",
+            "leave it empty when there are none",
+            "Keep it short.",
+            "repository facts every unit needs that the task text does not state",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        assert!(!text.contains("must be self-contained"), "the old self-contained rule invited the restating:\n{text}");
     }
 
     #[test]
