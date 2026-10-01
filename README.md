@@ -1318,6 +1318,10 @@ What *was* worth doing: today, the coordination server's command was hardcoded t
 
 **What the built-in server provides, for anyone evaluating an alternative:** advisory glob-based file leases with TTL expiry, a threaded message log (broadcast or direct), a typed handoff/negotiation protocol (`request_handoff`/`check_handoffs`/`respond_handoff` -- structured requests with a real status lifecycle, not just prose messages; issue #163), SQLite+WAL storage, verified with two real concurrent agents (see Phase 3). **What it doesn't:** no confirmed ceiling anywhere near MCP Agent Mail's cited 40-50-concurrent-agent scale (also, to be clear, no confirmed *failure* at that scale either -- just untested), no semantic/AST-level conflict analysis (deliberately out of scope for v1), no enforcement (leases are advisory by design, not locks).
 
+### The coordination server also speaks Streamable HTTP, one route per lane
+
+`pact_coord::http::serve_lanes` (issue #329) serves the same tools over HTTP from inside the orchestrating process, at `http://127.0.0.1:<port>/lanes/<workspace-id>`. Each route acts as that lane's agent: identity comes from the URL, so the model never has to pass or remember its own id. This exists because the ACP lane runtime (issue #306) hosts every lane as a session inside one agent process, and Copilot's ACP mode only accepts HTTP/SSE MCP servers per session; it also lets the process runtime drop its one-`pact mcp-serve`-child-per-lane pattern. Measured motivation and protocol details are in DESIGN.md ("pact-coord > Streamable HTTP mode").
+
 ## Architecture reference
 
 The crate-level diagram is in Overview, near the top of this document.
