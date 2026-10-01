@@ -3090,6 +3090,50 @@ Left open, documented -- revisit with a larger real-agent sample if a
 regression report comes in, or if Claude Code's own MCP client behavior
 changes.
 
+### Streamable HTTP mode: one server, one route per lane (issue #329)
+
+Part 1 of the ACP lane runtime (issue #306). Measured on 2026-10-01 with
+the real Copilot CLI (1.0.90): eight lanes as eight cold `copilot -p`
+processes took 50.9 s and 2,456 MB to finish a trivial task; eight ACP
+sessions inside one `copilot --acp` process took 5.6 s and 445 MB. That
+is the runtime pact is moving to, and it changed how pact-coord has to be
+reached. ACP lets a client name MCP servers per session, which is exactly
+how pact gives every lane its own agent id, but Copilot refuses stdio
+servers from the client (`Rejecting non-http/sse MCP server "pact-coord"
+from client`, its debug log) and accepts `type: "http"`. Verified by
+pointing two sessions at two throwaway HTTP servers: each session's
+tool call landed on its own server, so a URL can carry lane identity.
+
+`pact_coord::http::serve` (feature `http`, enabled by pact-core) binds
+`127.0.0.1:0` inside the orchestrating process; `add_lane` registers one
+rmcp `StreamableHttpService` per lane, reached at `/lanes/<agent-id>`.
+Lanes register while the server runs rather than at construction
+because `spawn-many` creates each lane's workspace, and so learns its
+id, inside the lane's own thread after the server is already up; an
+axum fallback dispatches on the `/lanes/<id>` prefix, which is safe
+because rmcp's service reads only the HTTP method and headers, never the
+path. The service factory builds the same `CoordServer` the stdio path
+builds, with that lane's agent id and workspace root, opening its own
+SQLite connection when the lane connects, so nothing about the tools,
+the operation log or `coord-status` changes:
+`each_lane_route_acts_as_its_own_agent` shows two lanes' claims recorded
+under their own ids and both logged as connected through the HTTP
+handshake, and `remove_lane` makes a route 404 again. Stateful mode
+(rmcp's default) is kept so one MCP session maps to one `CoordServer`,
+as one `mcp-serve` process does today. Identity by route rather than by
+a header or a tool argument because it is the one thing the agent cannot
+get wrong: the model never sees or chooses it.
+
+Also a win on its own, before any ACP lane exists: Copilot's
+`--additional-mcp-config` accepts HTTP servers too, so the process
+runtime can hand every lane a URL and stop spawning one `pact mcp-serve`
+child per lane. Off by default (`[features] http`) so the Python/TS
+binding builds do not pull axum and hyper; the handshake shim above
+stays stdio-only because over HTTP every request is answered on its own,
+so a pre-initialize request gets an error response from rmcp instead of
+taking the whole server down. Whether Copilot's HTTP MCP client sends
+`server/discover` at all is unverified; it does not matter here.
+
 ### Coord status (issue #64)
 
 `pact_coord::status` gives `pact coord-status` a read-only snapshot of the

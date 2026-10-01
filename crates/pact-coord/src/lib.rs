@@ -9,6 +9,8 @@
 
 mod db;
 mod handoffs;
+#[cfg(feature = "http")]
+pub mod http;
 mod leases;
 mod messages;
 mod operations;

@@ -12,6 +12,6 @@ anyhow.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
 serde.workspace = true
-pact-coord.workspace = true
+pact-coord = { workspace = true, features = ["http"] }
 uuid.workspace = true
 sysinfo.workspace = true
