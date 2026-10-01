@@ -1010,6 +1010,56 @@ task's closure return value specifically so a panic (which loses whatever
 the closure would have returned) still leaves enough to attribute the
 failure to the right task afterward.
 
+### Shared-tree batches (issue #315)
+
+Measured, not reasoned (issues #308, #310): on a 39-file test-writing
+task split into file-disjoint units, pact's worktree-per-lane model plus
+`merge-all` took 53.8 min at 3 lanes and 53.6 min at 8 lanes, while the
+same lean workers given the same briefs in **one shared checkout** took
+26.7 min at equal or better quality (791 tests vs 768, 39/39 coverage
+floors, zero source edits, zero collisions between 8 agents writing
+concurrently). Every merge in the isolated runs had been conflict-free,
+because the units were disjoint by construction; the isolation protected
+against nothing, and the sequenced merge plus its per-merge test gate
+were then paid on top. The fastest isolation is the one you skip.
+
+`spawn-many --shared-tree` makes that a strategy pact offers rather than
+an experiment: one worktree (`batch-<suffix>`, created and
+dependency-prepared once) and N *lanes* that run in it. A lane is a
+workspace in every sense pact already has -- its own id, metadata,
+agent process, lean home, coordination MCP config and agent id, log,
+`-run.json`, admission slot -- except that its `path`/`branch`/
+`base_commit` are the batch's and `Workspace::shared_batch` names the
+batch. That one field is what the rest of the system keys on:
+`commit_all` commits the shared tree once with a message listing every
+lane; `merge_all` dedups by branch so the batch is one workspace and
+lanes are dropped from the selection; `remove_workspace` on a lane only
+drops its metadata (and kills its agent) while the batch refuses teardown
+until no lane remains, so a sweep tears lanes down first and the worktree
+goes last; `list` labels lanes. Nothing per-lane had to be rewritten,
+which is the argument for modelling lanes as workspaces rather than as a
+new kind of thing.
+
+Two guard rails, because the premise is disjointness and a shared tree
+has no isolation to absorb a mistake. First, the existing
+`predict_task_overlap` heuristic, a warning in isolated mode, is a
+refusal here unless `--allow-overlap` is passed: the user asserts the
+shared mention is read-only. Second, each lane's brief gets pact's one
+injected preamble (`shared_tree_preamble`): you share this tree with N
+other agents, touch only your files, `claim_files` before writing and
+stop on `has_conflicts`, release when done, no git/installs/builds. With
+#291 fixed, those lease calls actually reach pact-coord under Copilot, so
+the preamble turns leases from etiquette into the mechanism that keeps
+lanes from clobbering each other. The arm-S experiment ran with *no*
+leases and still had zero collisions on disjoint briefs; the preamble is
+belt and braces for the case where a planner's split is slightly wrong.
+
+Not here, deliberately: choosing shared vs isolated automatically. That
+is a planner decision (#305) that needs the file sets; `--shared-tree` is
+the explicit knob it will turn. Also not here: in-process or
+shared-runtime lanes (#306). The remaining gap to Copilot's own in-process
+sub-agents (26.7 vs 15.8 min) is per-lane process cost, a separate lever.
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched

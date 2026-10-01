@@ -275,6 +275,26 @@ it, or `--min-free-mem-mb 0` to disable the memory check.
 pact spawn-many --agent copilot --task "..." --task "..." --task "..." --max-concurrent 3
 ```
 
+**`--shared-tree` runs every lane in one worktree instead of one per
+task.** For a batch whose tasks touch disjoint files, per-lane isolation
+and the merge phase are pure overhead: measured on a 39-file test-writing
+task (issue #310), isolated lanes plus `merge-all` took 53.6 min at 8
+lanes; the same lean workers in one shared checkout took 26.7 min at
+equal quality, with zero collisions. With `--shared-tree`, workers write
+into the same tree, `pact commit-all` captures it as one commit on the
+batch branch, and you verify once. Each lane still gets its own agent,
+log, coordination tools and run record, and is told it shares the tree
+and must `claim_files` before writing. It refuses when the task texts
+mention the same file unless `--allow-overlap` says those mentions are
+read-only. Use the default isolated mode for tasks that must edit the
+same files.
+
+```sh
+pact spawn-many --agent copilot --shared-tree \
+  --task-file briefs/api-tests.md --task-file briefs/ui-tests.md --task-file briefs/lib-tests.md
+pact commit-all
+```
+
 **Neither `spawn` nor `spawn-many` commits anything.** An agent's changes
 land in its workspace's working tree; `pact list` shows it as `[dirty]`
 once the agent is done, which is expected, not a sign anything needs your
