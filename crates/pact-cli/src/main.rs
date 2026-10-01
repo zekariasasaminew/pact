@@ -2556,13 +2556,17 @@ fn print_runtime_preview(
 /// unit's outcome, the commit and the verification, then what to do next.
 fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestrator) {
     println!(
-        "plan: {} unit{} ({} planner attempt{}), saved to {}",
+        "plan: {} unit{} ({} planner attempt{}{}), saved to {}",
         report.plan.units.len(),
         if report.plan.units.len() == 1 { "" } else { "s" },
         report.planner_attempts,
         if report.planner_attempts == 1 { "" } else { "s" },
+        if report.planner_log.is_some() { format!(", {:.0}s", report.planning.as_secs_f64()) } else { String::new() },
         report.plan_path.display()
     );
+    if let Some(log) = &report.planner_log {
+        println!("  planner log: {}", log.display());
+    }
     for (unit, brief) in report.plan.units.iter().zip(&report.brief_paths) {
         println!("  {}: {} file{} -- brief {}", unit.name, unit.files.len(), if unit.files.len() == 1 { "" } else { "s" }, brief.display());
         for file in &unit.files {

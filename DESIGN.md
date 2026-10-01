@@ -1335,6 +1335,15 @@ task text from the brief when the planner restates it, would have
 fought the planner instead of informing it, and a planner that reads
 the task once and adds only its findings is also the cheaper one.
 
+Reading that session meant finding Copilot's own event file by
+directory timestamps, because the ACP path of `ask_agent` logged
+nothing while the process path and every lane did (issue #348). The
+planner now appends every raw update to `logs/planner-<stamp>.jsonl`
+in the lane log's one-JSON-line shape, each attempt opened by a
+`{"pact": {"planner_attempt": n, "prompt_chars": ...}}` marker so the
+retries can be told apart; the report carries the path and the
+planning wall time, and the CLI prints both on the plan line.
+
 Not here: dependent units (waves, #282), gap-closing lanes after a
 failed verification, balancing beyond an advisory warning when the
 heaviest unit's existing lines exceed four times the lightest (new-file
