@@ -387,8 +387,15 @@ enum Command {
     /// `meta/plans/`; edit one and re-run it with `--plan`.
     Run {
         /// The whole task, in your words. The planner reads the repo and
-        /// decides the split; you do not write briefs.
-        task: String,
+        /// decides the split; you do not write briefs. Omit it and pass
+        /// --task-file for a long task.
+        #[arg(required_unless_present = "task_file", conflicts_with = "task_file")]
+        task: Option<String>,
+
+        /// Read the task from a file instead of the command line: real
+        /// task statements run to pages, and argv has limits (issue #307).
+        #[arg(long)]
+        task_file: Option<PathBuf>,
 
         /// Agent for the planner and every lane. Falls back to
         /// `pact.toml`'s `defaults.agent`, then auto-detection.
@@ -1109,6 +1116,7 @@ fn main() -> Result<()> {
         }
         Command::Run {
             task,
+            task_file,
             agent,
             max_units,
             verify,
@@ -1128,6 +1136,17 @@ fn main() -> Result<()> {
         } => {
             if max_units == 0 {
                 bail!("--max-units must be at least 1");
+            }
+            let task = match (task, task_file) {
+                (Some(text), _) => text,
+                (None, Some(path)) => std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading --task-file {}", path.display()))?
+                    .trim()
+                    .to_string(),
+                (None, None) => bail!("give the task as an argument or with --task-file"),
+            };
+            if task.is_empty() {
+                bail!("the task is empty");
             }
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;

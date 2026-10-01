@@ -183,6 +183,7 @@ running `./target/release/pact` after building from source -- see
 pact run --agent copilot --verify "npm test" \
   "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
 pact run --agent copilot --dry-run "..."          # plan only: print and persist the plan, spawn nothing
+pact run --agent copilot --task-file task.md      # a task statement that runs to pages
 pact run --agent copilot --plan .pact-<repo>/meta/plans/<stamp>-<slug>.json "..."   # re-run an edited plan
 ```
 

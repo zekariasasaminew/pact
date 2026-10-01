@@ -274,6 +274,29 @@ fn run_prepares_the_shared_tree_before_the_baseline_and_the_lanes() {
 }
 
 #[test]
+fn run_reads_the_task_from_a_file_and_rejects_both_or_neither() {
+    let repo = init_repo("task-file");
+    let shim = shim_dir();
+    let reply = write_reply(&shim, &plan_reply(good_units(), None));
+    let task_path = shim.join("task.md");
+    std::fs::write(&task_path, "# Big task\n\nAdd two text files.\n").unwrap();
+
+    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run", "--task-file", task_path.to_str().unwrap()]);
+    assert!(out.status.success(), "dry run with --task-file failed:\nstdout: {}\nstderr: {}", stdout(&out), stderr(&out));
+    let plans: Vec<PathBuf> = std::fs::read_dir(state_dir(&repo).join("meta").join("plans")).unwrap().map(|e| e.unwrap().path()).collect();
+    let plan: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&plans[0]).unwrap()).unwrap();
+    assert_eq!(plan["task"], "# Big task\n\nAdd two text files.", "the file's content, trimmed, is the task");
+
+    let both = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run", "--task-file", task_path.to_str().unwrap(), "also inline"]);
+    assert_eq!(both.status.code(), Some(2), "a task on the command line and --task-file together is a usage error:\n{}", stderr(&both));
+    let neither = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run"]);
+    assert_eq!(neither.status.code(), Some(2), "neither is a usage error too:\n{}", stderr(&neither));
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn run_refuses_a_plan_file_that_cannot_run() {
     let repo = init_repo("bad-file");
     let shim = shim_dir();
