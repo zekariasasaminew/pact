@@ -1311,6 +1311,30 @@ name the closest one. Line counts cannot weigh a test-writing plan
 (the owned files are new), which is why the balance rule lives in the
 prompt and `balance_warning` stays advisory.
 
+A third finding came from the planner's own session log (issue #347).
+Of the 127 s arm R spent planning, 6 s was the planner's one tool call
+(a file listing) and 117 s was generating a 26 KB reply: a 5 KB
+`shared_context` that rewrote the task's rules section and eight
+2.2 KB briefs that re-listed per file what the task text already
+enumerated per file. `render_brief` quotes the complete task into every
+lane's brief, so each worker was handed the rules twice and its file
+requirements twice, and every worker waited for the restating to
+finish; planning was 14% of the run's wall time and nearly all of it
+output tokens. The schema's description of `shared_context`
+("conventions every unit must follow verbatim") had invited the copy.
+The prompt now says that workers receive the task verbatim, that
+nothing it already says is to be restated, that `shared_context` holds
+only repository facts the task does not state (empty when there are
+none), that a brief adds only what the task does not say for the
+unit's files (the file to imitate, non-obvious findings in the sources,
+the acceptance criteria), and that the reply is parsed rather than
+read, so its length is pure delay. The rendered brief says the same
+from the worker's side: do the task above for the files you own, and
+here is what the planner adds. The alternative, having pact strip the
+task text from the brief when the planner restates it, would have
+fought the planner instead of informing it, and a planner that reads
+the task once and adds only its findings is also the cheaper one.
+
 Not here: dependent units (waves, #282), gap-closing lanes after a
 failed verification, balancing beyond an advisory warning when the
 heaviest unit's existing lines exceed four times the lightest (new-file
