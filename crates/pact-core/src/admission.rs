@@ -39,11 +39,39 @@ pub struct AdmissionPolicy {
 
 impl Default for AdmissionPolicy {
     fn default() -> Self {
+        Self::for_runtime(crate::LaneRuntime::Process)
+    }
+}
+
+impl AdmissionPolicy {
+    /// Reserve for a lane that is its own agent CLI process: a lean agent
+    /// at 0.3-0.45 GB plus the 1.5-1.9 GB test run or build it later
+    /// triggers (issue #320).
+    pub const PROCESS_LANE_RESERVE_MB: u64 = 1200;
+    /// Reserve for a lane that is a session inside a shared agent process
+    /// (issue #332). The agent's own memory is shared across lanes, so
+    /// what a lane still grows into is its test run or build. Measured in
+    /// benchmark arm Q: eight such lanes peaked at 3.9 GB together, about
+    /// 490 MB each at the batch's peak, with 3.3 GB still free; the
+    /// process default of 1200 would have throttled that run to three or
+    /// four lanes for no reason.
+    pub const ACP_LANE_RESERVE_MB: u64 = 400;
+
+    /// The `per_lane_reserve_mb` default for a runtime.
+    pub fn default_per_lane_reserve_mb(runtime: crate::LaneRuntime) -> u64 {
+        match runtime {
+            crate::LaneRuntime::Process => Self::PROCESS_LANE_RESERVE_MB,
+            crate::LaneRuntime::Acp => Self::ACP_LANE_RESERVE_MB,
+        }
+    }
+
+    /// The default policy with the reserve sized for `runtime`.
+    pub fn for_runtime(runtime: crate::LaneRuntime) -> Self {
         Self {
             max_concurrent: 2,
             min_free_mem_mb: 1500,
             stagger: Duration::from_millis(2000),
-            per_lane_reserve_mb: 1200,
+            per_lane_reserve_mb: Self::default_per_lane_reserve_mb(runtime),
         }
     }
 }
@@ -213,6 +241,26 @@ mod tests {
 
     fn policy_with_reserve(max: usize, floor: u64, reserve: u64) -> AdmissionPolicy {
         AdmissionPolicy { max_concurrent: max, min_free_mem_mb: floor, stagger: Duration::ZERO, per_lane_reserve_mb: reserve }
+    }
+
+    /// Issue #332: the reserve is about what a lane still grows into. A
+    /// process lane grows by a whole agent plus its test run; an ACP lane
+    /// shares the agent and grows by its test run only. Replaying arm Q
+    /// (8 lanes, 5.7 GB free at launch, 500 MB floor): the process
+    /// default admits 5 and queues 3, the ACP default admits all 8,
+    /// which is what the machine measurably had room for (3.3 GB still
+    /// free at the batch's peak).
+    #[test]
+    fn the_default_reserve_depends_on_the_lane_runtime_and_the_acp_one_admits_arm_q() {
+        assert_eq!(AdmissionPolicy::default().per_lane_reserve_mb, AdmissionPolicy::PROCESS_LANE_RESERVE_MB);
+        assert_eq!(AdmissionPolicy::for_runtime(crate::LaneRuntime::Acp).per_lane_reserve_mb, AdmissionPolicy::ACP_LANE_RESERVE_MB);
+
+        let free_at_launch = 5700;
+        let process = AdmissionPolicy { max_concurrent: 8, min_free_mem_mb: 500, ..AdmissionPolicy::for_runtime(crate::LaneRuntime::Process) };
+        let acp = AdmissionPolicy { max_concurrent: 8, min_free_mem_mb: 500, ..AdmissionPolicy::for_runtime(crate::LaneRuntime::Acp) };
+        let admitted = |p: &AdmissionPolicy| (0..8).take_while(|running| decide(*running, p, free_at_launch) == AdmissionDecision::Admit).count();
+        assert_eq!(admitted(&process), 5, "process lanes: 5700 - 5 x 1200 < 500 queues the 6th");
+        assert_eq!(admitted(&acp), 8, "every ACP lane fits: 5700 - 7 x 400 = 2900 >= 500");
     }
 
     /// Issue #320, the measured case: 8 lanes admitted against ~5 GB free
