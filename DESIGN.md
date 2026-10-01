@@ -1137,6 +1137,76 @@ lanes; the batch workspace stands for the tree, so a real overlap between
 a shared-tree batch and some other active workspace is still reported,
 once, against the batch id. Same dedup `merge_all` already applies.
 
+### ACP lane runtime: one agent process, one session per lane (issue #331)
+
+Parts 1 and 2 (#329, #330) built the pieces; this wires them into
+`spawn`/`spawn-many` as `--runtime acp` (`SpawnOptions::runtime`,
+`pact.toml` `defaults.runtime`). The decision and the numbers behind it
+are in the pact-acp section and issue #306: eight cold `copilot -p`
+processes versus eight sessions in one `copilot --acp` is 50.9 s and
+2,456 MB versus 5.6 s and 445 MB on the same trivial task, and that
+per-process startup is the whole remaining gap between pact's shared-tree
+run (31.3 min) and Copilot's own in-process sub-agents (15.8 min).
+
+Shape, chosen so nothing above the run phase changes. `spawn_many`
+starts an `AcpBatch` before any lane thread: the in-process coordination
+server (pact-coord's HTTP mode on its own two-thread tokio runtime, the
+one runtime pact-core owns) and one `AcpRuntime` per agent kind in the
+batch, each with one lean home for the whole process. A failure there is
+one batch-level error for every task, like a shared-tree batch that
+cannot be created. Each lane thread then does exactly what it did
+before up to the run phase (workspace or lane creation, dependency prep,
+the shared-tree preamble) and calls `run_lane_acp` instead of
+`run_and_stream`: register the lane's coord route and get its URL, take
+the admission slot, `session/new` with `cwd` = the lane's path and
+`mcpServers` = that URL, record the session id (as both `session_id` and
+`acp_session`) and the shared process's pid, then `prompt` and translate
+every `session/update` into the `AgentEvent`s the process path emits
+(`agent_message_chunk` to `AssistantText`, `tool_call` to `ToolUse`,
+everything else to `Other`, never dropped), appending each raw update to
+the same per-lane JSONL log. `stopReason` becomes the run outcome
+(`end_turn` is the only success; the summary is `stop reason <x>`, the
+counterpart of the process path's `exit code <n>`), the `-run.json`
+carries `runtime: "acp"` and the shared process's resolved launch, and
+the batch shuts the processes and the server down after the last lane
+joins. Verified live against Copilot CLI 1.0.90 through the real `pact`
+binary: two shared-tree lanes in one process, each calling
+`pact-coord-claim_files` and `release_files` through its own route,
+`pact history` showing `coord_connect`/`claim`/`release` per lane id,
+both files correct, 10.5 s end to end.
+
+Coordination status under ACP is read from the coordination database
+rather than parsed from the agent: the agent streams no MCP connection
+events over ACP, but pact-coord logs `coord_connect` on every
+`initialize` (#235), so "did this lane's MCP client ever reach the
+server" is a lookup of `connected_agent_ids`, which is more reliable
+than the event-stream status the process path has to settle on.
+
+Teardown is the one place the shared process changes semantics. A lane's
+`agent_pid` names the shared process while it runs, and killing that pid
+would take every other lane with it. So `Workspace` gained `acp_session`,
+and `remove_workspace`'s `stop_agent` takes a different path for a lane
+that has one: it writes `meta/<id>.cancel` naming the session, and the
+`spawn-many` process, which alone holds the agent's stdin, runs a watcher
+thread per lane that turns the marker into `session/cancel`. `stop_agent`
+waits up to 5 s for the marker to be consumed before removing the tree
+(the counterpart of `kill_if_alive` waiting for a killed pid to vanish),
+clears an unconsumed marker rather than leaving stale state, and does
+nothing at all when the lane's pid is cleared (its run ended) or dead,
+which the first live teardown showed mattered: without that check every
+finished lane paid the 5 s wait for a process that had already exited.
+The test for this uses the test process's own pid as the shared one; a
+regression that killed it would never reach its assertions.
+
+Known limits, deliberately not addressed here: `--max-concurrent` and
+the memory reserve still assume one process per lane (#332 makes the
+reserve runtime-aware); only Copilot has an ACP mode today, so a mixed
+batch under `acp` fails up front with the agent named; cancellation
+depends on the agent honouring `session/cancel` mid-turn, which the
+fake cannot exercise and the real CLI has not been measured on.
+`process` stays the default until arm Q of the benchmark is run under
+`acp`.
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched

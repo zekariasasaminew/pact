@@ -172,6 +172,14 @@ enum Command {
         #[arg(long)]
         no_lean: bool,
 
+        /// How the agent runs (issue #331): `process` (its own agent CLI
+        /// process, the original shape) or `acp` (a session inside one
+        /// shared agent process speaking the Agent Client Protocol;
+        /// Copilot CLI only for now). Falls back to `pact.toml`'s
+        /// `defaults.runtime`, then `process`.
+        #[arg(long)]
+        runtime: Option<String>,
+
         /// Explicit workspace name -- drives the workspace id/branch
         /// directly (slugified, e.g. "Add Pagination" -> "add-pagination")
         /// instead of the default task-text-slug-plus-random-suffix
@@ -330,6 +338,17 @@ enum Command {
         /// lanes' leases are the only thing stopping a real collision.
         #[arg(long, requires = "shared_tree")]
         allow_overlap: bool,
+
+        /// How each lane's agent runs (issue #331): `process` (one agent
+        /// CLI process per lane, the original shape) or `acp` (one shared
+        /// agent process per agent kind hosting one Agent Client Protocol
+        /// session per lane, with pact's coordination server reached over
+        /// HTTP; Copilot CLI only for now). Measured on a trivial task:
+        /// eight lanes took 50.9 s and 2.4 GB as processes, 5.6 s and
+        /// 0.45 GB as sessions. Falls back to `pact.toml`'s
+        /// `defaults.runtime`, then `process`.
+        #[arg(long)]
+        runtime: Option<String>,
 
         /// Explicit workspace name for the Nth --task, repeatable in the
         /// same order as --task -- same fix as `spawn --name` (issue
@@ -687,12 +706,14 @@ fn main() -> Result<()> {
             deps,
             no_deps,
             no_lean,
+            runtime,
             name,
         } => {
             if let Some(n) = &name {
                 validate_workspace_name(n)?;
             }
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
+            let runtime = resolve_runtime(runtime, &config)?;
             let agent = resolve_default_agent(agent, &config).unwrap_or_else(|| "claude".to_string());
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let kind = AgentKind::parse(&agent).ok_or_else(|| {
@@ -717,6 +738,7 @@ fn main() -> Result<()> {
                     !no_lean,
                 )?;
                 print_spawn_preview(&preview, deps);
+                print_runtime_preview(runtime, &[kind], 1);
                 return Ok(());
             }
 
@@ -740,6 +762,7 @@ fn main() -> Result<()> {
                 lean: !no_lean,
                 admission: pact_core::AdmissionPolicy::default(),
                 shared_tree: false,
+                runtime,
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -771,9 +794,11 @@ fn main() -> Result<()> {
             per_lane_reserve_mb,
             shared_tree,
             allow_overlap,
+            runtime,
             names,
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
+            let runtime = resolve_runtime(runtime, &config)?;
             let admission = pact_core::AdmissionPolicy {
                 max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
                 min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
@@ -905,6 +930,8 @@ fn main() -> Result<()> {
                     println!("task #{index} ({}):", agent_label(task.agent));
                     print_spawn_preview(&preview, deps);
                 }
+                let agents: Vec<AgentKind> = batch.iter().map(|t| t.agent).collect();
+                print_runtime_preview(runtime, &agents, batch.len());
                 if estimate_cost {
                     print_cost_estimate(&batch);
                 }
@@ -919,6 +946,7 @@ fn main() -> Result<()> {
                 lean: !no_lean,
                 admission,
                 shared_tree,
+                runtime,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -1001,6 +1029,9 @@ fn main() -> Result<()> {
                 println!("    task: {}", workspace.task);
                 if let Some(batch) = &workspace.shared_batch {
                     println!("    shared tree: lane of batch {batch} (same worktree as its sibling lanes; commit-all/merge-all treat the batch as one workspace)");
+                }
+                if let Some(session) = &workspace.acp_session {
+                    println!("    runtime: acp session {session} inside the shared agent process (teardown cancels the session, never the process)");
                 }
                 if !workspace.linked_paths.is_empty() {
                     println!("    linked (shared with repo root): {}", workspace.linked_paths.join(", "));
@@ -2125,7 +2156,8 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # max_concurrent = 2  # spawn-many: agents running at once (workspace prep is not counted)\n\
          # min_free_mem_mb = 1500  # spawn-many: wait for this much free memory before each launch; 0 disables\n\
          # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n\
-         # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; 0 disables\n"
+         # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; 0 disables\n\
+         # runtime = \"process\"  # process (one agent CLI per lane) or acp (one shared Copilot process, one session per lane)\n"
     );
 
     std::fs::write(&config_path, contents)
@@ -2224,6 +2256,38 @@ fn resolve_deps_mode(
             .parse::<pact_core::DepsMode>()
             .map_err(|err| anyhow::anyhow!("--deps: {err}")),
         None => Ok(pact_core::DepsMode::Auto),
+    }
+}
+
+/// `--runtime`, then `pact.toml`'s `defaults.runtime`, then `process`
+/// (issue #331). An unknown value is reported against the flag.
+fn resolve_runtime(flag: Option<String>, config: &PactConfig) -> Result<pact_core::LaneRuntime> {
+    match flag.as_deref().or_else(|| config.default_runtime()) {
+        Some(value) => pact_core::LaneRuntime::parse(value)
+            .ok_or_else(|| anyhow::anyhow!("--runtime: unknown value '{value}' (expected process or acp)")),
+        None => Ok(pact_core::LaneRuntime::Process),
+    }
+}
+
+/// The dry-run line for the lane runtime: under `acp`, how many shared
+/// processes the batch would start and for which agents, so the one-
+/// process-per-lane assumption behind `--max-concurrent` and the memory
+/// flags is visibly not in force.
+fn print_runtime_preview(runtime: pact_core::LaneRuntime, agents: &[AgentKind], lanes: usize) {
+    match runtime {
+        pact_core::LaneRuntime::Process => println!("runtime: process (one agent CLI process per lane)"),
+        pact_core::LaneRuntime::Acp => {
+            let mut kinds: Vec<&str> = agents.iter().map(|k| agent_label(*k)).collect();
+            kinds.sort_unstable();
+            kinds.dedup();
+            println!(
+                "runtime: acp ({} shared agent process{} for {lanes} lane{}: {}; coordination served over HTTP from this process)",
+                kinds.len(),
+                if kinds.len() == 1 { "" } else { "es" },
+                if lanes == 1 { "" } else { "s" },
+                kinds.join(", ")
+            );
+        }
     }
 }
 
@@ -2621,6 +2685,7 @@ mod tests {
                 linked_paths: Vec::new(),
                 session_id: None,
                 shared_batch: None,
+                acp_session: None,
             },
             dirty: Some(false),
             agent_alive,

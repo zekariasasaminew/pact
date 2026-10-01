@@ -104,7 +104,7 @@ graph TD
     Core --> VCS
     Core --> Deps
     Core --> Agents
-    Core -.-> |"--runtime acp (issue #331)"| Acp
+    Core -->|"--runtime acp"| Acp
     Deps -.reuses.-> VCS
     Core -.writes coord config for.-> Coord
     Agent2["chosen agent CLI (child process)"] -.launches as its own child, over stdio.-> Coord
@@ -114,9 +114,9 @@ graph TD
 `pact-coord` is not called in-process by `pact-core`
 at all -- the orchestrator only writes the config file that tells the
 agent CLI to launch it itself, over stdio, as its own separate process.
-(The ACP lane runtime, issue #306, serves it in-process over HTTP instead;
-`pact-acp` is the client side of that runtime and is not wired into
-`spawn-many` yet.)
+Under `--runtime acp` (issue #331) the orchestrator instead serves it
+in-process over HTTP and `pact-acp` drives one shared agent process with
+one session per lane.
 
 Sequence diagrams for the spawn/teardown and cross-agent coordination
 flows, plus the on-disk state layout, are in the Architecture reference
@@ -307,6 +307,26 @@ same files.
 pact spawn-many --agent copilot --shared-tree \
   --task-file briefs/api-tests.md --task-file briefs/ui-tests.md --task-file briefs/lib-tests.md
 pact commit-all
+```
+
+**`--runtime acp` runs every lane as a session inside one shared agent
+process** instead of one agent CLI process per lane (issue #331, Copilot
+CLI only for now). The agent process speaks the [Agent Client
+Protocol](https://agentclientprotocol.com) (`copilot --acp`); pact opens
+one session per lane with the lane's worktree as its `cwd` and the
+coordination server reachable over HTTP at a per-lane URL, so each lane
+still has its own id, log, leases and run record. Measured on a trivial
+task: eight lanes took 50.9 s and 2.4 GB as eight cold processes, 5.6 s
+and 0.45 GB as eight sessions in one process, since per-process startup
+is all of the former. `pact list` shows `runtime: acp session <id>` for
+such a lane, and tearing one down cancels its session rather than
+killing the shared process. Combine freely with `--shared-tree`.
+`defaults.runtime` in `pact.toml` sets the default; `process` remains the
+default until the full benchmark is re-run under `acp`.
+
+```sh
+pact spawn-many --agent copilot --runtime acp --shared-tree \
+  --task-file briefs/api-tests.md --task-file briefs/ui-tests.md --task-file briefs/lib-tests.md
 ```
 
 **Neither `spawn` nor `spawn-many` commits anything.** An agent's changes

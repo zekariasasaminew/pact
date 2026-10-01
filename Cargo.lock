@@ -1175,6 +1175,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "dirs",
+ "pact-acp",
  "pact-agents",
  "pact-coord",
  "pact-core",
@@ -1215,6 +1216,7 @@ name = "pact-core"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "pact-acp",
  "pact-agents",
  "pact-coord",
  "pact-deps",
@@ -1222,6 +1224,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "tokio",
  "tracing",
  "uuid",
 ]

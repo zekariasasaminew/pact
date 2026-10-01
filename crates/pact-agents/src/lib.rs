@@ -21,8 +21,25 @@ mod supervisor;
 mod windows_shim;
 
 pub use adapter::{
-    adapter, resolve_safety_profile, AgentAdapter, AgentKind, CoordConfig, LaunchRequest, LaunchSpec, SafetyProfile,
+    adapter, resolve_safety_profile, AcpLaunchRequest, AgentAdapter, AgentKind, CoordConfig, LaunchRequest, LaunchSpec,
+    SafetyProfile,
 };
 pub use event::AgentEvent;
 pub use process::{run_and_stream, RunOutcome};
 pub use supervisor::Supervisor;
+
+/// What to spawn directly for `program`, without a shell: on Windows an
+/// npm `.cmd` shim resolves to its `node.exe` plus script (see
+/// `windows_shim`), a plain `.exe` to itself; elsewhere the name is used
+/// as is. Returns the program and the arguments that must precede the
+/// caller's own. For callers that drive the process themselves (the ACP
+/// runtime, issue #331) rather than through `run_and_stream`.
+pub fn resolve_program(program: &str) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        if let Some(resolved) = windows_shim::resolve(program) {
+            return (resolved.program.to_string_lossy().into_owned(), resolved.leading_args);
+        }
+    }
+    (program.to_string(), Vec::new())
+}

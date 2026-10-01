@@ -14,6 +14,7 @@
 //! per-lane facade pact-core calls from its lane threads).
 
 pub mod client;
+pub mod fake;
 pub mod protocol;
 pub mod runtime;
 

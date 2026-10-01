@@ -8,12 +8,20 @@ license.workspace = true
 name = "pact"
 path = "src/main.rs"
 
+# Test support (issue #331): pact-acp's fake Agent Client Protocol agent, built
+# here under its own name so the e2e tests can put it on PATH as `copilot` and
+# exercise --runtime acp without a real agent.
+[[bin]]
+name = "fake_acp_copilot"
+path = "src/bin/fake_acp_copilot.rs"
+
 [dependencies]
 pact-core.workspace = true
 pact-agents.workspace = true
 pact-coord.workspace = true
 pact-deps.workspace = true
 pact-vcs.workspace = true
+pact-acp.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true

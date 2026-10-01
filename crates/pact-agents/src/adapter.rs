@@ -101,8 +101,26 @@ pub trait AgentAdapter {
         LaunchSpec { program, args, env: Vec::new() }
     }
 
+    /// How to start this CLI once as an Agent Client Protocol server
+    /// hosting many lane sessions (the ACP lane runtime, issue #331), or
+    /// `None` when the CLI has no ACP mode. No task and no coordination
+    /// config here: both are per session, handed over in `session/new`.
+    fn build_acp_launch(&self, _request: &AcpLaunchRequest<'_>) -> Option<LaunchSpec> {
+        None
+    }
+
     /// Parses one raw output line into zero or more normalized events.
     fn parse_line(&self, line: &str) -> Vec<AgentEvent>;
+}
+
+/// What an adapter needs to start its CLI as an ACP server for a whole
+/// batch (issue #331): a pact-owned config home for the one shared
+/// process, and the lean switch.
+pub struct AcpLaunchRequest<'a> {
+    /// `<state>/homes/<batch>`: one relocated config home for the shared
+    /// process, not one per lane.
+    pub agent_home: &'a Path,
+    pub lean: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

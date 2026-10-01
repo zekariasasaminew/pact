@@ -1,9 +1,13 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod acp_runtime;
 mod admission;
+pub use acp_runtime::LaneRuntime;
 pub use admission::{available_memory_mb, decide, Admission, AdmissionDecision, AdmissionPolicy};
 
+use acp_runtime::AcpBatch;
 use pact_agents::{AgentEvent, AgentKind, CoordConfig, LaunchRequest, RunOutcome, Supervisor};
 pub use pact_deps::DepsMode;
 use pact_vcs::{Workspace, WorkspaceDiff, WorkspaceManager};
@@ -68,6 +72,11 @@ pub struct RunMetadata {
     /// further coordination tool call for the rest of the run). See
     /// DESIGN.md ("pact-core > Structured run metadata", issue #201).
     pub coord_status: Option<String>,
+    /// Which lane runtime ran this: `process` (its own agent CLI process)
+    /// or `acp` (a session inside a shared agent process, issue #331).
+    /// Empty for records written before the field existed.
+    #[serde(default)]
+    pub runtime: String,
     /// Whether the workspace's working tree actually changed as a result
     /// of this run, per real `git status` -- not the agent's own
     /// self-reported success/exit-code, which can't distinguish "did
@@ -171,6 +180,8 @@ pub struct SpawnOptions<'a> {
     /// -- see DESIGN.md ("pact-core > Shared-tree batches"). Ignored by
     /// single `spawn`.
     pub shared_tree: bool,
+    /// How each lane's agent runs -- see `LaneRuntime` (issue #331).
+    pub runtime: LaneRuntime,
 }
 
 impl Default for SpawnOptions<'_> {
@@ -182,6 +193,7 @@ impl Default for SpawnOptions<'_> {
             lean: true,
             admission: AdmissionPolicy::default(),
             shared_tree: false,
+            runtime: LaneRuntime::default(),
         }
     }
 }
@@ -561,10 +573,31 @@ impl Orchestrator {
         task: &str,
         name: Option<&str>,
         options: &SpawnOptions<'_>,
-        on_event: impl FnMut(&AgentEvent),
+        mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let supervisor = Supervisor::new();
-        self.spawn_with_supervisor(&supervisor, agent, task, name, options, None, None, on_event)
+        let acp = match options.runtime {
+            LaneRuntime::Process => None,
+            LaneRuntime::Acp => Some(self.start_acp_batch(&[agent], options, &mut on_event)?),
+        };
+        let result =
+            self.spawn_with_supervisor(&supervisor, agent, task, name, options, None, None, acp.as_ref(), on_event);
+        if let Some(acp) = acp {
+            acp.shutdown();
+        }
+        result
+    }
+
+    /// One shared agent process per agent kind plus the in-process
+    /// coordination server, for the ACP lane runtime (issue #331).
+    fn start_acp_batch(
+        &self,
+        agents: &[AgentKind],
+        options: &SpawnOptions<'_>,
+        on_event: &mut impl FnMut(&AgentEvent),
+    ) -> Result<AcpBatch> {
+        let homes_dir = self.workspaces.state_dir().join("homes");
+        AcpBatch::start(&self.repo_root, &homes_dir, agents, options.lean, on_event)
     }
 
     /// Runs every `(agent, task)` pair in `tasks` concurrently, one
@@ -610,7 +643,33 @@ impl Orchestrator {
         }
         let shared_batch = shared.and_then(Result::ok);
 
-        std::thread::scope(|scope| {
+        // ACP runtime (issue #331): the shared agent process(es) and the
+        // coordination server come up once, before any lane, and a failure
+        // here is one batch-level error for the same reason as above.
+        let acp = match options.runtime {
+            LaneRuntime::Process => None,
+            LaneRuntime::Acp => {
+                let agents: Vec<AgentKind> = tasks.iter().map(|t| t.agent).collect();
+                let first_agent = tasks.first().map(|t| t.agent).unwrap_or(AgentKind::Copilot);
+                match self.start_acp_batch(&agents, options, &mut |event| on_event(0, &first_agent, event)) {
+                    Ok(batch) => Some(batch),
+                    Err(err) => {
+                        let message = format!("ACP runtime could not be started: {err:#}");
+                        return tasks
+                            .iter()
+                            .enumerate()
+                            .map(|(index, spec)| SpawnManyOutcome {
+                                index,
+                                agent: spec.agent,
+                                result: Err(anyhow::anyhow!("{message}")),
+                            })
+                            .collect();
+                    }
+                }
+            }
+        };
+
+        let outcomes = std::thread::scope(|scope| {
             // Index and agent are captured here, outside the closure's
             // return value, specifically so a panic (which loses whatever
             // the closure would have returned) still leaves enough to
@@ -623,6 +682,7 @@ impl Orchestrator {
                     let admission = &admission;
                     let on_event = &on_event;
                     let shared_batch = shared_batch.as_ref();
+                    let acp = acp.as_ref();
                     let handle = scope.spawn(move || {
                         self.spawn_with_supervisor(
                             supervisor,
@@ -632,6 +692,7 @@ impl Orchestrator {
                             options,
                             Some(admission),
                             shared_batch,
+                            acp,
                             |event| on_event(index, &spec.agent, event),
                         )
                     });
@@ -664,7 +725,11 @@ impl Orchestrator {
                     }
                 })
                 .collect()
-        })
+        });
+        if let Some(acp) = acp {
+            acp.shutdown();
+        }
+        outcomes
     }
 
     /// Previews what `spawn`/`spawn-many` would do for one task -- the
@@ -700,6 +765,7 @@ impl Orchestrator {
             linked_paths: Vec::new(),
             session_id: None,
             shared_batch: None,
+            acp_session: None,
         };
         let coord_name = adapter.coord_server_name();
         let coord = self
@@ -820,6 +886,7 @@ impl Orchestrator {
         options: &SpawnOptions<'_>,
         admission: Option<&Admission>,
         shared_batch: Option<&Workspace>,
+        acp: Option<&AcpBatch>,
         mut on_event: impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let workspace = match shared_batch {
@@ -835,8 +902,25 @@ impl Orchestrator {
             }
         };
         let adapter = pact_agents::adapter(agent);
-
         let coord_name = adapter.coord_server_name();
+
+        // A shared-tree lane's brief gets pact's one injected preamble: the
+        // other agents are in this same tree, so file discipline and the
+        // coordination tools stop being advisory niceties and become the
+        // thing that keeps lanes from overwriting each other (issue #315).
+        let lane_task;
+        let task = match shared_batch {
+            Some(batch) => {
+                lane_task = shared_tree_preamble(&workspace.id, batch, coord_name) + task;
+                lane_task.as_str()
+            }
+            None => task,
+        };
+
+        if let Some(acp) = acp {
+            return self.run_lane_acp(acp, agent, workspace, task, coord_name, admission, &mut on_event);
+        }
+
         let coord = match self.coord_config(&workspace, coord_name, options.coord_override) {
             Ok(c) => Some(c),
             Err(err) => {
@@ -855,18 +939,6 @@ impl Orchestrator {
             tracing::warn!("failed to record session id for workspace {}: {err:#}", workspace.id);
         }
         let agent_home = self.agent_home_path(&workspace.id);
-        // A shared-tree lane's brief gets pact's one injected preamble: the
-        // other agents are in this same tree, so file discipline and the
-        // coordination tools stop being advisory niceties and become the
-        // thing that keeps lanes from overwriting each other (issue #315).
-        let lane_task;
-        let task = match shared_batch {
-            Some(batch) => {
-                lane_task = shared_tree_preamble(&workspace.id, batch, coord_name) + task;
-                lane_task.as_str()
-            }
-            None => task,
-        };
         let launch = adapter.build_launch(&LaunchRequest {
             task,
             safety_override: safety.as_deref(),
@@ -956,12 +1028,157 @@ impl Orchestrator {
                 Err(err) => format!("failed to run: {err:#}"),
             },
             coord_status: coord_last_status,
+            runtime: LaneRuntime::Process.as_str().to_string(),
             // Fails closed (assumes touched) on a `git status` error,
             // matching `validate_arbiter_scope`'s existing "can't verify
             // -> don't claim clean" posture rather than risking a false
             // "nothing happened" read.
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             log_path: log_path.clone(),
+        };
+        let run_meta_path = self.workspaces.state_dir().join("meta").join(format!("{}-run.json", workspace.id));
+        if let Err(err) = std::fs::write(&run_meta_path, serde_json::to_vec_pretty(&run_metadata).unwrap_or_default()) {
+            tracing::warn!("failed to persist run metadata to {}: {err:#}", run_meta_path.display());
+        }
+
+        let outcome = run_result?;
+        Ok((workspace, outcome))
+    }
+
+    /// The ACP lane runtime's run phase (issue #331): this lane is one
+    /// session inside the batch's shared agent process. Mirrors the
+    /// process path's bookkeeping exactly (admission slot, pid and session
+    /// id in metadata, per-lane JSONL log, `-run.json`, coord check) so
+    /// nothing downstream can tell the runtimes apart except by the
+    /// `runtime` field.
+    #[allow(clippy::too_many_arguments)]
+    fn run_lane_acp(
+        &self,
+        acp: &AcpBatch,
+        agent: AgentKind,
+        workspace: Workspace,
+        task: &str,
+        coord_name: &str,
+        admission: Option<&Admission>,
+        on_event: &mut impl FnMut(&AgentEvent),
+    ) -> Result<(Workspace, RunOutcome)> {
+        let runtime = acp
+            .runtime(agent)
+            .ok_or_else(|| anyhow::anyhow!("no ACP process was started for agent {}", agent_kind_name(agent)))?;
+        let launch = acp.launch(agent).cloned().unwrap_or(pact_agents::LaunchSpec {
+            program: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+        });
+        let log_path = self.workspaces.state_dir().join("logs").join(format!("{}.jsonl", workspace.id));
+        let coord_url = acp.coord.add_lane(&workspace.id, &workspace.path);
+        let marker = self.workspaces.cancel_marker_path(&workspace.id);
+        let _ = std::fs::remove_file(&marker);
+
+        let slot = admission.map(|a| a.acquire(|why| on_event(&AgentEvent::Phase(why.to_string()))));
+        let started_at = unix_now();
+        on_event(&AgentEvent::Phase("running agent (ACP session in the shared process)".to_string()));
+
+        let mut session_id: Option<String> = None;
+        let run_result: Result<RunOutcome> = (|| {
+            let mut session = runtime
+                .new_session(&workspace.path, vec![pact_acp::McpServer::http(coord_name, coord_url)])
+                .map_err(|err| anyhow::anyhow!("opening the lane's ACP session: {err}"))?;
+            session_id = Some(session.id.clone());
+            on_event(&AgentEvent::Init { session_id: session.id.clone() });
+            if let Err(err) = self.workspaces.set_session_id(&workspace.id, &session.id) {
+                tracing::warn!("failed to record session id for workspace {}: {err:#}", workspace.id);
+            }
+            if let Err(err) = self.workspaces.set_acp_session(&workspace.id, Some(&session.id)) {
+                tracing::warn!("failed to record ACP session for workspace {}: {err:#}", workspace.id);
+            }
+            if let Err(err) = self.workspaces.set_agent_pid(&workspace.id, Some(runtime.pid())) {
+                tracing::warn!("failed to record agent pid for workspace {}: {err:#}", workspace.id);
+            }
+            if let Some(parent) = log_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .with_context(|| format!("opening log file {}", log_path.display()))?;
+
+            // Teardown from another process cannot reach this session; it
+            // leaves a marker and this watcher turns it into session/cancel
+            // (see pact-vcs `stop_agent`).
+            let stop_watching = std::sync::atomic::AtomicBool::new(false);
+            let lane_session = session.id.clone();
+            let stop = std::thread::scope(|scope| {
+                let watcher = scope.spawn(|| {
+                    while !stop_watching.load(std::sync::atomic::Ordering::Relaxed) {
+                        if marker.exists() {
+                            tracing::info!("cancel marker found for {}; cancelling its ACP session", workspace.id);
+                            let _ = runtime.cancel_by_id(&lane_session);
+                            let _ = std::fs::remove_file(&marker);
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                });
+                let outcome = runtime.prompt(&mut session, task, |update| {
+                    let line = serde_json::json!({ "sessionId": update.session_id, "update": update.raw });
+                    let _ = writeln!(log, "{line}");
+                    on_event(&acp_runtime::event_for_update(&update));
+                });
+                stop_watching.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = watcher.join();
+                outcome
+            });
+            if let Err(err) = runtime.close(&session) {
+                tracing::debug!("closing ACP session for {}: {err}", workspace.id);
+            }
+            let stop = stop.map_err(|err| anyhow::anyhow!("{err}"))?;
+            let summary = format!("stop reason {}", stop.as_str());
+            on_event(&AgentEvent::Result { success: stop.is_success(), summary: summary.clone() });
+            Ok(RunOutcome { success: stop.is_success(), summary })
+        })();
+        drop(slot);
+        let ended_at = unix_now();
+        acp.coord.remove_lane(&workspace.id);
+
+        // The agent streams no MCP status over ACP; the coordination
+        // database itself says whether this lane's `initialize` arrived.
+        let coord_status = match pact_coord::status(&self.repo_root) {
+            Ok(status) if status.connected_agent_ids.contains(&workspace.id) => Some("connected".to_string()),
+            Ok(_) => Some("never connected".to_string()),
+            Err(_) => None,
+        };
+        on_event(&AgentEvent::CoordStatus {
+            name: coord_name.to_string(),
+            status: coord_status.clone().unwrap_or_else(|| "unknown".to_string()),
+        });
+        if let Some(message) = coord_warning(true, coord_status.as_deref(), coord_name) {
+            tracing::warn!("workspace {}: {message}", workspace.id);
+        }
+        if let Err(err) = self.workspaces.set_agent_pid(&workspace.id, None) {
+            tracing::warn!("failed to clear agent pid for workspace {}: {err:#}", workspace.id);
+        }
+
+        let run_metadata = RunMetadata {
+            workspace_id: workspace.id.clone(),
+            agent: agent_kind_name(agent).to_string(),
+            program: launch.program,
+            args: launch.args,
+            env: launch.env,
+            session_id,
+            cwd: workspace.path.clone(),
+            started_at,
+            ended_at,
+            exit_success: run_result.as_ref().map(|r| r.success).unwrap_or(false),
+            summary: match &run_result {
+                Ok(run) => run.summary.clone(),
+                Err(err) => format!("failed to run: {err:#}"),
+            },
+            coord_status,
+            runtime: LaneRuntime::Acp.as_str().to_string(),
+            files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
+            log_path,
         };
         let run_meta_path = self.workspaces.state_dir().join("meta").join(format!("{}-run.json", workspace.id));
         if let Err(err) = std::fs::write(&run_meta_path, serde_json::to_vec_pretty(&run_metadata).unwrap_or_default()) {
@@ -1851,6 +2068,7 @@ mod tests {
             linked_paths: Vec::new(),
             session_id: None,
             shared_batch: None,
+            acp_session: None,
         }
     }
 
@@ -2373,6 +2591,7 @@ mod tests {
             exit_success: true,
             summary: "Created foo.rs".to_string(),
             coord_status: Some("connected".to_string()),
+            runtime: String::new(),
             files_touched: true,
             log_path: PathBuf::from("/tmp/state/logs/ws-1.jsonl"),
         };
@@ -2417,6 +2636,7 @@ mod tests {
             exit_success: false,
             summary: "failed to run: spawn error".to_string(),
             coord_status: None,
+            runtime: String::new(),
             files_touched: false,
             log_path: PathBuf::from("/tmp/state/logs/ws-2.jsonl"),
         };
