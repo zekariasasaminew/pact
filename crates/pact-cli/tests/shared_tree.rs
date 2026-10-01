@@ -224,6 +224,50 @@ fn teardown_of_a_lane_keeps_the_worktree_and_the_batch_refuses_until_lanes_are_g
 }
 
 #[test]
+fn a_bare_sweep_after_commit_all_keeps_the_batch_branch_instead_of_orphaning_its_commit() {
+    // Issue #325: this is the exact sequence that orphaned the arm P
+    // benchmark result. Every lane was clean after `commit-all`, so a
+    // bare `teardown` swept the lanes, then the batch, then force-deleted
+    // the only branch holding the batch's commit.
+    let repo = init_repo("sweep-after-commit");
+    let shim = shim_dir();
+
+    let task_a = script(&[("alpha.txt", "ALPHA")], "a");
+    let task_b = script(&[("beta.txt", "BETA")], "b");
+    let spawn = pact(
+        &repo,
+        &shim,
+        &["spawn-many", "--agent", "claude", "--shared-tree", "--name", "lane-a", "--name", "lane-b", "--task", &task_a, "--task", &task_b],
+    );
+    assert!(spawn.status.success(), "spawn-many failed: {}", stderr(&spawn));
+    let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
+    let batch = manager.list_workspaces().unwrap().into_iter().find(|w| w.shared_batch.is_none()).unwrap();
+    let commit = pact(&repo, &shim, &["commit-all"]);
+    assert!(commit.status.success(), "commit-all failed: {}", stderr(&commit));
+    let tip = run_git(&repo, &["rev-parse", &batch.branch]);
+
+    let sweep = pact(&repo, &shim, &["teardown"]);
+    assert_eq!(sweep.status.code(), Some(1), "the sweep must report the refused batch:\nstdout: {}", stdout(&sweep));
+    let text = stdout(&sweep);
+    assert!(text.contains("reachable from no other branch"), "the refusal must say why: {text}");
+    assert!(text.contains("--keep-branch"), "the refusal must name the way out: {text}");
+    assert!(batch.path.exists(), "a refused teardown must leave the worktree in place");
+    assert_eq!(run_git(&repo, &["rev-parse", &batch.branch]), tip, "the batch branch must still point at the commit");
+    let remaining: Vec<String> = manager.list_workspaces().unwrap().into_iter().map(|w| w.id).collect();
+    assert_eq!(remaining, vec![batch.id.clone()], "lanes drop their metadata, the batch stays: {remaining:?}");
+
+    let kept = pact(&repo, &shim, &["teardown", "--keep-branch"]);
+    assert!(kept.status.success(), "--keep-branch should proceed:\nstdout: {}\nstderr: {}", stdout(&kept), stderr(&kept));
+    assert!(!batch.path.exists(), "the worktree goes");
+    assert_eq!(run_git(&repo, &["rev-parse", &batch.branch]), tip, "the branch and its commit survive");
+    let files = run_git(&repo, &["ls-tree", "--name-only", &batch.branch]);
+    assert!(files.contains("alpha.txt") && files.contains("beta.txt"), "the work is still on the branch: {files}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn merge_all_treats_a_shared_tree_batch_as_one_workspace() {
     let repo = init_repo("merge");
     let shim = shim_dir();

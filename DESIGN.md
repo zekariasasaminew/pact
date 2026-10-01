@@ -244,9 +244,40 @@ run (an outside reviewer's report): `git worktree remove` does not delete
 the branch it was created with -- that's standard git behavior, worktree
 removal and branch deletion are independent -- so without this, every
 torn-down workspace left a dead branch behind, accumulating over repeated
-use. Force-deletes (`-D`, not `-d`) since an agent's throwaway workspace
-branch is very often unmerged; `keep_branch` exists for anyone who wants
-to inspect or rebase a workspace's commits after tearing it down.
+use. Force-deletes (`-D`, not `-d`) since an agent's workspace branch is
+never merged into the *base* branch (`merge_all` lands into a fresh
+`pact/merged-*` branch instead), so `-d`'s own unmerged check would refuse
+every normal teardown; `keep_branch` exists for anyone who wants to
+inspect or rebase a workspace's commits after tearing it down.
+
+Before deleting the branch it asks git how many of the branch's commits
+no other local or remote branch reaches (`git rev-list --count <branch>
+--not --exclude=<branch> --branches --remotes`) and refuses when the
+answer is non-zero, unless `force` or `keep_branch` is set (issue #325).
+"Reachable from any other ref" rather than "merged into base" is what
+keeps the check silent in the normal flow: after `merge_all`'s real `git
+merge`, the workspace's commits are reachable from `pact/merged-*`; a
+branch an agent never committed to is still at the base tip. Only
+commits that `branch -D` would actually orphan refuse.
+
+That refusal exists because of a confirmed loss, not a theoretical one.
+After the shared-tree benchmark (issue #315) every lane was clean, so a
+bare `pact teardown` sweep removed the lanes, then the batch, then its
+branch -- the only reference to a 39-file, 9,295-line commit worth about
+$22 of agent time. `git fsck --lost-found` recovered it by hand. The
+earlier reasoning here, that a committed-but-unmerged branch was lower
+severity because "its tip stays reachable via reflog for a while even
+after `-D`", was wrong for pact's own sequence: `branch -D` deletes the
+branch's reflog with the branch, and `worktree remove` deletes the
+worktree's `HEAD` reflog with the worktree, so nothing was left pointing
+at the commit and the next `gc` would have pruned it. The uncommitted-
+change check below already judged "would silently discard work" worth a
+default refusal; committed work is the same hazard one level up, and the
+way out is the same shape: `merge-all` to land it, `--keep-branch` to
+keep it, `--force` to discard it on purpose. Bulk teardown keeps its
+"report and continue" behavior, so a sweep over a committed, unmerged
+shared-tree batch drops the lanes' metadata and leaves the batch, its
+worktree and its branch exactly as they were.
 
 It refuses on a workspace with uncommitted changes unless `force` is set.
 This wasn't a real check before -- confirmed directly, by spawning a
