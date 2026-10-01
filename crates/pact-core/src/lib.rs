@@ -6,7 +6,7 @@ mod acp_runtime;
 mod admission;
 pub mod run;
 pub use acp_runtime::{effective_runtime, LaneRuntime};
-pub use admission::{available_memory_mb, decide, Admission, AdmissionDecision, AdmissionPolicy};
+pub use admission::{available_memory_mb, decide, lanes_that_fit, suggested_units, Admission, AdmissionDecision, AdmissionPolicy, MAX_AUTO_UNITS, MIN_AUTO_UNITS};
 
 use acp_runtime::AcpBatch;
 use pact_agents::{AgentEvent, AgentKind, CoordConfig, LaunchRequest, RunOutcome, Supervisor};

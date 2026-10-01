@@ -404,10 +404,11 @@ enum Command {
 
         /// Most units the planner may produce (and so most lanes). The
         /// slowest unit sets the batch's wall-clock, so more, smaller
-        /// units are usually faster; admission still caps how many run at
-        /// once.
-        #[arg(long, default_value_t = 8)]
-        max_units: usize,
+        /// units are usually faster. Default: sized to this machine, as
+        /// many lanes as fit by memory under the admission policy, capped
+        /// by logical cores, between 2 and 16.
+        #[arg(long)]
+        max_units: Option<usize>,
 
         /// Shell command run once in the result tree after the commit,
         /// e.g. "npm test". Overrides the plan's own `verify`.
@@ -438,6 +439,10 @@ enum Command {
         no_deps: bool,
         #[arg(long)]
         no_lean: bool,
+        /// Most lanes running at once. Default: `pact.toml`'s
+        /// `defaults.max_concurrent`, else the unit count, so the plan
+        /// that was asked for can run in one go; admission still governs
+        /// by memory at launch time.
         #[arg(long)]
         max_concurrent: Option<usize>,
         #[arg(long)]
@@ -1134,7 +1139,7 @@ fn main() -> Result<()> {
             runtime,
             prepare,
         } => {
-            if max_units == 0 {
+            if max_units == Some(0) {
                 bail!("--max-units must be at least 1");
             }
             let task = match (task, task_file) {
@@ -1158,13 +1163,30 @@ fn main() -> Result<()> {
             })?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
+            let min_free_mem_mb = min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500);
+            let per_lane_reserve_mb = per_lane_reserve_mb
+                .or(config.default_per_lane_reserve_mb())
+                .unwrap_or_else(|| pact_core::AdmissionPolicy::default_per_lane_reserve_mb(runtime));
+            // Issue #356: unless told otherwise, ask the planner for as many
+            // units as this machine can run at once, and let that many run.
+            let max_units = match max_units {
+                Some(n) => n,
+                None => {
+                    let sizing = pact_core::AdmissionPolicy { max_concurrent: usize::MAX, min_free_mem_mb, stagger: std::time::Duration::ZERO, per_lane_reserve_mb };
+                    let available_mb = pact_core::available_memory_mb();
+                    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+                    let units = pact_core::suggested_units(&sizing, available_mb, cores);
+                    println!(
+                        "sizing: up to {units} units for this machine ({available_mb} MB available, {per_lane_reserve_mb} MB reserved per lane above a {min_free_mem_mb} MB floor, {cores} cores); pass --max-units to override"
+                    );
+                    units
+                }
+            };
             let admission = pact_core::AdmissionPolicy {
-                max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
-                min_free_mem_mb: min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500),
+                max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(max_units),
+                min_free_mem_mb,
                 stagger: std::time::Duration::from_millis(stagger_ms.or(config.default_stagger_ms()).unwrap_or(2000)),
-                per_lane_reserve_mb: per_lane_reserve_mb
-                    .or(config.default_per_lane_reserve_mb())
-                    .unwrap_or_else(|| pact_core::AdmissionPolicy::default_per_lane_reserve_mb(runtime)),
+                per_lane_reserve_mb,
             };
             if !dry_run {
                 let adapter = pact_agents::adapter(kind);
