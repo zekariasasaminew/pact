@@ -4,8 +4,8 @@
 //! real grammar is positional (`pact diff <id>`) -- caught by a human
 //! following the docs literally, not by anything in CI. This makes that
 //! whole class of bug structurally impossible going forward: every fenced
-//! `pact`/`./pact` command line in README.md, SKILL.md, and
-//! GETTING_STARTED.md is extracted and run against a real scratch repo,
+//! `pact`/`./pact` command line in README.md, SKILL.md,
+//! GETTING_STARTED.md and docs/usage.md is extracted and run against a real scratch repo,
 //! asserting it isn't rejected as a clap usage error (exit code 2 is
 //! clap's own convention for "arguments didn't parse" -- distinct from
 //! `main`'s own runtime errors, which exit 1). See DESIGN.md ("pact-cli >
@@ -170,6 +170,13 @@ fn skill_md_pact_commands_parse_against_the_real_cli() {
 fn getting_started_pact_commands_parse_against_the_real_cli() {
     let repo = scratch_repo();
     check_doc(&repo, "GETTING_STARTED.md");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn usage_reference_pact_commands_parse_against_the_real_cli() {
+    let repo = scratch_repo();
+    check_doc(&repo, "docs/usage.md");
     let _ = std::fs::remove_dir_all(&repo);
 }
 

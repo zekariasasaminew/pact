@@ -2560,7 +2560,7 @@ immediately in headless mode, rather than hang waiting for an approval
 prompt no TTY can answer. `bypassPermissions` alone was the *documented*
 fix for the hang; this is a real, verified safer alternative that isn't
 all-or-nothing. The allowlist (`DEFAULT_ALLOWED_TOOLS`) isn't
-user-configurable yet (see the README's Known limitations) -- the point
+user-configurable yet (see Known limitations in docs/usage.md) -- the point
 for now is proving the mechanism is genuinely safer than the old
 bypass-everything default, not claiming this exact list is final.
 
@@ -2633,7 +2633,7 @@ satisfied) -- but there's no continuation mechanism in headless mode, so
 `Y` never happens once the process exits. Not a pact bug -- a real,
 non-obvious trap in how a headless agent can interact with "wait for X"
 phrasing when its own CLI has an async-task capability. Documented as a
-task-writing caveat (README's Known limitations), not fixed in code,
+task-writing caveat (Known limitations in docs/usage.md), not fixed in code,
 since there's no code-level lever to pull here.
 
 ### Codex adapter
@@ -2853,7 +2853,7 @@ race under true concurrency: two or more simultaneous `agy` spawns each
 overwrite the same global registration, and which workspace's
 coordination server a given `agy` process actually ends up talking to
 depends on registration timing, not which workspace it's running in.
-Not hidden -- flagged in the README's Known limitations, and
+Not hidden -- flagged in docs/usage.md's Known limitations, and
 `spawn-many --agent agy` with more than one concurrent task should be
 treated as unsafe for coordination until Antigravity ships a
 per-invocation config mechanism of its own.
@@ -4802,7 +4802,7 @@ fast to be watchable. `record_cast.py` applies a minimum per-line hold
 never shortens a real one -- the two real `git worktree add` calls (the
 two workspace-creation lines) still show as genuinely longer pauses than
 the rest, since their real gap already exceeds the floor. Disclosed
-explicitly in the README's Known limitations, same as the previous
+explicitly in docs/usage.md's Known limitations, same as the previous
 version's own tradeoff was.
 
 ### `pact.toml` / `pact init` (issue #118)

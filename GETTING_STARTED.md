@@ -72,8 +72,8 @@ pact spawn "create a file named hello.txt containing the word hello, then stop"
 ```
 
 You'll see a warning about the unattended-safety setting being used (every
-agent CLI needs one in headless mode -- see the main README's Design
-decisions for why), then live streamed output as the agent works, then a
+agent CLI needs one in headless mode -- see Safety model in
+[docs/usage.md](docs/usage.md) for why), then live streamed output as the agent works, then a
 final summary:
 
 ```
@@ -151,7 +151,7 @@ exactly what would be lost and asks for `--force` before proceeding.
 
 Once you're happy with what each workspace did, `pact merge-all` folds
 every active workspace onto a fresh integration branch instead of tearing
-them down individually -- see the main README's Usage section for the
+them down individually -- see [docs/usage.md](docs/usage.md) for the
 full flag reference.
 
 ### A gotcha with `merge-all --append-only`
@@ -201,9 +201,9 @@ setup needed. None of that required any configuration -- it's what
 
 ## Next steps
 
-- The main [README](README.md) has the full command reference, every
-  design decision (and why), and what's been verified against real
-  installed agent CLIs vs. what hasn't.
+- [docs/usage.md](docs/usage.md) has the full command reference and what's
+  been verified against real installed agent CLIs vs. what hasn't;
+  [DESIGN.md](DESIGN.md) has every design decision and why.
 - [`examples/tasks/`](examples/tasks/) has copy-editable task-text patterns
   for the shapes that come up most: adding N similar routes, refactoring N
   similar files, migrating N call sites off a deprecated API.
