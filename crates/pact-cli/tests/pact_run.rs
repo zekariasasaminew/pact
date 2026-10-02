@@ -70,6 +70,14 @@ fn both_exist(a: &str, b: &str) -> String {
     }
 }
 
+fn repairable_check(file: &str, expected: &str, repair_task_file: &str) -> String {
+    if cfg!(windows) {
+        format!("findstr {expected} {file} >nul || (type {repair_task_file} & exit /b 1)")
+    } else {
+        format!("grep -q '{expected}' {file} || (cat {repair_task_file}; exit 1)")
+    }
+}
+
 fn plan_reply(units: serde_json::Value, verify: Option<&str>) -> String {
     let plan = serde_json::json!({
         "shared_context": "Write plain text files. Nothing else.",
@@ -287,6 +295,57 @@ fn run_with_a_plan_file_skips_the_planner_and_reports_a_failed_verification() {
     let newest = persisted.iter().max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
     let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(newest).unwrap()).unwrap();
     assert_eq!(saved["verify"], serde_json::json!(["exit 3", broken]), "the persisted plan records the list that ran: {saved}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
+fn run_repairs_a_regressed_combined_check_in_the_same_tree() {
+    let repo = init_repo("repair");
+    let shim = shim_dir();
+    std::fs::write(repo.join("alpha.txt"), "good\n").unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add repair fixture"]);
+
+    let repair_task = serde_json::json!({
+        "writes": { "alpha.txt": "good\n" },
+        "summary": "repaired alpha"
+    })
+    .to_string();
+    std::fs::write(repo.join("repair-task.json"), &repair_task).unwrap();
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "add fake repair task"]);
+    let verify = repairable_check("alpha.txt", "good", "repair-task.json");
+    let plan = serde_json::json!({
+        "task": "repair a combined failure",
+        "shared_context": "",
+        "units": [
+            { "name": "alpha", "files": ["alpha.txt"], "brief": write_task("alpha.txt", "bad\n", "broke alpha") },
+            { "name": "beta", "files": ["beta.txt"], "brief": write_task("beta.txt", "B\n", "wrote beta") }
+        ],
+        "verify": verify
+    });
+    let plan_path = shim.join("repair-plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+
+    let out = pact(
+        &repo,
+        &shim,
+        None,
+        &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "--repair-attempts", "1", "ignored"],
+    );
+    assert!(out.status.success(), "repair run failed:\nstdout: {}\nstderr: {}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("repair attempt 1/1 for failed combined verification"), "{text}");
+    assert!(text.contains("repair attempt 1: done") && text.contains("(committed)"), "{text}");
+    assert!(text.contains(&format!("verify `{verify}`: passed")), "{text}");
+    assert!(text.contains("run: OK"), "{text}");
+
+    let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
+    let batch = manager.list_workspaces().unwrap().into_iter().find(|workspace| workspace.shared_batch.is_none()).expect("batch kept");
+    assert_eq!(std::fs::read_to_string(batch.path.join("alpha.txt")).unwrap(), "good\n");
+    assert_eq!(run_git(&batch.path, &["rev-list", "--count", &format!("{}..HEAD", batch.base_commit)]).trim(), "2");
 
     cleanup(&repo);
     cleanup(&shim);

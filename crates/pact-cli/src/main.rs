@@ -426,6 +426,11 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
+        /// How many repair lanes may try to fix a real combined-verification
+        /// failure after the planned units finish. Set to 0 to disable.
+        #[arg(long, default_value_t = 1)]
+        repair_attempts: usize,
+
         /// How many times a rejected plan is sent back to the planner with
         /// its violations before giving up.
         #[arg(long, default_value_t = 2)]
@@ -1128,6 +1133,7 @@ fn main() -> Result<()> {
             verify,
             plan,
             dry_run,
+            repair_attempts,
             plan_retries,
             safety,
             deps,
@@ -1221,6 +1227,7 @@ fn main() -> Result<()> {
                 plan_path: plan.as_deref(),
                 dry_run,
                 plan_retries,
+                repair_attempts,
                 spawn: spawn_options,
             };
             let report = orchestrator.run_task(&task, &run_options, |index, agent, event| {
@@ -2615,6 +2622,24 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                 println!("unit {}: {}{duration}: {}", workspace.id, if run.success { "done" } else { "failed" }, run.summary);
             }
             Err(err) => println!("unit #{}: FAILED before/during launch -- {err:#}", outcome.index),
+        }
+    }
+    for repair in &report.repairs {
+        match &repair.outcome.result {
+            Ok((workspace, run)) => {
+                let duration = orchestrator
+                    .run_metadata(&workspace.id)
+                    .map(|metadata| format!(" in {}s", metadata.ended_at.saturating_sub(metadata.started_at)))
+                    .unwrap_or_default();
+                println!(
+                    "repair attempt {}: {}{duration}: {} ({})",
+                    repair.attempt,
+                    if run.success { "done" } else { "failed" },
+                    run.summary,
+                    if repair.committed { "committed" } else { "nothing committed" }
+                );
+            }
+            Err(err) => println!("repair attempt {}: FAILED before/during launch -- {err:#}", repair.attempt),
         }
     }
     if let Some(batch) = &report.batch {
