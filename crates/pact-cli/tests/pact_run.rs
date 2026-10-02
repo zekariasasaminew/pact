@@ -74,7 +74,7 @@ fn repairable_check(file: &str, expected: &str, repair_task_file: &str) -> Strin
     if cfg!(windows) {
         format!("findstr {expected} {file} >nul || (type {repair_task_file} & exit /b 1)")
     } else {
-        format!("grep -q '{expected}' {file} || {{ cat {repair_task_file}; exit 1; }}")
+        format!("grep -q '{expected}' {file} || (cat {repair_task_file}; exit 1)")
     }
 }
 
