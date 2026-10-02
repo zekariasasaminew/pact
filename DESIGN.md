@@ -1432,14 +1432,25 @@ still needs to run its own tests, and the difference between
 `vitest run a.test.ts` and `vitest run` is not one a shell allowlist
 can draw.
 
-Not here: dependent units (waves, #282), gap-closing lanes after a
-failed verification, balancing beyond an advisory warning when the
-heaviest unit's existing lines exceed four times the lightest (new-file
-units weigh nothing, so test-writing plans never trigger it). Tested
-end to end through the real binary with pact-acp's fake agent as both
-planner (a canned reply for prose prompts) and workers (JSON write
-tasks inside the rendered briefs), never a model; the live check against
-Copilot CLI produced a valid two-unit plan in one attempt and 36 s.
+The third piece (issue #362) closes the combined-check gap. A Regressed
+or Failed verdict starts one repair lane in the same shared tree, under
+the same runtime and admission policy. Its brief contains only the real
+failures, their output tails, and the files the run touched, with a rule
+to preserve application behaviour and edit no file outside that set.
+After a successful repair turn pact commits again and reruns the full
+verification list, so the report and exit code reflect the last result,
+not the pre-repair failure. `--repair-attempts` bounds the loop and
+defaults to one; zero disables it. Inconclusive checks never trigger a
+repair because pact has no evidence that the run caused them.
+
+Not here: dependent units (waves, #282), balancing beyond an advisory
+warning when the heaviest unit's existing lines exceed four times the
+lightest (new-file units weigh nothing, so test-writing plans never
+trigger it). Tested end to end through the real binary with pact-acp's
+fake agent as both planner (a canned reply for prose prompts) and workers
+(JSON write tasks inside the rendered briefs), never a model; the live
+check against Copilot CLI produced a valid two-unit plan in one attempt
+and 36 s.
 
 ### Admission control (issue #285)
 

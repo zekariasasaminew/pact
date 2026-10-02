@@ -372,7 +372,14 @@ pub struct RunReport {
     pub outcomes: Vec<SpawnManyOutcome>,
     pub batch: Option<Workspace>,
     pub committed: Option<bool>,
+    pub repairs: Vec<RepairOutcome>,
     pub verify: Vec<VerifyOutcome>,
+}
+
+pub struct RepairOutcome {
+    pub attempt: usize,
+    pub outcome: SpawnManyOutcome,
+    pub committed: bool,
 }
 
 impl RunReport {
@@ -446,6 +453,26 @@ impl VerifyOutcome {
     }
 }
 
+fn verification_needs_repair(outcomes: &[VerifyOutcome]) -> bool {
+    outcomes.iter().any(|outcome| matches!(outcome.verdict(), Verdict::Regressed | Verdict::Failed))
+}
+
+fn render_repair_brief(attempt: usize, total: usize, outcomes: &[VerifyOutcome], touched_files: &[String]) -> String {
+    let mut brief = format!(
+        "# Repair attempt {attempt}/{total}\n\nMake the combined verification checks pass without changing application behaviour. "
+    );
+    brief.push_str("Touch only files this run created or edited, listed below. Do not edit any other file.\n\n## Files you may touch\n");
+    for file in touched_files {
+        brief.push_str(&format!("- `{file}`\n"));
+    }
+    brief.push_str("\n## Failing checks\n");
+    for outcome in outcomes.iter().filter(|outcome| matches!(outcome.verdict(), Verdict::Regressed | Verdict::Failed)) {
+        brief.push_str(&format!("\n### `{}`\n\n```text\n{}\n```\n", outcome.command, outcome.output_tail));
+    }
+    brief.push_str("\nRun the failing checks after the fix. Keep the change as small as possible.\n");
+    brief
+}
+
 impl std::fmt::Display for Verdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -468,6 +495,8 @@ pub struct RunOptions<'a> {
     pub dry_run: bool,
     /// How many times a rejected plan is sent back to the planner.
     pub plan_retries: usize,
+    /// How many lanes may try to repair a real combined-verification failure.
+    pub repair_attempts: usize,
     pub spawn: SpawnOptions<'a>,
 }
 
@@ -640,6 +669,7 @@ impl Orchestrator {
                 outcomes: Vec::new(),
                 batch: None,
                 committed: None,
+                repairs: Vec::new(),
                 verify: Vec::new(),
             });
         }
@@ -668,16 +698,46 @@ impl Orchestrator {
         let batch = self.workspaces.get_workspace(&batch.id).ok();
 
         let mut committed = None;
+        let mut repairs = Vec::new();
         let mut verify = Vec::new();
         if let Some(batch) = &batch {
             planner_events(&AgentEvent::Phase(format!("committing the shared tree {}", batch.id)));
             committed = Some(self.workspaces.commit_all(&batch.id).context("committing the batch")?);
-            for (index, command) in verify_commands.iter().enumerate() {
-                planner_events(&AgentEvent::Phase(format!("verifying in the batch worktree: {command}")));
-                let mut outcome = run_shell_captured(&batch.path, command)?;
-                outcome.baseline_success = baselines.get(index).map(|b| b.success);
-                planner_events(&AgentEvent::Phase(format!("verification `{command}` {} in {:.1}s", outcome.verdict(), outcome.duration.as_secs_f32())));
-                verify.push(outcome);
+            verify = self.verify_run(batch, &verify_commands, &baselines, &planner_events)?;
+
+            let touched_files = self.workspaces.workspace_changes(&batch.id).context("finding files touched by the run")?.files;
+            for attempt in 1..=options.repair_attempts {
+                if !verification_needs_repair(&verify) {
+                    break;
+                }
+                planner_events(&AgentEvent::Phase(format!(
+                    "repair attempt {attempt}/{} for failed combined verification",
+                    options.repair_attempts
+                )));
+                let task = SpawnManyTask {
+                    agent: options.agent,
+                    task: render_repair_brief(attempt, options.repair_attempts, &verify, &touched_files),
+                    name: Some(format!("repair-{attempt}")),
+                };
+                let repair_index = plan.units.len() + attempt - 1;
+                let mut repair_outcomes = self.spawn_many_in(vec![task], spawn_options, Some(batch.clone()), |_, agent, event| {
+                    on_event(repair_index, agent, event)
+                });
+                let outcome = repair_outcomes.pop().expect("one repair task produces one outcome");
+                let lane_succeeded = matches!(&outcome.result, Ok((_, run)) if run.success);
+                let repair_committed = if lane_succeeded {
+                    planner_events(&AgentEvent::Phase(format!("committing repair attempt {attempt}")));
+                    let repair_committed = self.workspaces.commit_all(&batch.id).context("committing the repair")?;
+                    committed = Some(committed.unwrap_or(false) || repair_committed);
+                    verify = self.verify_run(batch, &verify_commands, &baselines, &planner_events)?;
+                    repair_committed
+                } else {
+                    false
+                };
+                repairs.push(RepairOutcome { attempt, outcome, committed: repair_committed });
+                if !lane_succeeded {
+                    break;
+                }
             }
         }
 
@@ -693,8 +753,33 @@ impl Orchestrator {
             outcomes,
             batch,
             committed,
+            repairs,
             verify,
         })
+    }
+
+    fn verify_run(
+        &self,
+        batch: &Workspace,
+        commands: &[String],
+        baselines: &[VerifyOutcome],
+        on_event: &impl Fn(&AgentEvent),
+    ) -> Result<Vec<VerifyOutcome>> {
+        commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                on_event(&AgentEvent::Phase(format!("verifying in the batch worktree: {command}")));
+                let mut outcome = run_shell_captured(&batch.path, command)?;
+                outcome.baseline_success = baselines.get(index).map(|baseline| baseline.success);
+                on_event(&AgentEvent::Phase(format!(
+                    "verification `{command}` {} in {:.1}s",
+                    outcome.verdict(),
+                    outcome.duration.as_secs_f32()
+                )));
+                Ok(outcome)
+            })
+            .collect()
     }
 
     /// Asks the planner for a plan, validates it, and sends violations
@@ -963,6 +1048,7 @@ mod tests {
             outcomes: vec![],
             batch: None,
             committed: None,
+            repairs: vec![],
             verify,
         };
         assert_eq!(report(vec![]).worst_verdict(), None);
