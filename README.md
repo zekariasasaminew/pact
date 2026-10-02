@@ -1,142 +1,29 @@
 # pact
 
-A language-agnostic orchestrator for running multiple AI coding agent CLIs
-(Claude Code, GitHub Copilot CLI, Codex, Gemini CLI, Antigravity) in
-parallel on the same repository -- and landing all of their work back
-onto one branch automatically when they're done.
+pact runs several AI coding agents (Claude Code, GitHub Copilot CLI, Codex,
+Gemini CLI, Antigravity) on one repository at the same time and hands back
+one verified branch. Give it a single task: a planner splits it into units
+that own disjoint files, every unit runs as a session inside one shared
+agent process, and pact commits the result and checks it against a baseline
+of the untouched tree. Nobody writes briefs, and no agent waits on another.
 
-![pact demo: two isolated workspaces created, listed, and merged onto one clean branch, zero decisions](docs/demo.gif)
+![pact demo: two workspaces created, listed, and merged onto one branch](docs/demo.gif)
 
-*(That's `pact demo`'s actual, real output -- zero-cost, zero-agent-CLI-call, run it yourself in 5 seconds. See Getting started below for the real thing, with real agents.)*
-
-**What "without fighting" means here:** each agent gets its own git
-worktree (real filesystem isolation, not just a hope that they touch
-different files), conflicts get detected and surfaced instead of
-discovered the hard way, and `merge-all` gets N agents' work back onto
-one branch automatically wherever it safely can. The file-lease/messaging
-layer that lets agents coordinate is advisory, not enforced -- it makes
-overlapping work visible and communicable between agents, it doesn't stop
-an agent that never checks it from editing a file another agent already
-claimed. Worktree isolation and merge-all's conflict handling are the
-parts that are real guarantees; coordination is a convention agents
-opt into.
-
-**What "landing it all back" means:** `merge-all` sequences N agents' work
-by risk (small, low-risk changes first) and auto-resolves what it safely
-can -- including structurally: `package.json`'s dependency blocks get
-their own **JSON-aware merge** automatically, no flag needed, and
-`Cargo.toml`/`pyproject.toml`'s dependency tables get the same treatment
-with comments and formatting left untouched. Verified under real
-adversarial load, not just unit tests: four concurrent Copilot agents
-editing the same root `package.json` in disjoint regions merged correctly
-and automatically -- 13 of 13 expected changes landed, zero conflicts.
-Whatever's left after that gates on your own test command before it's
-ever accepted (`--require-passing-tests`, Arbiter).
-
-**The full loop, end to end:** isolate each agent in its own git
-worktree &rarr; prepare dependencies before the agent's first command
-&rarr; launch the agent with coordination tools wired in automatically
-&rarr; track every claim, message, and merge in a queryable operation
-log (`pact history`) &rarr; merge completed work back onto one branch,
-sequenced by risk, JSON-aware where it can be &rarr; verify an AI-proposed conflict resolution
-against a real test command before ever accepting it (Arbiter). Six
-real subsystems working together, not just a lock server, not just a
-worktree wrapper, and not just an MCP integration -- coordination is
-the one most visible from the wire protocol, but it's one piece of the
-loop, not the whole tool.
-
-**[Getting started guide](GETTING_STARTED.md)** -- install to watching two
-agents work in parallel, in under 5 minutes, every command verified
-end-to-end.
-
-**Agent-facing:** this repo ships a [`SKILL.md`](SKILL.md) so Claude Code
-and other MCP-aware agents can learn pact's CLI grammar and coordination
-conventions on demand, without a human explaining it first.
-
-**Windows is a first-class target, not an afterthought.** Most tools in
-this space (parallel git-worktree agent orchestration) are built on tmux,
-which is POSIX-only and excludes Windows entirely. Pact ships a native
-Windows binary and has real Windows-specific correctness work behind it --
-`.cmd` shim resolution for npm/pnpm/yarn (`std::process::Command` doesn't
-consult `PATHEXT` the way a real shell does), and UTF-8 BOM handling for
-files written by PowerShell's own default encoding. Verified on Windows 10/11 with
-PowerShell 5.1, not just cross-compiled and assumed to work.
-
-## The problem
-
-Running several coding agents at once on one repo hits four separate kinds
-of pain, in this priority order:
-
-1. **Dependency installs don't share.** Every `git worktree` starts with no
-   `node_modules`/venv/etc., so each agent reinstalls from scratch.
-2. **Agents can't tell each other anything.** There's no way for one agent
-   to say "I just changed a function your task depends on" before the other
-   finds out the hard way at merge time.
-3. **Agents step on each other's files.** Two agents editing the same file
-   in parallel is either avoided by manually partitioning work up front, or
-   discovered as a merge conflict after the fact.
-4. **Landing N agents' work back onto one branch is hard.** Even when
-   nothing conflicts, someone still has to merge N branches by hand, in
-   some order, and hope nothing regresses -- and a real conflict (two
-   agents editing the same file) usually means starting that file's
-   change over from scratch, by hand.
-
-`git worktree` solves isolation but wasn't built for any of these four —
-it was built for one human checking out a second branch, not an
-orchestrator spinning up and tearing down N agent sandboxes per session,
-let alone landing their work back together afterward.
-
-## Overview
-
-Seven crates, each with one job:
-
-```mermaid
-graph TD
-    CLI["pact-cli<br/>(clap binary: spawn / list / teardown)"]
-    Core["pact-core<br/>(Orchestrator: stable spawn/list/teardown interface)"]
-    VCS["pact-vcs<br/>(PidLock + git worktree lifecycle)"]
-    Deps["pact-deps<br/>(dependency broker: detect + passthrough to each ecosystem's own cache)"]
-    Agents["pact-agents<br/>(AgentAdapter: Claude Code + Copilot CLI + Codex + Antigravity live-verified, Gemini CLI not yet)"]
-    Coord["pact-coord<br/>(leases + messages, its own MCP server process, or served over HTTP in-process)"]
-    Acp["pact-acp<br/>(Agent Client Protocol client: one agent process, one session per lane)"]
-
-    CLI --> Core
-    Core --> VCS
-    Core --> Deps
-    Core --> Agents
-    Core -->|"--runtime acp"| Acp
-    Deps -.reuses.-> VCS
-    Core -.writes coord config for.-> Coord
-    Agent2["chosen agent CLI (child process)"] -.launches as its own child, over stdio.-> Coord
-    Acp -.one `--acp` process, many sessions.-> Agent2
-```
-
-`pact-coord` is not called in-process by `pact-core`
-at all -- the orchestrator only writes the config file that tells the
-agent CLI to launch it itself, over stdio, as its own separate process.
-Under `--runtime acp` (issue #331) the orchestrator instead serves it
-in-process over HTTP and `pact-acp` drives one shared agent process with
-one session per lane.
-
-Sequence diagrams for the spawn/teardown and cross-agent coordination
-flows, plus the on-disk state layout, are in the Architecture reference
-near the end of this document -- useful once you already know *what*
-pact does and want to see exactly how, not needed to get started below.
+*The real output of `pact demo`: no agent calls, no cost, about five seconds.*
 
 ## Getting started
 
-Download a prebuilt binary -- no Rust toolchain, no MSVC linker/Build
-Tools install required:
+Download a prebuilt binary (no Rust toolchain needed):
 
 ```sh
 # macOS (Apple Silicon)
 curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-aarch64-apple-darwin.tar.gz | tar xz
-
 # macOS (Intel)
 curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-apple-darwin.tar.gz | tar xz
-
 # Linux (x86_64)
 curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-unknown-linux-gnu.tar.gz | tar xz
+# Homebrew
+brew tap zekariasasaminew/pact && brew install pact
 ```
 
 ```powershell
@@ -145,1408 +32,195 @@ Invoke-WebRequest https://github.com/zekariasasaminew/pact/releases/latest/downl
 Expand-Archive pact.zip
 ```
 
-macOS/Linux via Homebrew, one command instead of five:
+The [`edge` release](https://github.com/zekariasasaminew/pact/releases/tag/edge)
+is rebuilt on every push to `main`; use a tagged release for anything you
+depend on. Building from source is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Then, inside a git repository:
 
 ```sh
-brew tap zekariasasaminew/pact
-brew install pact
+pact doctor
+pact run --agent copilot --verify "npm test" "Add Vitest tests for every module under lib/"
 ```
 
-`latest` above always points at the most recent tagged, versioned
-release. To try unreleased work on `main` before the next tag (e.g. a
-just-merged fix) without building from source, download the same way
-from the [`edge` release](https://github.com/zekariasasaminew/pact/releases/tag/edge)
-instead of `latest` -- it's rebuilt automatically on every push to `main`
-via `.github/workflows/edge-release.yml`, so the tag and its assets move
-constantly. **Not a stable release channel** -- for anything you depend
-on, use a tagged `vX.Y.Z` release.
+[GETTING_STARTED.md](GETTING_STARTED.md) walks through the first run.
+Windows is a first-class target: native binary, `.cmd` shim resolution,
+live-verified on Windows 10/11.
 
-Then, from inside (or with `--repo` pointing at) a git repository:
+## How `pact run` works
+
+```mermaid
+flowchart TD
+    T([task]) --> P[planner session reads the repo]
+    T --> S[shared tree, dependencies,<br/>verify baselines on the untouched tree]
+    P --> V{plan valid?<br/>disjoint files, unique names,<br/>at most --max-units}
+    V -- no, up to --plan-retries --> P
+    V -- yes --> B[one brief per unit:<br/>task verbatim, its files, the rules]
+    B --> L[lanes run as ACP sessions<br/>in one agent process,<br/>admitted by free memory]
+    S --> L
+    L --> C[commit once]
+    C --> R[run every --verify command]
+    R --> D{worst verdict}
+    D -- regressed or failed --> X[repair lane in the same tree,<br/>up to --repair-attempts]
+    X --> C
+    D -- passed, fixed or inconclusive --> O([report + branch])
+```
+
+Each verification command runs twice: on the untouched tree before any lane
+starts, and on the combined result. The pair decides the verdict:
+
+| before | after | verdict | exit code |
+|---|---|---|---|
+| passes | passes | passed | 0 |
+| fails | passes | fixed | 0 |
+| passes | fails | regressed: a repair lane runs | 1 if still failing |
+| fails | fails | inconclusive: cannot judge the run | 3 |
+| no baseline | fails | failed: a repair lane runs | 1 if still failing |
+
+Workers check only their own files; the project-wide checks run once, by
+pact, on the combined result. Twelve lanes each running a full type-check
+was the bottleneck pact removed this way (issue #361).
+
+The lanes share one agent process through the
+[Agent Client Protocol](https://agentclientprotocol.com) (Copilot CLI's
+`copilot --acp`; other agents run one process per lane):
+
+```mermaid
+sequenceDiagram
+    participant pact
+    participant agent as copilot --acp (one process)
+    participant coord as pact-coord over HTTP (inside pact)
+    pact->>agent: initialize (once, about 2 s)
+    loop every lane
+        pact->>agent: session/new (cwd = shared tree, MCP = /lanes/<lane>)
+        pact->>agent: session/prompt (the unit's brief)
+        agent->>coord: claim_files, check_messages, release_files
+        agent-->>pact: session/update stream, logged to logs/<lane>.jsonl
+    end
+```
+
+Useful flags: `--verify <cmd>` (repeatable), `--max-units` (default: what
+this machine can run at once), `--max-concurrent`, `--repair-attempts`
+(default 1, 0 disables), `--task-file`, `--dry-run` (plan and briefs only),
+`--plan <file>` (re-run a saved or edited plan), `--prepare <cmd>`
+(regenerate gitignored files such as `next typegen` output), `--runtime
+auto|acp|process`.
 
 ```sh
-./pact spawn "implement the thing"
+pact run --agent copilot --dry-run "Add tests for every module under lib/"
+pact run --agent copilot --task-file task.md --verify "npm test" --verify "npm run lint"
+pact run --agent copilot --plan saved-plan.json "Add tests for every module under lib/"
 ```
 
-See [Usage](#usage) below for the full command surface. Building from
-source instead (e.g. to contribute) is covered in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Plans are saved under the state directory's `meta/plans/`, briefs under
+`briefs/`, every lane's event stream under `logs/`.
 
-## Usage
+## Benchmark
 
-Assumes `pact` is on your `PATH` (from a downloaded release) or you're
-running `./target/release/pact` after building from source -- see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+One 39-file test-writing task on a Next.js app, same model (claude-opus-5),
+same base commit, 12-core 14 GB Windows laptop. Full data and every arm:
+issue #308.
 
-### One task, pact does the rest: `pact run`
+| setup | wall clock | peak RAM | mean RAM | cost | coverage |
+|---|---|---|---|---|---|
+| Copilot CLI's own sub-agents, 8 in one session | 15.8 min | 4.29 GB | 2.22 GB | $16.20 | 98.2% |
+| pact, one git worktree per agent plus merge (8 lanes) | 53.6 min | 8.26 GB | 2.45 GB | $23.68 | 98.5% |
+| **`pact run`, 8 lanes, shared tree, ACP sessions** | **12.5 min** | **3.17 GB** | **1.13 GB** | **$12.79** | **99.3%** |
+
+Per-agent worktrees were the first cost to go: for units that own disjoint
+files, isolation and the merge are pure overhead. One agent process hosting
+every lane as a session removed the second (cold process start-up). What
+remains is model time and per-lane checks.
+
+## Running agents by hand
+
+When you already know the split, drive the lanes yourself:
 
 ```sh
-pact run --agent copilot --verify "npm test" --verify "npm run typecheck" \
-  "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
-pact run --agent copilot --dry-run "..."          # plan only: print and persist the plan, spawn nothing
-pact run --agent copilot --task-file task.md      # a task statement that runs to pages
-pact run --agent copilot --plan .pact-<repo>/meta/plans/<stamp>-<slug>.json "..."   # re-run an edited plan
+pact spawn --agent claude "Add input validation to the signup form"
+pact spawn-many --task claude:"Add a GET /orders endpoint" --task copilot:"Add a GET /preferences endpoint"
+pact spawn-many --agent copilot --shared-tree --task "Write tests for lib/" --task "Write tests for app/api/"
+pact list
+pact diff <id>
+pact coord-status
+pact history --workspace <id>
+pact commit-all
+pact merge-all --require-passing-tests "npm test"
+pact resolve <id>
+pact teardown <id>
 ```
 
-`pact run` (issue #305) is the whole loop with no briefs to write: a
-planner session reads the repository and splits the task into
-file-disjoint units; pact validates the plan mechanically (no file owned
-by two units, repo-relative paths, unique names, at most `--max-units`,
-which defaults to what this machine can run at once: the lanes that fit
-by memory under the admission policy, capped by logical cores, 2 to 16)
-and sends violations back to the planner up to `--plan-retries` times;
-renders one brief per unit (the task verbatim, its files, the planner's
-few sentences, the plan's shared conventions, and the rules workers kept
-breaking when humans wrote briefs: no installs or builds, no commits,
-touch nothing outside your files); runs the units as lanes in one shared
-tree (disjoint by construction, so no isolation and no merge, under the
-default ACP runtime, as many at once as were planned unless
-`--max-concurrent` says otherwise); commits once; then runs each
-verification command (`--verify`, repeatable; or the plan's `verify`
-list) in the result
-and reports a verdict that knows the baseline: the same command is run
-on the untouched tree first, so a check that already fails on the base
-commit (generated files missing from a fresh worktree, say) reads as
-`INCONCLUSIVE` (exit 3), a check the run broke reads as a regression,
-and a check the run made pass reads as fixed; the worst verdict across
-the commands decides the exit code. The shared tree, its
-dependencies and those baselines are prepared while the planner works.
-Plans and briefs are
-persisted under the state dir (`meta/plans/`, `briefs/`), the planner's
-session under `logs/planner-*.jsonl`; the result is
-a branch to review with `pact diff`, land with `pact merge-all`, or push.
-Measured on the benchmark (arm R2, issue #308): `pact run` on a 39-file
-test-writing task finished in 12.5 min against 15.8 for Copilot's own
-in-process sub-agents, 21% cheaper, with higher coverage, 26% less peak
-and 49% less mean memory, and nobody wrote a brief. One wave only for
-now: units that depend on each other are #282.
+- `spawn`/`spawn-many` never commit; `commit-all` or `merge-all` does.
+- Without `--shared-tree`, each task gets its own git worktree; use that
+  when tasks must edit the same files. `merge-all` lands them on a new
+  `pact/merged-<id>` branch, smallest change first, with JSON-aware merges
+  for `package.json`, `Cargo.toml` and `pyproject.toml` dependency tables,
+  and skips (not aborts) a conflicting workspace for `pact resolve`.
+- `--dry-run` previews any spawn without creating or launching anything.
 
-### Running agents in parallel by hand
+Every agent gets seven coordination tools from pact's MCP server
+(`claim_files`, `release_files`, `send_message`, `check_messages`,
+`request_handoff`, `check_handoffs`, `respond_handoff`). Leases are
+advisory: they make overlapping work visible, they do not lock files.
 
-```sh
-# from inside (or pass --repo to) a git repository:
-pact spawn "implement the thing"
-pact spawn "implement the thing" --agent copilot
-pact spawn "implement the thing" --agent gemini  # built, not live-verified -- see Known limitations
-pact spawn "implement the thing" --agent agy  # Antigravity, live-verified -- real path to Gemini-model access
-pact spawn "implement the thing" --agent claude --safety acceptEdits
-pact spawn "implement the thing" --coord-command /path/to/alt-coord --coord-arg --some-flag
-pact spawn-many --task claude:"implement X" --task claude:"implement Y"
-pact spawn-many --task claude:"implement X" --task copilot:"implement Y"
-pact spawn "implement the thing" --dry-run          # preview only, nothing created/launched
-pact spawn "implement the thing" --deps install     # private node_modules instead of the default link to the repo root's
-pact spawn-many --task claude:"X" --task copilot:"Y" --dry-run
-pact list                          # [dirty]/[clean] per workspace, plus agent pid liveness if recorded
-```
+## Configuration
 
-`spawn` creates the worktree, prepares dependencies, then launches the
-chosen agent CLI (`--agent claude` by default) headlessly -- with a
-generated coordination config giving it `claim_files`/`release_files`/
-`send_message`/`check_messages`/`request_handoff`/`check_handoffs`/
-`respond_handoff` tools automatically, no extra setup needed -- and
-blocks until it finishes, streaming `[init]`/`[coord]`/`[assistant]`/
-`[tool]`/`[other]` lines live and printing a final done/failed summary.
-
-Agents launch **lean** by default: Copilot CLI runs under a per-workspace
-`COPILOT_HOME` (`.pact-<repo>/homes/<id>`) holding only your login
-pointer and `settings.json`, so none of your own MCP servers load into a
-worker, auto-update is off, the built-in GitHub MCP server is disabled,
-and a fixed `--session-id` is recorded for a later resume. Measured on
-the same trivial prompt: 57 s and 1.4 GB with a full user home, 6 s and
-0.3 GB lean; end to end through pact on a real Next.js repo, 12 s lean
-versus 81 s with `--no-lean`. The lean profile also denies dependency
-installs and full builds at Copilot's own tool gate (see "What can an
-agent actually do to my machine?" below). `--no-lean` reproduces the
-old launch exactly. Claude Code's lean profile passes
-`--strict-mcp-config` (your user-level MCP servers stay out of the
-worker; pact's own coordination server still connects), a fixed
-`--session-id`, and a tightened tool allowlist without the blanket
-`Bash(npm *)`; measured: `init` at 6 s instead of 14-19 s, and 15.6 s end
-to end through pact on the same repo.
-
-Dependency prep defaults to **linking**: when the repo root already has a
-`node_modules`, the workspace's `node_modules` becomes a junction (Windows)
-or symlink to it in about 0.1 s, instead of a full per-workspace install
-(measured at 99 s and 32,000 file writes for one Next.js app, per
-workspace, even with a warm npm cache). The link is shared, not a private
-copy: `list`/`inspect` say so, teardown removes the link without touching
-the repo root's install (see "Reparse points and worktree removal" in
-DESIGN.md for the git behavior that made that a real hazard), and the
-agent must not run installs inside the workspace. Turbopack (`next build`
-on Next.js 16) refuses a linked `node_modules`, so a task that needs a
-real build should use `--deps install` (each detected package manager's
-own install, the previous behavior). `--deps none` (alias `--no-deps`)
-skips prep entirely; `--deps auto` is the default described above; and
-`pact.toml`'s `defaults.deps` sets the default for a repo. Every other
-ecosystem (Cargo, Go, uv, pnpm, ...) keeps its cheap, cache-backed
-passthrough install in every mode. A
-dependency-prepare failure is logged as a warning, not fatal; so is a
-coordination server that fails to connect (checked against the live
-event stream, not assumed). `--safety` overrides whichever adapter's own
-unattended-safety default is otherwise used (a warning is printed either
-way) -- see Safety model below for why headless mode requires *some*
-such setting for every adapter, and why their vocabularies aren't
-unified into one shared flag.
-
-**Generated, gitignored files** are the other half of "a fresh worktree is
-not a working project" (issue #301). `next typegen` output, Prisma
-clients, GraphQL/OpenAPI codegen and the like are not tracked, so a new
-worktree lacks them and `tsc` or the tests fail for reasons that have
-nothing to do with the agent's work; measured on capture-hub, where
-`npx tsc --noEmit` cannot type-check a route until `npx next typegen`
-has run. Declare the regenerating command once and pact runs it in every
-new workspace (and in a `--shared-tree` batch once) right after
-dependency prep, and in `merge-all`'s integration worktree before the
-gate:
+`pact.toml` at the repository root sets defaults; a flag always wins.
+`pact init` writes one from what is installed.
 
 ```toml
 [defaults]
+agent = "copilot"
 prepare = ["npx next typegen"]
 ```
 
-`--prepare <cmd>` (repeatable, on `spawn`, `spawn-many`, `run` and
-`merge-all`) replaces the config list for one invocation. Failures are
-warnings with the command's output tail, like dependency prep; `inspect`
-shows what ran; `--dry-run` prints the commands. Workers are not told to
-run this themselves because the lean profile would have to widen its
-allowlist to let them.
-
-`--dry-run` (on both `spawn` and `spawn-many`) previews the workspace
-id/branch/path that would be created, the package manager(s) detected for
-the repo, and the exact `program args...` that would be launched --
-including the resolved `--safety` flag and the coordination config path --
-without creating a workspace, running dependency prep, or launching
-anything.
-
-`spawn-many` runs N of the above concurrently from one invocation --
-repeatable `--task <agent>:<task text>`, one per agent instance you want,
-covering both N instances of the same agent (the primary use case this was
-built for) and a mix of different agents in one batch, since each `--task`
-is an independent, unrelated pair. Every task's output streams live,
-prefixed `[<agent>:<index>]` so interleaved lines from different agents
-stay attributable to their source; a final per-workspace done/failed
-summary prints once every task finishes. Ctrl-C kills every still-running
-child (whole process group, not just the immediate process) before `pact`
-exits. `--safety` applies to every task in the batch uniformly -- see
-Known limitations for why that's not per-task yet.
-
-`spawn-many` also **paces the batch to the machine**. Every task's
-worktree and dependencies are prepared up front (cheap in link mode), but
-at most `--max-concurrent` agents (default 2) are running at once, a new
-one launches only when at least `--min-free-mem-mb` (default 1500) of
-memory is available after subtracting `--per-lane-reserve-mb` for every
-agent already running, and launches are at least
-`--stagger-ms` (default 2000) apart so a provider never sees a burst of
-new sessions. The reservation is what stops N agents being admitted
-against the same not-yet-consumed headroom: a lean agent sits at
-0.3-0.45 GB while authoring and then runs a 1.5-1.9 GB test suite, so a
-gate reading instantaneous free memory admits everyone and they peak
-together (measured: 8 lanes into 5 GB free drove a 14 GB laptop to 112 MB
-free). Its default follows `--runtime` (issue #332): 1200 MB for
-`process` lanes, 400 MB for `acp` lanes, whose agent memory is shared
-and which only grow into their own test runs (measured: 8 ACP lanes
-peaked at 3.9 GB together with 3.3 GB still free). A task that
-can't launch yet says `queued: ...` in the stream every 15 s and waits;
-on a machine short of memory that can mean zero agents running until
-something frees up, which is the point (measured per-process peaks on a
-14 GB laptop: a lean agent 0.3-0.45 GB, but `vitest` 1.5 GB and `next
-build` 1.9 GB). All four have `pact.toml` `[defaults]` keys; `--dry-run`
-prints the effective policy. Raise the cap when you have the memory for
-it, `--per-lane-reserve-mb 0` to size purely on instantaneous free
-memory, or `--min-free-mem-mb 0` to disable the memory check.
-
-```sh
-pact spawn-many --agent copilot --task "..." --task "..." --task "..." --max-concurrent 3
-```
-
-**`--shared-tree` runs every lane in one worktree instead of one per
-task.** For a batch whose tasks touch disjoint files, per-lane isolation
-and the merge phase are pure overhead: measured on a 39-file test-writing
-task (issue #310), isolated lanes plus `merge-all` took 53.6 min at 8
-lanes; the same lean workers in one shared checkout took 26.7 min at
-equal quality, with zero collisions. With `--shared-tree`, workers write
-into the same tree, `pact commit-all` captures it as one commit on the
-batch branch, and you verify once. Each lane still gets its own agent,
-log, coordination tools and run record, and is told it shares the tree
-and must `claim_files` before writing. It refuses when the task texts
-mention the same file unless `--allow-overlap` says those mentions are
-read-only. Use the default isolated mode for tasks that must edit the
-same files.
-
-```sh
-pact spawn-many --agent copilot --shared-tree \
-  --task-file briefs/api-tests.md --task-file briefs/ui-tests.md --task-file briefs/lib-tests.md
-pact commit-all
-```
-
-**`--runtime acp` runs every lane as a session inside one shared agent
-process** instead of one agent CLI process per lane (issue #331, Copilot
-CLI only for now). The agent process speaks the [Agent Client
-Protocol](https://agentclientprotocol.com) (`copilot --acp`); pact opens
-one session per lane with the lane's worktree as its `cwd` and the
-coordination server reachable over HTTP at a per-lane URL, so each lane
-still has its own id, log, leases and run record. Measured on a trivial
-task: eight lanes took 50.9 s and 2.4 GB as eight cold processes, 5.6 s
-and 0.45 GB as eight sessions in one process, since per-process startup
-is all of the former. `pact list` shows `runtime: acp session <id>` for
-such a lane, and tearing one down cancels its session rather than
-killing the shared process. Combine freely with `--shared-tree`. The
-full benchmark under `acp` (arm Q, issue #308) finished in 17.2 min
-against 15.8 for Copilot's own in-process sub-agents, with 11% less peak
-memory, 45% less mean memory, 27% less CPU and 25% more tests at the
-highest coverage of any arm, so the default is `auto` (issue #337): `acp`
-when every agent in the batch has an ACP mode, `process` otherwise.
-`--runtime process` or `acp` forces either; `defaults.runtime` in
-`pact.toml` sets the default.
-
-```sh
-pact spawn-many --agent copilot --runtime acp --shared-tree \
-  --task-file briefs/api-tests.md --task-file briefs/ui-tests.md --task-file briefs/lib-tests.md
-```
-
-**Neither `spawn` nor `spawn-many` commits anything.** An agent's changes
-land in its workspace's working tree; `pact list` shows it as `[dirty]`
-once the agent is done, which is expected, not a sign anything needs your
-attention. `pact commit-all` (or `pact merge-all`, which runs the same
-commit step automatically before merging each workspace) is what actually
-creates a commit, with a message derived from the workspace's task
-(`agent <id>: <task text>`). Checking a workspace's branch with `git log`
-before running either will show it at the same commit it forked from --
-that's this, not the agent having done nothing; `pact diff <id>` shows the
-uncommitted work directly.
-
-### Coordinating agents: claims and messages
-
-Every spawned agent gets the coordination tools automatically, wired in
-above -- there's nothing extra to set up for the agent side. For the
-human (or orchestrating script) side, watch what's happening and what's
-already happened:
-
-```sh
-pact diff <id>                      # committed (vs. merge-base) + uncommitted changes
-pact conflicts                      # files touched by >1 workspace forked from the same commit
-pact coord-status                   # active leases + each agent's pending message count
-pact clear-leases                   # explicit reset if a prior run's leases are still live
-pact history                        # every claim/release/message/merge-all/teardown, newest first
-pact history --workspace <id> --type merge_all --json
-```
-
-`pact coord-status` shows the coordination layer's *current* state (active
-leases, unread message counts); `pact history` shows what *happened* --
-every claim, release, broadcast, direct message, handoff request/response,
-`merge-all` invocation, Arbiter decision, and teardown recorded against
-this repo, filterable by `--workspace`, `--since <unix-seconds>`,
-`--type`, and `--limit`. Both are read-only. See
-[`SKILL.md`](SKILL.md) for the full set of MCP tools an agent itself
-calls (`claim_files`, `send_message`, `request_handoff`, and the rest)
-and the conventions around them -- that file is written for an agent to
-read directly, not just a human.
-
-### Merging completed work
-
-```sh
-pact merge-all
-pact merge-all --into custom-branch-name
-pact merge-all --append-only src/plugins.ts   # union-merge instead of a real conflict for this file
-```
-
-`merge-all` sequences every active workspace onto one integration branch,
-smallest/lowest-risk changes first, auto-committing each workspace before
-merging it. A workspace that merges cleanly is done; one that conflicts is
-skipped (not aborted) and recorded for `pact resolve` below, so one
-conflicting workspace never blocks the rest of the batch.
-
-### Resolving conflicts
-
-**A real merge conflict `merge-all` skips is resumable, not lost.**
-
-```sh
-pact resolve                        # lists every open conflict merge-all recorded
-pact resolve <id>                   # retries that workspace's branch against its target branch
-pact resolve <id> --abandon         # marks it abandoned instead of retrying
-```
-
-`pact resolve` (no id) lists every open conflict it recorded; `pact
-resolve <id>` retries that workspace's branch against the target branch
-it conflicted against, with the same `--append-only`/`--test-cmd`/
-`--arbiter-agent`/`--arbiter-safety` flags `merge-all` itself takes --
-useful once you've fixed the underlying disagreement in the workspace's
-branch, or want to point Arbiter at just this one conflict standalone.
-`pact resolve <id> --abandon` marks it abandoned instead of retrying. A
-moving-base skip (the workspace's recorded base is no longer part of
-history) isn't resumable this way -- only a real merge conflict is.
-
-### Arbiter: verifying an AI-proposed resolution against a real test
-
-For conflicts semantic/union merging can't handle safely, Arbiter asks a
-one-shot agent to propose a fix -- and never trusts that proposal without
-running a real test command against it first:
-
-```sh
-pact merge-all --arbiter-agent claude --test-cmd "npm test"
-pact merge-all --arbiter-agent claude --arbiter-safety unrestricted --test-cmd "cargo test"
-```
-
-Presence of `--test-cmd` is what turns Arbiter on at all -- omit it and
-`merge-all` behaves exactly as before, no extra agent ever spawned or
-billed. Arbiter's proposed resolution is only accepted if `<cmd>` then
-exits successfully in the same worktree; a rejection leaves the workspace
-as a normal skipped conflict, resumable via `pact resolve` above like any
-other. Live-verified, not just built: 4 independent real Arbiter attempts
-against the same reproducible conflict shape all succeeded, each
-inspected by hand, not just trusted from exit code.
-
-**`merge-all --require-passing-tests <cmd>` gates every clean merge on a
-real test command, not just a text-level conflict check.** Runs `<cmd>`
-in the integration worktree right after each workspace merges cleanly;
-a failure undoes just that one merge and skips the workspace, same as a
-real conflict, then moves on to the next -- one rejected workspace never
-blocks the rest of the batch. Distinct from Arbiter's `--test-cmd` (which
-verifies an agent-proposed *conflict resolution*, not every clean merge)
--- the two can be the same command or different ones, and both can be
-given together:
-
-```sh
-pact merge-all --require-passing-tests "npm test"
-pact merge-all --require-passing-tests "npm test" --gate final
-```
-
-`--gate` controls when that command runs. `each` (the default) runs it
-after every clean merge, so a failure is pinned to the one workspace that
-caused it and the rest still land. `final` merges every clean workspace
-first and runs the command once against the combined branch: one test run
-instead of N+1, which on a batch of independent workspaces is most of
-`merge-all`'s wall time, at the cost of localization. If the combined
-suite fails under `final`, the whole batch is rejected (the branch is
-reset to base and every merged workspace is listed as skipped), and the
-skip reason tells you to re-run with `--gate each` to find the culprit.
-`--gate` has no effect without `--require-passing-tests`.
-
-### Other commands
-
-```sh
-pact teardown <id>                  # refuses if the workspace has uncommitted changes, or if its
-                                    # branch holds commits no other branch reaches (unmerged work)
-pact teardown <id> --force          # tear down anyway, discarding uncommitted changes and unmerged commits
-pact teardown <id> --keep-branch    # remove the worktree but keep the workspace's branch and its commits
-```
-
-After `merge-all`, a workspace's commits are reachable from the
-`pact/merged-*` branch, so a plain `teardown` cleans up without complaint.
-The refusal only fires when deleting the branch would leave committed work
-reachable from nothing (issue #325).
-
-**Shell completions:** `pact completions <shell>` (bash, zsh, fish,
-powershell, elvish) prints a completion script to stdout -- e.g. `pact
-completions bash > /etc/bash_completion.d/pact`, or wherever your shell
-loads completions from, then start a new shell.
-
-**`pact doctor`** checks your environment before you hit a confusing
-failure three steps into a real `spawn`: whether `git` is installed and
-new enough for `worktree`, which agent CLIs (claude, copilot, codex,
-gemini, agy) are on `PATH`, and which package-manager CLIs `pact-deps`
-already knows how to prep. Read-only -- doesn't install or fix anything.
-Only a missing/too-old `git` makes it exit non-zero; a missing agent CLI
-or package manager is informational, since not everyone needs all of
-them.
-
-## Safety model
-
-There's no TTY in headless mode to answer an interactive permission
-prompt, so *some* unattended-safety setting is mandatory for every agent
-CLI. What that setting should default to was investigated empirically
-(issue #2), not assumed from docs, and the answer turned out to be
-different per adapter:
-
-- **Claude Code has a real, safer, non-hanging default.** Confirmed
-  directly: an explicit `--allowedTools` list (covering file
-  read/write/edit/search plus the VCS and package-manager commands
-  `pact-deps` already knows how to prepare -- `git`, `npm`, `pnpm`,
-  `yarn`, `cargo`, `go`, `pip`, `uv`, `mvn`, `gradle`), combined with
-  Claude Code's own baseline permission mode (not `bypassPermissions`),
-  makes an out-of-scope tool call get **denied cleanly and immediately**
-  rather than hang -- the agent adapts and keeps working with whatever it
-  *is* allowed to do. This is `pact`'s default for Claude Code now.
-  Earlier documentation here claimed no mode short of `bypassPermissions`
-  could avoid hanging; that was right about permission-mode alone, but
-  incomplete -- it's specifically an explicit tool allowlist that unlocks
-  safe non-interactive denial, independent of which permission mode is
-  active.
-- **Copilot CLI, Codex, Gemini CLI, and Antigravity don't have a confirmed
-  safe-and-functional alternative, so they keep their bypass-flag
-  defaults.** Copilot CLI's `--allow-tool` works for in-scope actions, but
-  confirmed directly: a task needing a tool outside that list **hangs**
-  (not a clean deny) -- its non-interactive mode doesn't have the same
-  auto-deny fallback Claude Code's does. Codex's `--sandbox
-  workspace-write` alone doesn't hang, but it also can't write files at
-  all in headless mode, which defeats the point of running it. Shipping
-  any of these as a "safer default" without that being true would repeat
-  exactly the mistake found and fixed in the Codex adapter (documentation
-  presented as fact, unverified) -- so all four keep their full-bypass
-  flag (`--allow-all-tools` / `--dangerously-bypass-approvals-and-sandbox`
-  / `--approval-mode yolo` / `--dangerously-skip-permissions`) for now,
-  stated plainly as a real, asymmetric gap rather than smoothed over.
-
-Every launch prints a warning naming exactly what the adapter's active
-setting permits (not just which flag string is in effect), and `--safety`
-is an explicit, overridable flag either way -- see "What can an agent
-actually do to my machine?" below.
-
-### What can an agent actually do to my machine?
-
-- **Claude Code (default)**: read/write/edit files anywhere in its
-  workspace, and run `git`/`cargo`/`go`/`pip`/`uv`/`mvn`/`gradle`
-  commands plus, for JavaScript, `node`, `npx tsc`/`vitest`/`eslint`/
-  `prettier`, `npm test`, `npm run lint`/`test`/`typecheck`, `npm ls`,
-  `npm view`. Dependency installs and full builds (`npm install`, `npm
-  run build`, and the pnpm/yarn equivalents) are deliberately not on the
-  lean list, for the same reasons as Copilot's deny rules below; `--no-lean`
-  restores the blanket `npm`/`pnpm`/`yarn` entries. Anything else (an
-  arbitrary shell command, a tool outside that list) is denied
-  automatically -- the agent will work around the denial rather than
-  stall.
-- **Copilot CLI (default), Codex (default), Gemini CLI (default), and
-  Antigravity (default)**: can run *any* shell command and edit *any*
-  file the OS-level user running `pact` can reach, with no restriction.
-  This is not a hardening choice -- it's the only configuration confirmed
-  to actually get work done in headless mode for Copilot CLI, Codex, and
-  Antigravity; for the standalone Gemini CLI it's the only thing that
-  could be *stated with confidence* won't hang, since this environment
-  has no Gemini auth configured to actually test a safer mode against
-  (see the Gemini adapter section in Design decisions). Treat any of
-  these four with the same trust you'd give a script you ran with your
-  own full user permissions, because that's effectively what it has.
-  One carve-out for Copilot CLI: its default **lean launch profile** adds
-  explicit `--deny-tool` rules for dependency installs (`npm install`,
-  `pnpm add`, `yarn add`, `bun install`, and the rest) and for full
-  builds and dev servers (`npm run build`, `next build`, `next dev`, ...),
-  because a workspace's `node_modules` is by default a link into the repo
-  root's own install and a full build is the verifier's job, not an
-  editor agent's. A denied command comes back to the agent as a clean
-  "denied" result (confirmed by hand, no hang) and it works around it.
-  `--no-lean` drops those rules along with the rest of the profile.
-- All five: `--safety <value>` overrides the default in that adapter's
-  own vocabulary (Claude Code's `--permission-mode` values, Codex's
-  `--sandbox` values, Gemini CLI's `--approval-mode` values, Antigravity's
-  `--mode` values; Copilot CLI has no gradient to override).
-- **Claude Code's `--safety plan` isn't a strict "nothing happens outside
-  the workspace" guarantee.** It's genuinely read-only for the target
-  repo -- confirmed by hand, a real edit task left the file untouched --
-  but Claude Code's own plan-mode feature may still write a plan document
-  to the host user's `~/.claude/plans/`, outside the isolated worktree
-  entirely and outside anything `pact teardown` tracks or cleans up.
-
-## Known limitations
-- **The Unix whole-group kill path has automated CI coverage on real
-  Linux/macOS runners, but no live-agent verification.**
-  `crates/pact-agents/tests/group_kill.rs` runs on every push on all
-  three CI platforms (not just Windows) and confirms the actual
-  mechanism -- spawn via `process_group(0)`, kill the group, confirm a
-  grandchild process died too -- works on real Linux and macOS, not
-  just in theory. `pact-vcs`'s cross-process `teardown` kill uses the
-  identical POSIX mechanism (same `process_group(0)` at spawn time, same
-  kill-by-group-id), so this test covers it by equivalence, not a
-  separate direct test. What's still unverified: a real agent CLI's own
-  process tree (a Bash tool spawning a child shell, the way Phase 0
-  found the original Windows gap) dying correctly on real Unix hardware
-  -- that specific scenario needs real agent-CLI access on Mac/Linux,
-  which this project's dev environment doesn't have. Tracked under
-  issue #6.
-- **CI covers cross-platform build + test, not live-agent verification.**
-  Every Phase 0-5 scenario in this README was verified by actually running
-  real agent CLIs on Windows -- CI (GitHub Actions, all three platforms)
-  catches compile/test regressions on macOS/Linux, but re-running those
-  same live scenarios there needs a human, or a cloud agent, with actual
-  access -- neither of which this project has had yet.
-- **No custom dependency-sharing store for plain pip/venv** -- deliberately
-  out of scope (see Design decisions), not an oversight.
-- **`spawn-many` applies one `--safety` override to every task in the
-  batch**, not per-task -- consistent with what issue #3's acceptance
-  criteria actually asked for; a plausible follow-up, not built ahead of
-  being needed.
-- **The standalone `gemini` CLI adapter (`--agent gemini`) is built, not
-  fully live-verified** -- its old individual-auth "Sign in with Google"
-  OAuth path is discontinued; the still-maintained `GEMINI_API_KEY` path
-  isn't configured in this environment either (re-confirmed by hand: a
-  real headless call hangs indefinitely with zero output). See "Gemini
-  CLI adapter" under Design decisions for what *was* partially confirmed
-  with a real key in an earlier session. Antigravity (`--agent agy`,
-  issue #9) is the real, live-verified path to Gemini-model access --
-  see its own section under Design decisions.
-- **`--agent agy`'s coordination is unsafe under real concurrency** --
-  Antigravity's own MCP-server registration (`agy mcp add`) is
-  process-global, not per-invocation, so `spawn-many --agent agy` with
-  more than one concurrent task races every `agy` process to overwrite
-  the same global registration; whichever workspace registered last is
-  what every concurrent `agy` process actually talks to. A single
-  `--agent agy` task at a time works correctly. See "Antigravity
-  adapter" under Design decisions.
-- **The Homebrew tap (`zekariasasaminew/homebrew-pact`) is built, not
-  live-verified against a real `brew install`** -- no macOS/Linux Homebrew
-  install available in this environment, and the formula's syntax was
-  checked by hand rather than with a real Ruby parse (no Ruby available
-  here either). See "Homebrew tap" under Design decisions.
-- **The winget manifest ([microsoft/winget-pkgs#407420](https://github.com/microsoft/winget-pkgs/pull/407420),
-  under review) is built, not live-verified with a real `winget validate`/
-  `winget install`** -- no Windows Package Manager client available in
-  this environment. Verified instead against a real, recently-merged
-  manifest with the same distribution shape. The PR's own CLA check needs
-  the repo owner's signature, which is outside what this session can
-  complete. See "winget manifest" under Design decisions.
-- **Demo GIF re-recording (issue #124).** `asciinema`'s own recorder can't
-  run on native Windows Python at all -- it unconditionally imports the
-  Unix-only `fcntl` module and fails before doing anything else, a hard
-  blocker, not a soft one. `agg` (asciinema's separate GIF renderer)
-  works fine standalone, though: it only turns an existing `.cast` file
-  into a GIF, no pty required. `docs/record_cast.py` captures `pact
-  demo`'s real, live stdout -- real content, real relative ordering, real
-  git-worktree-driven pauses -- directly into a `.cast` file, bypassing
-  asciinema's recorder entirely, then `agg` renders it. The one liberty
-  taken: real gaps between lines are mostly a few milliseconds (`pact
-  demo` finishes in about 1.5 seconds), so a minimum per-line hold is
-  applied to make it watchable -- raising unreadably-short real gaps,
-  never shortening a real one. A real recording on a Mac/Linux machine
-  would still be a strict improvement (no synthetic hold floor needed at
-  all), not a correctness fix.
-- **A task phrased as "wait for X, then do Y" can end its turn before Y
-  happens.** Confirmed by hand: given exactly that phrasing, Claude Code
-  ran the wait as an async background task and ended its own turn
-  without actually waiting for it -- `pact` correctly reports `done`
-  using the agent's own honest (but incomplete) final message, since
-  that's genuinely what happened, but `Y` never occurred. Prefer
-  phrasing that asks for a synchronous action and explicit confirmation
-  ("run X and confirm it finished, then do Y") over "wait for X" in a
-  headless task prompt.
-
-## Status (roadmap)
-
-What's shipped, phase by phase, and how each was actually verified --
-not a forward-looking wishlist, a record of what's real and what still
-needs a real environment (auth, hardware) this project doesn't have.
-
-| Phase | What | Status |
+| key under `[defaults]` | meaning | default |
 |---|---|---|
-| 0 | Workspace lifecycle + the concurrency fix | **Done** |
-| 1 | Dependency broker (shared installs) | **Done** |
-| 2 | Claude Code adapter, real headless launch | **Done** |
-| 3 | Coordination MCP server (leases + messages) | **Done** |
-| 4 | Copilot CLI + Codex adapters (both live-verified); `--agent`/`--safety` CLI flags | **Done** |
-| 5 | Real parallel launch (`spawn-many`) from a single invocation | **Done** |
-| 6 | Post-run review (`diff`) + safe teardown (uncommitted-change guard) | **Done** |
-| 7 | Shared npm store: extended keying + populate-failure fallback | **Done, later removed (issue #233) in favor of npm's own global cache** |
-| 8 | Cross-workspace conflict detection (`conflicts`, informational) | **Done** |
-| 9 | Gemini CLI adapter | **Built, not live-verified** (no auth available -- see below) |
-| 10 | Pluggable coordination server (`--coord-command`/`--coord-arg`) | **Done** |
-| 11 | First-5-minutes doc + demo GIF | **Done** |
-| 12 | Antigravity (`agy`) adapter, the real live-verified path to Gemini-model access | **Done, live-verified** |
-| 13 | Typed handoff/negotiation protocol between agents | **Done** |
-
-Phase 0 was verified against a real repository: 6 concurrent `spawn` calls
-all succeeded (reproducing, then passing, the exact scenario that fails in
-claude-code#34645), `git worktree list` matched pact's own state
-exactly, and `teardown` removed a worktree cleanly with no orphaned
-metadata.
-
-Phase 1 was verified against a real npm project (a `package.json` depending
-on a small real package): a cold `spawn` ran a real `npm ci` (~9s), and
-`node_modules` resolved correctly (`require` worked). One real bug found
-and fixed along the way: on Windows,
-`std::process::Command` doesn't resolve `npm`/`pnpm`/`yarn`'s `.cmd` shims
-the way a shell does (no `PATHEXT` lookup), so every passthrough call was
-silently failing with "program not found" until routed through `cmd /C`.
-
-Phase 2 was verified against a real headless launch: a task requiring an
-actual tool call (write a file with specific content), not a trivial
-text-only one, per review feedback that a no-tool-use test wouldn't
-exercise the important path. Confirmed: the `tool_use` event carried the
-correct file path scoped inside the workspace, the file's contents were
-exactly right, the raw NDJSON log matched what streamed to the terminal,
-and the tool-result echo event (a `"user"`-typed message, previously
-unobserved) came through as `[other]` rather than being silently dropped.
-
-The teardown-while-running path surfaced two real, previously unknown
-Windows bugs, only found by actually killing a running agent
-mid-task rather than assuming the happy path: (1) killing a process
-doesn't release its handles on its own working directory instantly, so an
-immediate `git worktree remove` raced that cleanup and failed; (2) git
-unregisters a worktree from its metadata *before* deleting the directory,
-so once (1) failed once, retrying `git worktree remove` failed differently
-("is not a working tree") while the directory sat there orphaned; (3)
-killing only the tracked PID wasn't enough at all -- a Bash tool call spawns
-a child shell process, and killing just the parent left that child alive,
-still holding the directory open for the rest of its natural life. Fixed
-with a retry-then-fall-back-to-direct-removal path for (1)/(2), and
-`taskkill /F /T /PID` (kills the whole descendant tree) for (3). See the
-`pact-vcs` commit history for the full writeup.
-
-Phase 3 was verified with two real, concurrent Claude Code sessions in the
-same repo, not a mocked or single-agent test: agent A claimed `src/*.txt`
-and broadcast a message; agent B retrieved that message via
-`check_messages` (confirmed byte-for-byte correct on disk), then claimed
-the narrower, differently-worded `src/hello.txt` and received back the
-correct conflict -- agent A's holder id, its actual pattern, and the
-specific overlapping file -- proving the glob-expansion overlap detection
-works against different pattern strings, not just identical
-ones. The coordination database was confirmed to land in the relocated
-platform data directory, not the repo-adjacent state tree.
-
-Phase 4 added Copilot CLI, live-verified to the same standard: launch
-flags and MCP config shape confirmed against real invocations, and the
-event schema confirmed by deliberately forcing a tool-call-producing task
-to capture `toolRequests`' real field names rather than guessing (they
-turned out to differ from Claude Code's: `name`/`arguments`, not
-`name`/`input`). A real coordination run against Copilot CLI worked
-end-to-end: `claim_files` called through the generated MCP config,
-`pact-coord` reported `connected`, and the exact JSON result written
-back to disk correctly. One more real bug found in the process, the same
-class as Phase 1's: Copilot CLI is *also* a Windows `.cmd` shim, and
-`pact-agents`' own process spawning had never gotten the `cmd /C`
-fix Phase 1 applied elsewhere in the codebase -- every Copilot launch was
-silently failing with "program not found" until fixed. The Codex adapter
-was initially implemented from documentation only (`codex` wasn't
-installed on this machine at the time) and was later upgraded to
-live-verified once it was actually installed and run: the documented
-`--ask-for-approval` flag doesn't exist in the real CLI, real end-to-end
-behavior (including a genuine `claim_files` MCP call through this
-project's own coordination server, returning the correct JSON) required
-`--dangerously-bypass-approvals-and-sandbox` instead, and a related bug
-was found and fixed along the way -- `process::run_and_stream`'s fallback
-outcome hardcoded `success: false` whenever an adapter didn't emit an
-explicit Result-shaped event, which silently mislabeled every successful
-Codex run as failed (Codex's `turn.completed` event, confirmed directly,
-carries no success/failure signal at all). Fixed to use the process's
-actual exit code instead. All three adapters (Claude Code, Copilot CLI,
-Codex) are now live-verified to the same standard.
-
-Phase 5 made `spawn-many` real concurrent launch, not N sequential
-invocations dressed up as one command -- see "Real parallel launch" under
-Design decisions for the threads-vs-async research and decision. Verified
-against real installed CLIs: two concurrent `claude` instances given
-different tasks (interleaved `[claude:0]`/`[claude:1]`-labeled output
-confirming genuine concurrency, ~15s wall-clock for both vs. the ~2x that
-would show if they ran serially), a mixed `claude`+`copilot` batch in one
-invocation, and a direct test of the new whole-process-group kill (killing
-a `cmd.exe` group with a running grandchild `ping.exe` took the grandchild
-down too, which the old single-child `Child::kill()` path could not do).
-Existing single-`spawn` and `teardown` behavior were re-run and confirmed
-unchanged.
-
-Phase 6 fixed a real, confirmed data-loss bug in `teardown` and added
-`diff` -- see "Teardown refuses on uncommitted changes now" under Design
-decisions. Live-verified: reproduced the original bug (an uncommitted file
-silently destroyed by teardown), confirmed the fix refuses and the file
-survives, confirmed `--force` still tears down a dirty workspace on
-request, confirmed `diff` shows a real commit an agent made plus a real
-uncommitted file, and confirmed a clean workspace tears down without
-needing `--force`.
-
-Phase 7 extended the npm content store's keying and added a real
-populate-failure fallback -- see "Store keying grew two dimensions" under
-Design decisions. Live-verified with a real package with a postinstall
-step (`esbuild`): confirmed the new key format includes npm's version,
-confirmed a genuine store-population failure (a real Windows `MAX_PATH`
-issue, not a synthetic one) correctly triggered the new fallback to a
-plain per-workspace install, and confirmed the fallback's warning is
-logged (`tracing_subscriber::fmt`'s default writer is stdout, not
-stderr -- worth knowing if you're grepping the wrong stream for it, as
-this session briefly did before checking).
-
-Phase 8 added cross-workspace conflict detection -- see "Cross-workspace
-conflict detection is informational, not blocking" under Design
-decisions. Live-verified: two real `claude` workspaces forked from the
-same commit, both editing the same file, correctly reported by `pact
-conflicts` and by `teardown`'s pre-removal warning; a real coordination-DB
-lease and message, both correctly surfaced as related context in the
-report.
-
-Phase 9 added a fourth adapter, Gemini CLI -- see "Gemini CLI adapter:
-real CLI facts, blocked on live-verification" under Design
-decisions. Built from a real installed CLI (confirmed flags, and a
-third MCP-config mechanism, by actually running `gemini mcp
-add` and reading the file it wrote), but not live-verified the way the
-other three adapters are: no Gemini auth is configured in this
-environment. `pact spawn --agent gemini` against a scratch repo confirmed
-the MCP config is written correctly and that a real auth failure is
-reported as a clean `failed` outcome (not a hang or a crash), but the
-streaming event schema and the safety-default hang-vs-deny question stay
-unconfirmed. Issue #9 stays open rather than closed until that changes.
-
-Phase 10 made the coordination server's command pluggable -- see
-"Coordination server is pluggable at the command level" under Design
-decisions. Live-verified: a real `spawn` with `--coord-command`/
-`--coord-arg` produced a generated MCP config carrying the overridden
-command and args instead of `pact mcp-serve`, and the existing
-coordination-status check correctly reported the (deliberately
-nonexistent, for the test) alternative server as failed rather than
-silently accepting it.
-
-Phase 11 shipped `GETTING_STARTED.md` (every command in it re-run and
-confirmed against a real scratch repo before being written down) and the
-original `docs/demo.gif` -- rendered at the time from real captured
-`spawn-many` output via a small Pillow script, since `asciinema` couldn't
-run at all in this environment. Re-recorded later (issue #124) once `agg`
-(asciinema's own GIF renderer) turned out to work fine standalone --
-see "demo GIF re-recording" under Known limitations for the current
-pipeline and what it still doesn't capture.
-
-## Design decisions
-
-**Reference material for technical readers**, not required to use pact --
-if you're here to run pact, everything above this point already covers
-it. This section exists because the decisions below came from research
-and back-and-forth discussion, not defaults — the reasoning is worth
-keeping visible so it isn't silently re-litigated later.
-
-### git worktree, not Jujutsu (jj)
-
-Jujutsu's workspace model (`jj workspace add`) looks, on paper, like the
-better fit: a lock-free operation log built for exactly this kind of
-concurrent, multi-workspace use, plus first-class non-blocking conflicts.
-It was seriously considered, including a real bug in Claude Code itself —
-[anthropics/claude-code#34645](https://github.com/anthropics/claude-code/issues/34645)
-— where concurrent `git worktree add` calls race on `.git/config.lock` and
-fail, which is exactly the class of problem jj's operation log is designed
-to avoid.
-
-It was ruled out after a hands-on spike, not a documentation read:
-
-- `jj git init --colocate` gives real git-command transparency, but only to
-  the **one primary workspace**.
-- `jj workspace add` — the feature that would let an orchestrator cheaply
-  spin up N parallel agent workspaces — creates a directory with **no
-  `.git` at all**. Confirmed directly: `git rev-parse --show-toplevel` run
-  inside one silently climbed the directory tree and attached itself to an
-  unrelated ancestor repository instead of erroring.
-- The one documented workaround (a `.git` file with a `gitdir:` pointer)
-  restores git *reads* only. Its own author's warning: git *writes* (add,
-  commit, checkout, reset, stash) inside that workspace mutate the *main*
-  repo's shared index/HEAD directly.
-
-Since Claude Code, Copilot CLI, and Codex all write via native git
-constantly — not occasionally — that's not an edge case, it's a
-guaranteed collision, just moved one layer down and made silent instead of
-loud. The bug that motivated considering jj is real, but the fix belongs in
-the orchestrator's own locking (see `pact-vcs` below), not in swapping
-the VCS.
-
-### Rust
-
-Matches the class of tool this is (uv, Codex CLI itself are both Rust):
-precise control over hardlink/reflink/copy-fallback filesystem semantics,
-a small static binary, and a concurrency model suited to supervising
-several child processes at once.
-
-### Dependency sharing leans on what already exists
-
-Most package ecosystems already solved global dependency sharing — Cargo,
-Go modules, Maven, Gradle, uv, pnpm, yarn, Bun, poetry, and pipenv all use
-a global content-addressed or version-keyed cache by default. `pact-deps`
-(Phase 1) detects the package manager and passes through to the
-ecosystem's own cache (`passthrough.rs`) — including npm, via `npm ci`
-relying on npm's own global cache (`~/.npm` or wherever `npm config get
-cache` points), shared automatically across concurrent `npm ci` calls
-with no pact-side coordination needed.
-
-A cache only saves the download, though; every workspace still pays the
-extraction. Issue #283 measured that at 99 s and 32,104 file writes per
-workspace for one Next.js app on Windows/NTFS with a warm cache, which is
-what actually stopped several agents from running at once on a 14 GB
-laptop. So the default is now to *link* `node_modules` to the repo root's
-existing install (a junction on Windows, a symlink elsewhere, 0.12 s)
-and only fall back to a real install when there is nothing to share, or
-when asked (`--deps install`). Two facts found by hand shaped this: `git
-worktree remove` follows such a link and deletes the target's contents,
-so teardown unlinks first (see DESIGN.md, "Reparse points and worktree
-removal"); and Turbopack rejects a linked `node_modules` outside its
-configured root, so full Next.js builds belong in a real-install
-worktree, not a linked editor workspace. Hardlinks were measured too (30
-s with 16 threads, no disk cost) and rejected as the sharing mechanism:
-they alias the same bytes, so a mutating install through one clone
-corrupts every other.
-
-That wasn't the original design. Through issue #233, npm was the one
-ecosystem pact built its own machinery for: a lockfile-hash-keyed content
-store (`store.rs`), with reflink/read-only-hardlink/copy materialization
-into each workspace and its own `PidLock`-guarded population. It worked,
-and grew real correctness features over several phases (see "Store keying
-grew two dimensions" below for that history) — but it was pact-specific
-infrastructure solving a problem npm already has a good answer to via its
-own cache. Issue #233 deleted it in favor of just calling `npm ci`
-directly in each workspace, the same passthrough treatment every other
-ecosystem already got. Verified by hand before deleting it: 5 concurrent
-`npm ci` calls sharing one global cache, both cold and warm, succeeded
-with no corruption and no errors. This is a breaking change to the CLI
-surface (`pact store list/verify/clean` no longer exist) — see the
-release notes for the version that shipped it.
-
-Plain pip/venv remains a case where no custom store was built, for a
-different, still-valid reason: Python venvs aren't reliably relocatable
-(activation scripts, `.pth` files, and console-script shebangs can embed
-absolute paths tied to the original venv), so hardlinking `site-packages`
-into a fresh venv would have been a correctness risk, not just extra
-engineering. Since pip already has its own global download cache
-(`~/.cache/pip`) covering the expensive part (network fetch), the
-remaining gap is bounded and left as future work.
-
-If a workspace's repo has no committed `package-lock.json` at all, npm
-install still runs (so the agent has working `node_modules` from the
-start) but with `--no-package-lock` — there's no stable lockfile to run
-`npm ci` against, and letting each workspace generate its own lockfile
-independently would otherwise show up as a spurious merge conflict on
-`package-lock.json` at `merge-all` time even when the two workspaces
-touched entirely disjoint source files.
-
-### Signaling scope for v1
-
-Advisory, glob-based, TTL-expiring file leases plus a threaded message log
-between agents — the same shape validated at real scale (40-50 concurrent
-agents) by prior art ([MCP Agent Mail](https://mcpagentmail.com/)). Deep
-semantic/AST-based "this changed a function signature used by X" analysis
-is deliberately out of scope for v1: it's language-specific by nature,
-which cuts against the language-agnostic goal, and it's a large amount of
-scope for a v1. It's a plausible future direction once the basic lease/
-message loop is proven, not a v1 requirement.
-
-Leases are advisory by design, not enforced: `claim_files` is granted
-regardless of conflicts it finds, same as prior art. What isn't a minor
-detail is *how* overlap is detected -- two glob patterns can look nothing
-alike as strings and still cover the same files (`src/**/*.rs` vs
-`src/foo.rs`), so `pact-coord` expands both patterns against the
-actual files in a workspace and intersects the resulting sets, rather than
-comparing pattern strings. Verified against exactly that case, not just
-identical patterns: one agent claimed `src/*.txt`, a second claimed the
-narrower `src/hello.txt`, and the conflict was correctly detected and
-reported with the specific overlapping file named.
-
-`check_messages` never returns a message the calling agent sent itself --
-direct messages already excluded anything not addressed to the caller, and
-broadcasts are now excluded the same way, so an agent that broadcasts a
-status update and then polls in a loop doesn't see, and react to, its own
-broadcast.
-
-The coordination database is deliberately *not* stored alongside
-per-workspace bookkeeping in `.pact-<repo>/` (see State layout) --
-that directory sits one level above every workspace
-(`workspaces/<id>/../..`), and headless launches default to
-`bypassPermissions`, so a careless broad shell command in any one agent's
-workspace could otherwise reach and corrupt coordination state every other
-agent depends on. It now lives under the platform's local data directory
-instead, keyed by a hash of the repo root. Not a hard security boundary --
-an agent's Bash tool can still reach an absolute path -- but it removes the
-realistic risk of stumbling into it by accident via `../..`. Found by
-independent plan review before this was built, not after.
-
-`rmcp` (the official Rust MCP SDK) requires an async runtime. Rather than
-making the whole CLI async for this one server, it runs as its own OS
-process (`pact mcp-serve`, launched by the agent CLI itself over
-stdio, not run in-process by the orchestrator), and that subcommand builds
-its own `tokio::Runtime` just for its own lifetime -- `spawn`/`list`/
-`teardown` stay exactly as synchronous as before. Same reasoning as the
-process-supervision decision below.
-
-### The orchestrator must own workspace creation
-
-A consequence discovered during the jj spike, not an arbitrary choice: this
-tool has to create each workspace and launch **one agent process into it
-itself**. It can't lean on an agent CLI's own built-in parallelism (Copilot
-CLI's `/fleet`, Claude Code's Task-tool subagents-with-worktrees), because
-that would mean two independent orchestration layers fighting over the
-same repository.
-
-### Process supervision stays synchronous for now
-
-Everything in the codebase is blocking `std::process::Command`, including
-Phase 2's agent launch -- `tokio` was declared as a workspace dependency
-from the initial scaffold but is still unused. Introducing it just for one
-adapter would mean either a half-async codebase or forcing every existing
-blocking call through `spawn_blocking` for no present benefit, since only
-one child process runs per `spawn` today. The seam that will matter is
-structural, not sync-vs-async: process supervision lives entirely behind
-`pact_agents::run_and_stream`, so whichever phase first needs to
-supervise several *running* agents concurrently can change what's behind
-that boundary without touching adapters or the orchestrator's call site.
-
-### One AgentAdapter trait, not one unified safety enum
-
-Phases 0-3 built exactly one adapter (Claude Code) without the
-abstraction; `AgentAdapter` (Phase 4) was introduced once a second and
-third real case existed to generalize against, not designed speculatively
-in advance. The trait deliberately does *not* try to unify each CLI's
-safety/approval vocabulary into one shared enum: Claude Code's
-`--permission-mode` has six values, Copilot CLI's is a binary on/off with
-no gradient at all, and Codex's real, confirmed shape turned out to be one
-all-or-nothing flag (`--dangerously-bypass-approvals-and-sandbox`) rather
-than the two independent `--sandbox`/`--ask-for-approval` axes OpenAI's
-docs implied -- `--ask-for-approval` doesn't exist in the installed
-version's `codex exec --help` at all. `build_command` takes a raw string
-passed straight through to whichever vocabulary the chosen adapter uses,
-rather than a shared type that would either lose expressiveness or need
-constant extending as a fourth CLI's vocabulary inevitably differs again.
-
-What *is* shared is `CoordConfig` -- what to tell an agent CLI about the
-coordination server (name/command/args) is adapter-agnostic, even though
-*how* to hand it over isn't: Claude Code and Copilot CLI both confirmed
-the identical `{"mcpServers": {...}}` JSON-file-plus-flag shape, while
-Codex takes inline `-c mcp_servers.<id>.*` config overrides instead and
-needs no file at all -- confirmed working end-to-end, including a real
-`claim_files` call through this project's own coordination server.
-
-Codex's adapter was initially built from OpenAI's documentation alone (the
-machine this project was first built on didn't have `codex` installed),
-and was upgraded to live-verified once it was actually installed and run:
-the documented `--ask-for-approval` flag turned out not to exist, and had
-to be replaced with the confirmed-working bypass flag above. That's the
-concrete reason this project treats "docs-only" and "live-verified" as
-different claims, not a formality -- the docs were wrong on the
-one flag that mattered most. One risk avoided along the way regardless:
-Codex's normal MCP config mechanism is a `$CODEX_HOME/config.toml` file,
-but `CODEX_HOME` also relocates auth/session state, not just config --
-pointing it at a per-workspace directory would plausibly break headless
-login on first use. The inline `-c` override sidesteps that entirely, and
-was confirmed to actually connect to and call a real MCP server.
-
-### Gemini CLI adapter: real CLI facts, blocked on live-verification
-
-A fourth adapter, built from a real installed `gemini` CLI
-(`@google/gemini-cli` 0.50.0) rather than documentation alone -- but
-**not live-verified against a real authenticated session**, because this
-environment has no Gemini API key or Google Cloud auth configured, and
-`gemini -p "..."` fails immediately with `Please set an Auth method...`.
-Completing a Google OAuth login on the user's behalf wasn't attempted --
-that's an identity/credential decision that isn't this project's to make
-autonomously.
-
-What *is* confirmed by actually running the CLI, not guessed from docs:
-`-p`/`-o stream-json` for headless streaming output, and a third
-MCP-config mechanism among the four adapters -- confirmed by
-running `gemini mcp add --scope project` and reading the file it wrote.
-Gemini CLI reads `.gemini/settings.json`, relative to its own working
-directory, automatically; no CLI flag hands it over at all, unlike Claude
-Code/Copilot CLI's file-plus-flag shape or Codex's inline `-c` overrides.
-The file's shape is identical to Claude Code/Copilot CLI's
-`{"mcpServers": {...}}` (the same `write_mcp_json_config` helper works
-unchanged), just written to a different, fixed path. Confirmed
-end-to-end short of authentication: a real `pact spawn --agent gemini`
-run against a scratch repo correctly wrote the MCP config into the
-workspace before launching, and `gemini` failed with its own real auth
-error (exit code 41) rather than pact hanging or crashing -- `pact`
-reported it as a clean `failed` outcome using the process's actual exit
-code, the same fallback Codex's missing Result-event schema already
-relies on.
-
-A real headless-safety gap was found and fixed on a later verification
-pass (still short of authentication, same environment): `--approval-mode
-yolo` alone silently downgrades to `default` (interactive confirmation)
-in a directory Gemini CLI hasn't been told to trust yet -- confirmed
-directly, `gemini`'s own stderr prints `Approval mode overridden to
-"default" because the current folder is not trusted.` before it even
-reaches the auth check. `default` mode would hang forever waiting for a
-confirmation prompt that can never come in headless mode -- the same
-class of footgun this codebase already tracks carefully for Copilot
-CLI's own hanging `--allow-tool` behavior. `--skip-trust` (confirmed
-against real `gemini --help` output) fixes it: re-running with the flag
-added, the trust-override message disappears entirely, leaving only the
-(expected, unrelated) auth failure. `build_command` now always passes
-`--skip-trust` alongside `--approval-mode`, not just an assumption --
-verified by hand, not merely reasoned about, exactly the standard the
-other three adapters were already held to.
-
-What's still unconfirmed: the streaming JSON event schema (`parse_line`
-is modeled on the shape common to the other three adapters, deliberately
-defensive -- anything unrecognized surfaces as `Other` rather than being
-dropped, precisely because this guess *will* need correcting once run for
-real) and whether a safer approval mode denies cleanly rather than
-hanging. Default safety is `--approval-mode yolo --skip-trust` -- not
-claimed as a verified safer option, the same honest category Copilot CLI
-and Codex are already in. No `GEMINI_API_KEY` is configured in this
-environment either, re-confirmed while building the Antigravity adapter
-below (a real headless `-p` call hangs indefinitely with zero output,
-consistent with no credential being present) -- the individual-auth
-OAuth path's discontinuation (see "Partial live verification" under
-Design decisions) is a separate, already-documented fact, not something
-this pass re-tested or re-confirmed.
-
-### Antigravity adapter: the real, live-verified path to Gemini-model access (issue #9)
-
-A fifth adapter, `--agent agy`, targeting Antigravity's own CLI (`agy`) --
-not a patch to the `gemini` adapter above, a genuinely different tool:
-`agy` is a multi-model CLI (Gemini, Claude, and GPT-OSS backends all
-selectable via `--model`), confirmed by running `agy models`, not
-assumed. **Live-verified end-to-end**, not just built from `--help` text:
-a real `pact spawn --agent agy` run against a scratch repo completed a
-real tool-using task (writing a file with specific content) and the
-written file's contents were confirmed correct by hand.
-
-Two real bugs found and fixed while building this, both the kind this
-project's "confirm by hand" discipline exists to catch:
-
-- **`agy`'s own `write_to_file` tool defaults to writing into its
-  internal scratch directory** (`~/.gemini/antigravity-cli/scratch/`),
-  not the process's actual working directory -- confirmed directly: a
-  first real run's file landed there instead of the workspace, which
-  would have silently broken the entire per-workspace isolation model if
-  shipped unnoticed. `--add-dir <workspace_path>` fixes it (confirmed by
-  a second real run landing the file correctly) and is now always passed.
-- **A `step_update`'s `conversation_id` sits at the event's top level**,
-  not nested under its own `"init"` object the way a first guess
-  (pattern-matched against the other adapters' shapes) assumed -- a real
-  spawn's `[init] session` line printed empty until this was corrected
-  against the actual raw log. Also found live: a real tool call fires
-  *two* `step_update`s (`state: "ACTIVE"` then `"DONE"`) for the same
-  tool invocation; only `ACTIVE` is surfaced now, or every real tool call
-  printed twice in the live CLI view.
-
-**MCP config mechanism is process-global, not per-invocation** -- a real,
-structural difference from every other adapter, not a workaround: `agy
-mcp add <name> <command> [args...]` writes to a single
-`~/.gemini/config/mcp_config.json` shared by *every* `agy` invocation on
-the machine (confirmed by adding a test entry and finding where it
-landed), unlike Claude Code/Copilot CLI's per-spawn config file, Codex's
-inline overrides, or even Gemini CLI's fixed-but-at-least-per-project
-path. `build_command` re-registers this workspace's own `pact mcp-serve`
-invocation under the fixed name `pact-coord` immediately before each
-spawn ("add or update" semantics, confirmed by hand) -- correct for one
-`agy` run at a time, but genuinely racy if two or more `agy` spawns are
-truly concurrent: whichever registered last wins for both, so which
-workspace's coordination server a given `agy` process actually talks to
-depends on timing, not which workspace it's running in. Documented as a
-real limitation of `agy`'s own current CLI, not silently worked around --
-`spawn-many --agent agy` with more than one concurrent task should be
-treated as unsafe for coordination until Antigravity ships a
-per-invocation config mechanism.
-
-No coordination-status event was observed in the real spawn's own raw
-log at all (unlike Claude Code/Copilot's explicit `mcp_servers_loaded`-
-style events) -- `pact` correctly falls into the same "never reported a
-status" honest-warning path Codex's adapter already uses, not a new gap.
-
-### Real parallel launch: OS threads, not async/tokio
-
-Phase 2 deliberately kept process supervision synchronous, flagging that
-whichever future phase first needed to supervise several agents
-concurrently *in one process* would need to change what's behind
-`pact_agents::run_and_stream`'s boundary. That phase is this one. The
-choice of *how* -- OS threads vs. converting to async/tokio -- was
-researched properly before deciding: two independent passes built the
-strongest case for each side, then rebutted each other's case directly,
-rather than picking the familiar option by default.
-
-**Threads won.** The deciding factor was shape: `spawn-many` runs a fixed,
-small, user-enumerated set of children to completion with combined
-attributed output -- the same shape as Go's `overmind`/`goreman`
-(goroutine-per-process), not the many-tasks-over-few-workers scheduler
-shape that actually justifies `cargo-nextest`'s or Turborepo's tokio use.
-Async's two concrete technical arguments didn't survive rebuttal: a crate
-called `command-group` gives whole subprocess-tree containment (POSIX
-process groups, Windows Job Objects) to plain `std::process::Command`,
-with tokio as an *optional* feature only -- neutralizing the one
-scale-independent advantage async had. The async sketch also had an
-unacknowledged blocking-call-in-executor problem (synchronous log-file
-writes inside an "async" task), and its claim that wrapping single-`spawn`
-in a fresh `Runtime::new()?.block_on(...)` was "free" overstated its own
-precedent (`mcp-serve`'s isolated runtime is a one-off subcommand, not
-every `spawn` invocation). The one surviving async argument -- "pact's
-roadmap includes more adapters and pluggable coordination, pay the async
-cost now" -- was speculative in exactly the way this project has avoided
-elsewhere (`AgentAdapter` was only introduced once a second and third real
-adapter existed, not designed in advance of needing it).
-
-One improvement fell out of this research regardless of which side won:
-`command-group`'s whole-tree containment also closes a real gap the
-*single*-agent Ctrl-C path already had. Before this, interrupting a live
-`pact spawn` only killed the tracked agent process itself via plain
-`Child::kill()` -- a Bash tool call's child shell (and anything *it*
-started) kept running, silently holding the workspace directory open.
-Confirmed directly: killing a `cmd.exe` process group with a running
-grandchild `ping.exe` underneath it took the grandchild down too (see
-`pact-agents/examples/group_kill_check.rs`, a manual Windows-only
-verification harness, not part of CI). `teardown`'s Windows `taskkill /T`
-already had this property; live Ctrl-C during `spawn` did not, until now.
-
-A second improvement, closing part of a documented known limitation:
-since every agent is now spawned via `command_group`'s `process_group(0)`,
-it becomes its own process group leader on Unix, meaning its pgid equals
-its pid. That means the `agent_pid` `pact` already persists to disk (so a
-`teardown` invoked from a *different* process than the one that spawned
-the agent can find it) is, by itself, enough to kill the whole group
-cross-process: `kill(-pid, SIGKILL)`. Implemented in `pact-vcs` from
-documented POSIX semantics and `command_group`'s own source, but --
-per issue #6 -- not yet exercised on real Unix hardware, since this
-project's dev environment is Windows-only. Treat as
-implemented-not-live-verified until that happens.
-
-**What stayed synchronous.** `pact-core`, `pact-vcs`, and `pact-deps` are
-untouched -- no tokio anywhere outside `pact-cli`'s `mcp-serve` runtime and
-`pact-coord`. `Orchestrator::spawn_many` shares one new `Supervisor` (a
-registry of live child process groups plus a single process-wide Ctrl-C
-handler, installed once) across `std::thread::scope`-spawned threads, one
-per task; single-`spawn` creates its own single-use `Supervisor`, so its
-observable behavior -- one handler, one child, installed and torn down
-within one call -- is unchanged. The concurrency this relies on
-(`create_workspace` and `pact_deps::prepare` running from several threads
-at once) already existed and was already verified: it's the same
-`PidLock`-guarded serialization Phase 0 confirmed against 6 concurrent
-`spawn` calls, not new synchronization added for this phase.
-
-### Teardown refuses on uncommitted changes now -- confirmed it didn't before
-
-This was a real, confirmed data-loss bug, not a hypothetical gap the issue
-speculated about. Reproduced directly: spawned a real workspace, added an
-uncommitted file to it, ran `pact teardown`, and the file was silently
-gone afterward -- no warning, no prompt, nothing. Root cause:
-`pact-vcs::remove_worktree_retrying` always called
-`git worktree remove --force`, which unconditionally bypasses a protection
-git itself already has -- confirmed separately that plain
-`git worktree remove` (no `--force`) refuses outright on that same dirty
-worktree (`fatal: ... contains modified or untracked files, use --force to
-delete it`). Every `pact teardown` had been silently defeating that
-protection since Phase 0.
-
-The fix mirrors git's own convention rather than inventing a new one:
-`teardown` now checks `git status --porcelain` first and refuses by
-default on any uncommitted change, printing exactly what's there; a new
-`--force` flag proceeds anyway. This was originally kept separate from the
-existing `--keep-branch` on the reasoning that working-tree dirt (never
-committed, not in git's object database at all) was the real
-unrecoverable-data-loss risk, while a committed-but-unmerged branch stayed
-reachable via reflog for a while even after `-D`. That second half turned
-out to be wrong for pact's own teardown sequence (branch deletion drops
-the branch reflog, worktree removal drops the worktree's HEAD reflog), and
-a benchmark result was orphaned exactly that way; `teardown` now also
-refuses to delete a branch whose commits no other branch reaches unless
-`--force` or `--keep-branch` is given (issue #325, DESIGN.md "Workspace
-teardown").
-
-`pact diff <id>` (new) and a `[dirty]`/`[clean]` indicator on `list` round
-out the rest of this phase's acceptance criteria -- seeing what an agent
-actually did (both committed-on-branch and still-uncommitted) before
-deciding whether to keep, discard, or manually merge it. `accept`/`reject`
-verbs were deliberately not built: auto-merging multiple agents' output is
-explicitly out of scope for this issue, and a thin `accept` that just
-shells out to `git merge`/`cherry-pick` doesn't add enough over doing that
-directly once `diff` has shown what's there.
-
-### Store keying grew two dimensions, and gained a real fallback -- both found by risk analysis, one confirmed by a real failure
-
-**Superseded by issue #233** — the custom npm content store this section
-describes was deleted in favor of relying on npm's own global cache (see
-"Dependency sharing leans on what already exists" above). Kept here as
-history: real correctness work that happened and was verified, on
-infrastructure that later turned out not to be worth keeping once a
-simpler alternative was actually tried.
-
-The npm content store's original key (`{os}-{arch}-node{major}-{lockfile
-hash}`) had two real gaps, found by working through concrete failure
-scenarios rather than assuming the existing dimensions were enough:
-
-- **npm version wasn't part of the key**, so two workspaces on machines
-  with different globally-installed npm versions, hitting the same
-  lockfile hash, would share a store entry populated by whichever ran
-  first -- even though different npm versions can lay out `node_modules`
-  differently from an identical lockfile. Fixed: npm's own version is now
-  in the key.
-- **libc flavor (Linux only) wasn't part of the key.** Packages that
-  resolve a platform-specific binary via `optionalDependencies` (`esbuild`,
-  `swc`, `sharp`, and others in that exact shape) pick a *different* one
-  for musl (Alpine) vs. glibc (Debian/Ubuntu) despite both reporting the
-  same `os=linux, arch=x86_64` -- a real risk in the common case of mixed
-  Alpine/Debian Docker-based dev environments, not an edge case. Fixed:
-  a `-musl`/`-glibc` suffix, detected via the presence of musl's dynamic
-  linker, is now in the key on Linux.
-
-**The more consequential gap, and the one a real failure confirmed rather
-than just a risk analysis predicting it:** `prepare_npm` previously had a
-fallback to a plain, unshared `npm install` only when there was *no
-lockfile at all* -- if a lockfile existed but store *population* itself
-failed (`npm ci` erroring inside the store's staging directory), the
-error was logged and the workspace was left with no `node_modules` at
-all, not a normal install. Verified live, and this surfaced a genuine,
-previously-unknown failure mode in the process: on Windows, populating a
-store entry for `esbuild` (a package with a postinstall step) failed with
-`ENOENT` spawning `cmd.exe` -- not because `cmd.exe` was missing, but
-because the fully-qualified path exceeded Windows' `MAX_PATH` (260 chars)
-once nested under the store's own (necessarily long, hash-containing) key
-directory inside an already-long state-dir root. `prepare_npm` now
-catches a population failure and falls back to a plain per-workspace
-install (confirmed to succeed where the store population didn't, since
-its path is shorter), logging why -- exactly the "falls back... instead of
-trying to force it" behavior this issue asked for, exercised by a real
-failure rather than a synthetic one.
-
-**On the test matrix:** this project's dev environment is Windows-only
-(confirmed: no APFS/ext4/btrfs access, only one local NTFS volume to test
-against) -- the same honest constraint as issue #6. The cross-filesystem/
-unsupported-FS fallback path (reflink -> hardlink -> plain copy) was
-verified by reading `detect_link_mode`/`link_one`'s logic, not by
-constructing an actual cross-filesystem scenario, since a second real
-filesystem wasn't available to test against here.
-
-### Cross-workspace conflict detection is informational, not blocking
-
-MCP leases are advisory by design (`claim_files` grants regardless of
-overlap it finds -- see the coordination-flow design decision above), and
-this deliberately extends that same philosophy rather than inventing a
-stricter standard just for this check. `pact conflicts` (and an automatic,
-non-blocking warning before `teardown` removes a workspace) reports files
-touched by more than one active workspace that share a common
-merge-base -- but nothing here blocks anything. Running several agents at
-similar tasks on purpose, then discarding whichever result is worse, is a
-legitimate and common way to use `spawn-many`; blocking teardown on "another
-workspace also touched this file" would fight that workflow instead of
-supporting it. This is separate from `teardown`'s *existing* blocking
-check (issue #4, uncommitted changes) -- that one stays exactly as it was.
-
-Each reported conflict links back to coordination context for free: a
-workspace's id is the same string as its MCP `agent_id`, so any lease
-(active or expired -- a lapsed-but-relevant claim is still useful context,
-not noise to filter) whose glob matched the file, and how many
-coordination messages exist involving the workspaces in question, join
-directly with no new plumbing. Detection itself stays at the file-path
-level, the same restriction the README already states for leases --
-semantic/AST-level analysis is still out of scope for v1.
-
-### Coordination server is pluggable at the command level, not protocol-compatible with anything specific
-
-Evaluated first, per this issue's own framing, whether pluggability was worth building at all: MCP Agent Mail (the prior art cited elsewhere in this README, running at 40-50 concurrent agents) has its own tool shapes, not literally pact-coord's `claim_files`/`release_files`/`send_message`/`check_messages` contract -- so "plug in MCP Agent Mail" was never actually one config flag away, and building a translation layer between differing MCP tool shapes for a scaling problem nobody's confirmed hitting yet (this project hasn't soft-launched -- see issue #12) would be exactly the kind of premature abstraction avoided elsewhere in this codebase (`AgentAdapter` was only generalized once a second and third real adapter existed).
-
-What *was* worth doing: today, the coordination server's command was hardcoded to pact's own binary with no way to override it at all, even for someone willing to speak pact-coord's exact contract themselves (a hardened or custom reimplementation of the same lease/message API). `spawn`/`spawn-many --coord-command <path> --coord-arg <arg>` (repeatable) now override what gets written into the generated MCP config -- confirmed end-to-end: the resulting `{"mcpServers": {...}}` file correctly carried the overridden command/args instead of `pact mcp-serve`, and the existing coordination-status warning correctly reported the (deliberately nonexistent, for the test) alternative server as `failed` rather than silently accepting it. Pact does zero protocol translation either way -- whatever this points at must speak pact-coord's contract on its own.
-
-**What the built-in server provides, for anyone evaluating an alternative:** advisory glob-based file leases with TTL expiry, a threaded message log (broadcast or direct), a typed handoff/negotiation protocol (`request_handoff`/`check_handoffs`/`respond_handoff` -- structured requests with a real status lifecycle, not just prose messages; issue #163), SQLite+WAL storage, verified with two real concurrent agents (see Phase 3). **What it doesn't:** no confirmed ceiling anywhere near MCP Agent Mail's cited 40-50-concurrent-agent scale (also, to be clear, no confirmed *failure* at that scale either -- just untested), no semantic/AST-level conflict analysis (deliberately out of scope for v1), no enforcement (leases are advisory by design, not locks).
-
-### The coordination server also speaks Streamable HTTP, one route per lane
-
-`pact_coord::http::serve` plus `add_lane` (issue #329) serve the same tools over HTTP from inside the orchestrating process, at `http://127.0.0.1:<port>/lanes/<workspace-id>`, with lanes registered as their workspaces come into existence. Each route acts as that lane's agent: identity comes from the URL, so the model never has to pass or remember its own id. This exists because the ACP lane runtime (issue #306) hosts every lane as a session inside one agent process, and Copilot's ACP mode only accepts HTTP/SSE MCP servers per session; it also lets the process runtime drop its one-`pact mcp-serve`-child-per-lane pattern. Measured motivation and protocol details are in DESIGN.md ("pact-coord > Streamable HTTP mode").
-
-## Architecture reference
-
-The crate-level diagram is in Overview, near the top of this document.
-The rest of this section is detail: sequence diagrams for the two flows
-that actually move state, plus the on-disk layout.
-
-### Spawn / teardown flow
-
-```mermaid
-sequenceDiagram
-    participant U as pact spawn "<task>"
-    participant Core as Orchestrator
-    participant Lock as PidLock
-    participant Git as git worktree
-    participant Deps as pact-deps
-    participant Agent as claude -p (child process)
-
-    U->>Core: spawn(task, permission_mode)
-    Core->>Lock: acquire (steal if holder PID is dead)
-    Lock-->>Core: acquired
-    Core->>Git: worktree add <path> -b pact/<id>
-    Git-->>Core: ok
-    Core->>Lock: release (on drop)
-    Core->>Deps: prepare(workspace.path)
-    Note over Deps: pnpm/uv/cargo/go/etc: run native install (warms existing cache)
-    Note over Deps: npm: npm ci (relies on npm's own global cache directly)
-    Deps-->>Core: ok (failure here is logged, not fatal)
-    Core->>Agent: spawn claude -p ... --output-format stream-json --verbose
-    Agent-->>Core: on_pid(pid) -- persisted immediately, before blocking
-    loop each NDJSON line
-        Agent-->>Core: stdout line
-        Note over Core: raw line appended to logs/<id>.jsonl, then parsed to AgentEvent
-        Core-->>U: on_event(event) -- printed live
-    end
-    Agent-->>Core: process exits
-    Core-->>U: (Workspace, RunOutcome { success, summary })
-```
-
-The git lock exists because git itself races on `.git/config.lock` when
-`git worktree add`/`remove` run concurrently
-([anthropics/claude-code#34645](https://github.com/anthropics/claude-code/issues/34645)) --
-`pact-vcs` serializes what git doesn't safely parallelize on its own,
-and steals locks left behind by a process that died without cleaning up
-(checked via PID liveness, not a timeout guess). Concurrent `npm ci`
-calls across workspaces are safe without any equivalent lock in
-`pact-deps` -- they race npm's own global cache, which handles
-concurrent access itself (verified by hand, see "Dependency sharing
-leans on what already exists").
-
-`teardown` kills a workspace's live agent process (whole tree, not just the
-tracked PID -- see Status) before removing its worktree, in case it's
-invoked from a different `pact` call than the one blocked on `spawn`. It
-also force-deletes the workspace's `pact/<id>` branch by default (`git
-worktree remove` doesn't delete the branch it was created with -- worktree
-removal and branch deletion are independent in git) -- pass `--keep-branch`
-to keep it around for inspection or rebasing.
-
-### Cross-agent coordination flow
-
-```mermaid
-sequenceDiagram
-    participant A as Agent A (claude -p)
-    participant Coord as pact-coord (mcp-serve)
-    participant DB as state.db
-    participant B as Agent B (claude -p)
-
-    A->>Coord: claim_files(["src/*.txt"])
-    Coord->>DB: INSERT lease (pattern, holder=A, expires_at)
-    Coord-->>A: { accepted: true, has_conflicts: false, conflicts: [] }
-    A->>Coord: send_message(to: null, "lease-info", "...")
-    Coord->>DB: INSERT message (from=A, to=NULL)
-
-    B->>Coord: check_messages()
-    Coord->>DB: SELECT WHERE id > B's cursor AND (to=B OR to IS NULL)
-    Coord-->>B: [ {from: A, subject: "lease-info", ...} ]
-    B->>Coord: claim_files(["src/hello.txt"])
-    Coord->>DB: SELECT active leases WHERE holder != B
-    Note over Coord: expand "src/*.txt" (A's lease) and "src/hello.txt" (B's request)<br/>against B's own workspace files, intersect the two sets
-    Coord-->>B: { accepted: true, has_conflicts: true, conflicts: [{holder: A, pattern: "src/*.txt", example_files: ["src/hello.txt"]}] }
-```
-
-Each agent is a separate `claude -p` process that launches its own
-`pact mcp-serve` as an MCP server over stdio (per its generated
-config); they're not talking to each other directly, or to a shared
-in-process daemon -- `state.db` (SQLite, WAL mode) is the only thing
-actually shared between them.
-
-### State layout
-
-All state lives as a **sibling** of the repo, not inside its working tree,
-so it never shows up in the main repo's `git status`:
-
-```
-<repo-parent>/.pact-<repo-name>/
-├── locks/git.lock              # PID-aware lock serializing worktree add/remove
-├── meta/<id>.json               # id, path, branch, task, created_at, agent_pid
-├── mcp/<id>.json                 # generated --mcp-config file for this workspace
-├── workspaces/<id>/            # the actual git worktree for that agent
-└── logs/<id>.jsonl              # raw NDJSON, one line per agent stdout line, as-is
-```
-
-The coordination database is the one exception -- deliberately *not* here
-(see Design decisions for why):
-
-```
-<platform-local-data-dir>/pact/<sha256(repo_root)[..16]>/state.db
-```
-
-e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
-`~/.local/share/pact/<hash>/state.db` on Linux.
-
-## Privacy
-
-**pact collects and sends no telemetry of any kind.** No usage data,
-error reports, or version pings leave your machine as a result of running
-`pact` itself (what the agent CLIs you launch through it -- Claude Code,
-Copilot CLI, Codex, Gemini CLI, Antigravity -- send to their own
-providers is between you and them, unrelated to pact).
-
-This was a deliberate decision, not an oversight (issue #14), ranked
-explicitly: always-on telemetry was rejected outright as a bad trust
-tradeoff for a tool that already asks you to run agents with broad shell
-and file access inside your own repos. Opt-in telemetry was considered
-and set aside for now, specifically because it would mean standing up
-real infrastructure (an endpoint to receive it) to answer a product
-question -- "how is this actually being used" -- that doesn't have a real
-user base to ask yet. Building that ahead of need would be the same kind
-of premature engineering this project has avoided elsewhere (see Design
-decisions). This isn't permanent: if usage data would answer a real
-question after a real launch, opt-in (an explicit first-run prompt,
-an extremely conservative payload -- version/OS/arch only, nothing about
-your repo or tasks --, a `PACT_NO_TELEMETRY=1` escape hatch, and the exact
-payload published here) is the shape it would take. Nothing like that
-exists today.
+| `agent` | agent for `run`/`spawn` | detected when exactly one agent CLI is installed |
+| `safety` | the adapter's own unattended-safety value | per adapter, below |
+| `runtime` | `auto`, `acp` or `process` | `auto` (ACP when every agent supports it) |
+| `deps` | `auto` (link the root's `node_modules`), `install`, `none` | `auto` |
+| `prepare` | commands run in every new tree after dependencies | none |
+| `max_concurrent` | most agents running at once | units planned (`run`), 2 (`spawn-many`) |
+| `min_free_mem_mb` | free memory required before another agent starts | 1500 |
+| `per_lane_reserve_mb` | memory held back for each running agent | 400 ACP, 1200 process |
+| `stagger_ms` | gap between agent launches | 2000 |
+
+## Safety
+
+Headless agents cannot answer permission prompts, so every adapter launches
+with an unattended setting, printed as a warning on every launch:
+
+| agent | default | what it can do |
+|---|---|---|
+| Claude Code | explicit tool allowlist | edit its workspace, run listed tools; anything else is denied cleanly |
+| Copilot CLI | `--allow-all-tools` | any command; the lean profile denies installs, builds and dev servers |
+| Codex | `--dangerously-bypass-approvals-and-sandbox` | any command, any file your user can reach |
+| Gemini CLI | `--approval-mode yolo` | same; adapter not live-verified |
+| Antigravity | `--dangerously-skip-permissions` | same |
+
+Agents launch lean by default: none of your own MCP servers load into a
+worker (Copilot gets an isolated agent home, Claude Code
+`--strict-mcp-config`), so a Copilot worker starts in about 6 s instead of
+57 s. `--no-lean` restores the full launch. pact sends no telemetry.
+
+## Limitations
+
+- `pact run` executes one wave: units that depend on each other wait for #282.
+- Only Copilot CLI has an ACP mode; other agents run one process per lane.
+- Ctrl-C can leave agent processes running (#366).
+- Live-agent verification has been on Windows; CI builds and tests on
+  Linux, macOS and Windows with fake agents.
+- `--agent gemini` is built but not live-verified; `--agent agy` is safe
+  one task at a time only.
+
+## Documentation
+
+| file | for |
+|---|---|
+| [GETTING_STARTED.md](GETTING_STARTED.md) | the first run, step by step |
+| [docs/usage.md](docs/usage.md) | every command, the safety model in full, architecture flows, state layout |
+| [SKILL.md](SKILL.md) | what an agent reads to drive pact |
+| [DESIGN.md](DESIGN.md) | why each decision was made, with the measurements |
+| [docs/design/history/readme.md](docs/design/history/readme.md) | the earlier README: roadmap and design notes |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | building, testing, the PR workflow |

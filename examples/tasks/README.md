@@ -18,5 +18,5 @@ length limit, and one file per unit is what an orchestrator naturally produces.
 - [`refactor-files.md`](./refactor-files.md) — the same mechanical change across N files
 - [`migrate-api.md`](./migrate-api.md) — N call sites moving off a deprecated API
 
-See the README's ["Spawn / teardown flow"](../../README.md#spawn--teardown-flow)
-section for the full `--task <agent>:"<text>"` grammar.
+See ["Running agents in parallel by hand"](../../docs/usage.md#running-agents-in-parallel-by-hand)
+in the usage reference for the full `--task <agent>:"<text>"` grammar.

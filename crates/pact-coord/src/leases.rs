@@ -29,7 +29,7 @@ pub struct Conflict {
 pub struct ClaimResult {
     /// Always true -- `claim_files` records every claim it's given, full
     /// stop. Named `accepted`, not `granted`: leases are advisory, not
-    /// exclusive (see the README's design-decision writeup for why), so a
+    /// exclusive (see "Signaling scope for v1" in docs/design/history/readme.md), so a
     /// field implying exclusivity would mislead a caller reading
     /// `{granted: true, conflicts: [...]}` into assuming it holds the file
     /// alone. `has_conflicts` is the field to check for that.
@@ -40,8 +40,8 @@ pub struct ClaimResult {
     /// `conflicts.is_empty()` themselves.
     pub has_conflicts: bool,
     /// Non-empty means another agent holds an overlapping claim -- this is
-    /// advisory, not enforced: the claim is recorded either way (see the
-    /// README's design-decision writeup for why), the caller decides what
+    /// advisory, not enforced: the claim is recorded either way (see
+    /// "Signaling scope for v1" in docs/design/history/readme.md), the caller decides what
     /// to do with the warning.
     pub conflicts: Vec<Conflict>,
 }
