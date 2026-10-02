@@ -457,6 +457,19 @@ fn verification_needs_repair(outcomes: &[VerifyOutcome]) -> bool {
     outcomes.iter().any(|outcome| matches!(outcome.verdict(), Verdict::Regressed | Verdict::Failed))
 }
 
+/// Unit names are workspace names, so the repair lane must not reuse one.
+fn repair_lane_name(attempt: usize, plan: &Plan) -> String {
+    let taken = |name: &str| plan.units.iter().any(|unit| unit.name.trim().eq_ignore_ascii_case(name));
+    let base = format!("repair-{attempt}");
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while taken(&name) {
+        name = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    name
+}
+
 fn render_repair_brief(attempt: usize, total: usize, outcomes: &[VerifyOutcome], touched_files: &[String]) -> String {
     let mut brief = format!(
         "# Repair attempt {attempt}/{total}\n\nMake the combined verification checks pass without changing application behaviour. "
@@ -717,7 +730,7 @@ impl Orchestrator {
                 let task = SpawnManyTask {
                     agent: options.agent,
                     task: render_repair_brief(attempt, options.repair_attempts, &verify, &touched_files),
-                    name: Some(format!("repair-{attempt}")),
+                    name: Some(repair_lane_name(attempt, &plan)),
                 };
                 let repair_index = plan.units.len() + attempt - 1;
                 let mut repair_outcomes = self.spawn_many_in(vec![task], spawn_options, Some(batch.clone()), |_, agent, event| {
@@ -1056,6 +1069,13 @@ mod tests {
         assert_eq!(report(vec![outcome(true, None), outcome(false, Some(false))]).worst_verdict(), Some(Verdict::Inconclusive));
         assert_eq!(report(vec![outcome(false, Some(false)), outcome(false, Some(true))]).worst_verdict(), Some(Verdict::Regressed));
         assert_eq!(report(vec![outcome(false, None), outcome(false, Some(false))]).worst_verdict(), Some(Verdict::Failed));
+    }
+
+    #[test]
+    fn the_repair_lane_never_reuses_a_unit_name() {
+        assert_eq!(repair_lane_name(1, &plan(vec![unit("a", &["a.ts"])])), "repair-1");
+        let taken = plan(vec![unit("Repair-1", &["a.ts"]), unit("repair-1-2", &["b.ts"])]);
+        assert_eq!(repair_lane_name(1, &taken), "repair-1-3");
     }
 
     #[test]
