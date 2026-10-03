@@ -289,6 +289,41 @@ merging it. A workspace that merges cleanly is done; one that conflicts is
 skipped (not aborted) and recorded for `pact resolve` below, so one
 conflicting workspace never blocks the rest of the batch.
 
+#### `--append-only` and trailing code: sentinel markers
+
+`--append-only <glob>` (accepts `--union` too, kept as an alias) lets you
+name files (e.g. a barrel/plugin-registration file) that are safe to
+resolve on conflict with a plain line-union merge: your lines, then any
+of theirs not already present, *appended at the end of the file*. That's
+fine for genuinely append-only content (logs, CHANGELOG entries), but if
+the union-mergeable region sits above other code -- a trailing
+`module.exports`, a file-final `start()`/`listen()` call -- only the
+first workspace's addition lands where you'd expect; every workspace
+after that gets appended past the trailing code instead of inside the
+intended block.
+
+If that's your file's shape, add a sentinel marker pair around the
+region you want new lines inserted into, using whatever comment syntax
+your language uses -- `// pact:union-start` / `// pact:union-end` for
+JS/TS, `# pact:union-start` / `# pact:union-end` for Python, etc. (pact
+looks for the literal text, not a specific comment style). With exactly
+one marker pair present, new lines from `--append-only`-matched files
+insert right before the end marker instead of at file end, so every
+workspace's addition lands inside the block, in order:
+
+```js
+// pact:union-start
+registerPlugin(pluginA);
+registerPlugin(pluginB);   // <- newly merged workspaces land here, in order
+// pact:union-end
+start();                   // <- stays below the block regardless of how many workspaces merge
+```
+
+No markers at all keeps the plain append-at-end behavior (nothing to
+change if you don't need this). More than one marker pair in the same
+file is treated as ambiguous and falls back to a real conflict rather
+than guessing which pair is the right one.
+
 ### Resolving conflicts
 
 **A real merge conflict `merge-all` skips is resumable, not lost.**
