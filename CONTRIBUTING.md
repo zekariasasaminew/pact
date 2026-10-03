@@ -30,76 +30,94 @@ The binary is at `target/debug/pact` (or `target/release/pact` with
 ## Test
 
 ```sh
+cargo build --workspace
 cargo test --workspace
-cargo clippy --all-targets
+cargo clippy --workspace --all-targets
 ```
 
-There isn't a large unit-test suite -- this project's own practice is to
-verify behavior end-to-end against real installed agent CLIs (Claude Code,
-Copilot CLI, Codex) rather than mock them, since mocked I/O has already
-hidden real bugs here before (a Windows `.cmd`-shim resolution bug, an
-incorrect Codex flag, a hardcoded-`false` success bug -- see the
-verification notes in `docs/design/history/readme.md` for the full list). If you're changing anything in
-`pact-agents` or `pact-vcs`, the most valuable thing you can do is
-actually run `pact spawn`/`spawn-many`/`teardown` against a scratch repo
-with a real agent CLI installed and confirm the behavior you changed.
+CI (`.github/workflows/ci.yml`) runs the build and the tests on ubuntu,
+macos and windows, plus the Python, TypeScript and VS Code binding jobs.
+
+- Pure logic gets an inline `#[cfg(test)] mod tests` in the same file.
+- Anything that needs git gets an integration test under
+  `crates/<crate>/tests/` against a real throwaway repo in
+  `std::env::temp_dir()`, never mocked git (pattern:
+  `crates/pact-vcs/tests/merge_all.rs`, `init_repo()` then `cleanup()`).
+- **Never spawn a real agent CLI in a test**: it costs money and can hang.
+  Use the fakes: the `fake_acp_copilot` binary (pact-acp's fake agent:
+  prose prompts get the reply in `FAKE_ACP_REPLY_FILE`, JSON tasks write
+  files; see `crates/pact-cli/tests/pact_run.rs`), the `fake_agent` shim, or a stub
+  closure such as `ArbiterResolver`.
+- A fixture that passes or fails regardless of the code under test (`true`,
+  `false`) tests only the plumbing; use one that depends on the real
+  condition (`crates/pact-vcs/tests/require_passing_tests.rs`).
+- Expensive real-concurrency tests live in
+  `crates/pact-cli/tests/slow_integration.rs`, `#[ignore]`d; run them with
+  `cargo test --ignored`.
+- Reproduce any new git behaviour by hand in a scratch repo before relying
+  on it; git's 3-way merge has surprised this codebase before.
+- `docs_cli_grammar.rs` parses every `pact` command in README.md, SKILL.md,
+  GETTING_STARTED.md and docs/usage.md against the real CLI.
+
+## Workflow
+
+- One GitHub issue per finding or feature, filed before the code; one PR
+  per issue: branch from `main`, PR, all CI checks green, squash merge.
+- Every commit builds and passes `cargo test --workspace` on its own; small
+  commits, one concern each; rebase on `main` before pushing.
+- Imperative commit messages that say why. No AI attribution trailers.
+- Default to no comments: naming carries the what. Exceptions: `///` on
+  public API, `// SAFETY:`, clap `///` help text. The why goes in
+  `DESIGN.md`, referenced by section name; say there when something is
+  implemented but not verified against a real paid agent call.
 
 ## Project layout
 
-- `pact-vcs` -- git worktree lifecycle, the PID-aware lock that fixes
-  concurrent `git worktree add`/`remove` races, workspace metadata,
-  teardown (including the uncommitted-changes safety check).
-- `pact-deps` -- dependency broker: detects the package manager in a
-  workspace and either passes through to its own cache (`passthrough.rs`)
-  or, for npm specifically, materializes from a shared content store
-  (`store.rs`).
-- `pact-agents` -- the `AgentAdapter` trait, one module per agent CLI
-  (`claude_code.rs`, `copilot.rs`, `codex.rs`), the shared process-spawn/
-  stream/supervise machinery (`process.rs`, `supervisor.rs`).
-- `pact-coord` -- the MCP coordination server (file leases + messages),
-  run as `pact mcp-serve`.
-- `pact-core` -- ties the above together behind a stable `Orchestrator`
-  interface (`spawn`, `spawn_many`, `list`, `diff`, `teardown`).
-- `pact-cli` -- the `clap`-based CLI surface.
+- `pact-cli` -- the `pact` binary and its `clap` commands (`src/main.rs`).
+- `pact-core` -- the `Orchestrator`: workspaces, dependency prep, admission
+  by memory (`admission.rs`), lane launch, the ACP lane runtime
+  (`acp_runtime.rs`) and `pact run` (`run.rs`).
+- `pact-vcs` -- git worktree lifecycle, the PID-aware lock that serializes
+  `git worktree add`/`remove`, shared-tree batches, `commit_all`,
+  `merge_all`, teardown and its safety checks. No dependency on
+  `pact-agents`: agent hooks such as `ArbiterResolver` arrive as closures.
+- `pact-deps` -- detects package managers; links the repo root's
+  `node_modules` (`link.rs`) or passes through to each ecosystem's own
+  install and cache (`passthrough.rs`).
+- `pact-agents` -- the `AgentAdapter` trait (`adapter.rs`), one module per
+  agent CLI, process spawn, streaming and supervision.
+- `pact-acp` -- the Agent Client Protocol client: one agent process, one
+  session per lane, plus the fake agent used by tests.
+- `pact-coord` -- the coordination server (file leases, messages,
+  handoffs), over stdio (`pact mcp-serve`) or Streamable HTTP with one
+  route per lane.
 
 ## Adding a new agent CLI adapter
 
-Implement `pact_agents::AgentAdapter` (see `crates/pact-agents/src/adapter.rs`
-for the trait, and `claude_code.rs`/`copilot.rs` for two real examples of
-different shapes -- Claude Code and Copilot CLI both take a JSON
-`--mcp-config` file, while Codex takes inline `-c` overrides instead). You
-need:
+Implement `pact_agents::AgentAdapter` (`crates/pact-agents/src/adapter.rs`;
+`claude_code.rs` and `copilot.rs` are two different shapes). You need
+`build_command`/`build_launch` (a headless launch including the CLI's
+unattended-safety flag: there is no TTY to answer a permission prompt),
+`parse_line` (one stdout line to zero or more `AgentEvent`s; one line can
+carry several), `coord_server_name` and `default_safety_description`. If the
+CLI has an Agent Client Protocol mode, also `supports_acp` and
+`build_acp_launch`. Register the variant in `AgentKind` and `adapter()`.
 
-- `build_command`: program name + args for a headless, non-interactive
-  launch, including whatever unattended-safety flag that CLI needs (there
-  is no TTY to answer an interactive permission prompt in this
-  architecture -- every adapter needs *some* such setting).
-- `parse_line`: turn one raw stdout line into zero or more `AgentEvent`s.
-  Don't assume one-line-one-event -- confirmed necessary for Copilot CLI,
-  whose events can carry both response text and tool calls on the same
-  line.
-- `coord_server_name` / `default_safety_description`: see the trait's doc
-  comments.
-
-Register the new variant in `AgentKind` (`adapter.rs`) and wire it into
-`adapter()`'s match. Then **live-verify it against the real, installed
-CLI** -- this project has been burned twice by trusting a CLI's own
-documentation over what it actually does (a documented Codex flag that
-didn't exist in the real binary; assumed event field names that turned
-out to differ from Claude Code's). Update the adapter status in
-`docs/usage.md` (Known limitations) and the README's Safety table once it's
-confirmed working end-to-end, including a real
-coordination-server (`claim_files`) call through the generated MCP config.
+Then live-verify it against the real installed CLI, including a
+`claim_files` call through the coordination server: this project has been
+burned by trusting CLI documentation over the binary. Record the result in
+`DESIGN.md` and update the Safety table in README.md and the known
+limitations in `docs/usage.md`.
 
 ## Adding a new package-manager detector
 
-See `pact-deps/src/detect.rs` for the existing detection logic and
-`passthrough.rs` for how an ecosystem with its own cache (cargo, go
-modules, uv, pnpm, yarn, poetry, pipenv) is wired through to a plain
-native install call. Only npm gets a custom content store (`store.rs`) --
-see "Dependency sharing leans on what already exists" in
-`docs/design/history/readme.md` for why plain pip/venv was deliberately
-not given one (venvs aren't reliably relocatable).
+Detection is in `crates/pact-deps/src/detect.rs`; an ecosystem with its
+own cache (cargo, go modules, uv, pnpm, yarn, poetry, pipenv) is wired
+through to its native install in `passthrough.rs`. npm's `node_modules` is
+linked from the repo root by default (`link.rs`). Plain pip/venv gets no
+shared store on purpose (venvs are not reliably relocatable; see
+"Dependency sharing leans on what already exists" in
+`docs/design/history/readme.md`).
 
 ## Filing a bug
 

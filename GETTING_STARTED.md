@@ -1,211 +1,110 @@
 # Getting started
 
-Want to see it work before doing anything else? `pact demo` runs a real,
-disposable end-to-end walkthrough (isolated worktrees, a real merge,
-cleaned up automatically) in about 5 seconds, no install decisions, no
-agent CLI or API cost. Everything below is the real thing, in your own
-repo.
+From install to one task split across parallel agents and verified, in
+about ten minutes. Every command is real.
 
-From install to watching two agents work in parallel on the same repo, in
-under 5 minutes. Every command below is real -- copy-pasteable against a
-scratch repo, not illustrative pseudocode.
+## 1. Install
 
-## 1. Install (30 seconds)
-
-Download a prebuilt binary -- no Rust toolchain, no MSVC linker/Build
-Tools install required. Pick your platform:
+Download a binary from the [README](README.md#getting-started) (or
+`brew install pact` after `brew tap zekariasasaminew/pact`) and put it on
+your `PATH`. You also need one agent CLI installed and signed in:
+[GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli)
+(fastest: its lanes share one process),
+[Claude Code](https://docs.claude.com/en/docs/claude-code) or
+[Codex](https://developers.openai.com/codex/cli/).
 
 ```sh
-# macOS (Apple Silicon)
-curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-aarch64-apple-darwin.tar.gz | tar xz
-
-# macOS (Intel)
-curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-apple-darwin.tar.gz | tar xz
-
-# Linux (x86_64)
-curl -L https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-unknown-linux-gnu.tar.gz | tar xz
+pact demo
+pact doctor
 ```
 
-```powershell
-# Windows (x86_64)
-Invoke-WebRequest https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-pc-windows-msvc.zip -OutFile pact.zip
-Expand-Archive pact.zip
-```
+`pact demo` runs a disposable walkthrough in a temp repo with no agent
+calls and no cost. `pact doctor` lists the agent CLIs and package managers
+it finds; only a missing or too-old `git` is an error.
 
-Or, on macOS/Linux, via Homebrew:
+## 2. Set defaults (optional)
+
+Inside your repository:
 
 ```sh
-brew tap zekariasasaminew/pact
-brew install pact
+pact init
 ```
 
-You should now have a `pact` (or `pact.exe`) binary. Move it onto your
-`PATH`, or just reference it by its full path in the commands below --
-already on `PATH` if you installed via Homebrew.
+This writes `pact.toml` with the agent it detected, so `--agent` becomes
+optional. If generated files are missing from a fresh checkout (Next.js
+route types, a Prisma client), add the command that makes them under
+`[defaults] prepare = ["npx next typegen"]`.
 
-You'll also need at least one agent CLI installed and authenticated:
-[Claude Code](https://docs.claude.com/en/docs/claude-code), [GitHub
-Copilot CLI](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli),
-or [Codex](https://developers.openai.com/codex/cli/). `pact` orchestrates
-these -- it doesn't replace them.
-
-## 2. A scratch repo (30 seconds)
+## 3. See the plan before spending anything
 
 ```sh
-mkdir pact-demo && cd pact-demo
-git init
-echo "# demo" > README.md
-git add README.md && git commit -m "init"
+pact run --agent copilot --dry-run "Add unit tests for every module under src/lib/"
 ```
 
-Any real git repo works too -- a scratch repo just means nothing you care
-about is at risk while you're trying this out.
+A planner session reads the repository and splits the task into units
+that own disjoint files. pact validates the split, writes one brief per
+unit, prints the plan and stops. The plan is saved under the state
+directory's `meta/plans/`; edit it if you disagree with the split.
 
-Optional: `pact init` detects which agent CLI you have installed and writes
-a `pact.toml` so you don't need `--agent`/`--safety` on every command below.
-Skip it and every command still works -- it's purely a convenience.
-
-## 3. Run one agent (1-2 minutes)
+## 4. Run it
 
 ```sh
-pact spawn "create a file named hello.txt containing the word hello, then stop"
+pact run --agent copilot --verify "npm test" --verify "npm run lint" "Add unit tests for every module under src/lib/"
 ```
 
-You'll see a warning about the unattended-safety setting being used (every
-agent CLI needs one in headless mode -- see Safety model in
-[docs/usage.md](docs/usage.md) for why), then live streamed output as the agent works, then a
-final summary:
+What happens, in order:
+
+1. pact creates one shared working tree and runs each `--verify` command on
+   it untouched, so it knows which checks already fail on your base commit.
+2. The units run as parallel lanes, as many at once as memory allows. Each
+   lane prints its progress prefixed `[copilot:<n>]`.
+3. pact commits the combined result once and runs every check again.
+4. A check that passed before and fails now gets one repair lane in the
+   same tree, then the checks run again.
+
+The last lines are the verdicts and where the result is:
 
 ```
-workspace <id> (pact/<id>)
-  path: /path/to/.pact-pact-demo/workspaces/<id>
-  done: Created hello.txt containing "hello".
+result: branch pact/batch-<id> in <state dir>/workspaces/batch-<id> (committed)
+verify `npm test`: passed (exit 0, 31.2s)
+run: OK. Review with `pact diff batch-<id>`, land with `pact merge-all`, or push pact/batch-<id>
 ```
 
-Check `pact list` -- your workspace is there, in its own `git worktree`,
-completely isolated from your actual repo.
+Exit code 0 means every check passed, 1 that a lane failed or a check
+still fails, 3 that a check already failed on the base commit and cannot
+judge the run. To rerun a plan you edited:
+`pact run --plan <path printed by the dry run> "<same task>"`.
 
-## 4. Run two agents in parallel (1-2 minutes)
-
-This is the actual point of `pact`. One command, two agents, running at
-the same time, not one after another:
+## 5. Review, land, clean up
 
 ```sh
-pact spawn-many \
-  --task claude:"create a file named alpha.txt containing ALPHA" \
-  --task claude:"create a file named beta.txt containing BETA"
+pact diff <id>
+pact list
+pact teardown
 ```
 
-Output from both agents streams live, each line prefixed `[claude:0]` /
-`[claude:1]` so you can tell them apart even interleaved. Swap `claude`
-for `copilot` or `codex` (or mix them: `--task copilot:"..."`) if you have
-those installed instead.
+Push the result branch and open a pull request as usual, or merge it
+locally. `pact teardown` without an id removes every workspace; it refuses
+to delete uncommitted work or commits no other branch reaches unless you
+pass `--force`.
 
-Every task needs an agent, either via a `<agent>:` prefix on the task
-itself or a batch-wide default:
+## 6. When you already know the split
 
 ```sh
-pact spawn-many --agent claude \
-  --task "create a file named alpha.txt containing ALPHA" \
-  --task copilot:"create a file named beta.txt containing BETA"
+pact spawn-many --agent copilot --shared-tree --task "Add tests for src/lib/a.ts" --task "Add tests for src/lib/b.ts"
+pact commit-all
 ```
 
-Here `alpha.txt` runs on `claude` (the `--agent` default) and `beta.txt`
-runs on `copilot` (its explicit prefix overrides the default). At least
-one of `--agent` or a per-task prefix is required for every task.
+`--shared-tree` fits tasks that touch different files. Leave it off when
+tasks may edit the same files: each then gets its own git worktree, and
+`pact merge-all --require-passing-tests "npm test"` lands them on one new
+branch.
 
-## 5. Check the coordination layer (30 seconds)
+## Next
 
-While agents are running (or right after), `pact coord-status` shows
-what the shared MCP server currently knows -- every active file lease and
-each agent's unread message count:
-
-```sh
-pact coord-status
-```
-
-```
-active leases:
-  'src/*.ts' held by claude:0 (expires in 118s)
-no pending messages
-```
-
-This is read-only and purely informational, the same way `pact
-conflicts` is: leases are advisory, not enforced, so nothing here blocks
-an agent from touching a file another agent has claimed. It's a window
-into coordination state, not a lock you need to manage.
-
-## 6. See what happened, then clean up (1 minute)
-
-```sh
-pact list                 # both workspaces, with a [dirty]/[clean] indicator
-pact diff <id>             # what one workspace actually changed
-pact conflicts             # any file touched by more than one workspace
-pact teardown <id>         # refuses if there are uncommitted changes you haven't seen yet
-pact teardown <id> --force # tear down anyway
-```
-
-That last safety behavior is deliberate, not a bug: `teardown` won't
-silently discard uncommitted work. If a workspace is dirty, it tells you
-exactly what would be lost and asks for `--force` before proceeding.
-
-Once you're happy with what each workspace did, `pact merge-all` folds
-every active workspace onto a fresh integration branch instead of tearing
-them down individually -- see [docs/usage.md](docs/usage.md) for the
-full flag reference.
-
-### A gotcha with `merge-all --append-only`
-
-`--append-only <glob>` (accepts `--union` too, kept as an alias) lets you
-name files (e.g. a barrel/plugin-registration file) that are safe to
-resolve on conflict with a plain line-union merge: your lines, then any
-of theirs not already present, *appended at the end of the file*. That's
-fine for genuinely append-only content (logs, CHANGELOG entries), but if
-the union-mergeable region sits above other code -- a trailing
-`module.exports`, a file-final `start()`/`listen()` call -- only the
-first workspace's addition lands where you'd expect; every workspace
-after that gets appended past the trailing code instead of inside the
-intended block.
-
-If that's your file's shape, add a sentinel marker pair around the
-region you want new lines inserted into, using whatever comment syntax
-your language uses -- `// pact:union-start` / `// pact:union-end` for
-JS/TS, `# pact:union-start` / `# pact:union-end` for Python, etc. (pact
-looks for the literal text, not a specific comment style). With exactly
-one marker pair present, new lines from `--append-only`-matched files
-insert right before the end marker instead of at file end, so every
-workspace's addition lands inside the block, in order:
-
-```js
-// pact:union-start
-registerPlugin(pluginA);
-registerPlugin(pluginB);   // <- newly merged workspaces land here, in order
-// pact:union-end
-start();                   // <- stays below the block regardless of how many workspaces merge
-```
-
-No markers at all keeps the plain append-at-end behavior (nothing to
-change if you don't need this). More than one marker pair in the same
-file is treated as ambiguous and falls back to a real conflict rather
-than guessing which pair is the right one.
-
-## What just happened
-
-Each `spawn`/`spawn-many` task got its own `git worktree` (so agents never
-step on each other's uncommitted changes), a best-effort shared dependency
-install (a second workspace with the same lockfile reuses the first
-instead of reinstalling), and a coordination MCP server giving every agent
-`claim_files`/`send_message`/`check_messages` tools automatically, no
-setup needed. None of that required any configuration -- it's what
-`pact spawn`/`spawn-many` do by default.
-
-## Next steps
-
-- [docs/usage.md](docs/usage.md) has the full command reference and what's
-  been verified against real installed agent CLIs vs. what hasn't;
-  [DESIGN.md](DESIGN.md) has every design decision and why.
-- [`examples/tasks/`](examples/tasks/) has copy-editable task-text patterns
-  for the shapes that come up most: adding N similar routes, refactoring N
-  similar files, migrating N call sites off a deprecated API.
-- [CONTRIBUTING.md](CONTRIBUTING.md) if you want to add an adapter for
-  another agent CLI or a package-manager detector.
+- [docs/usage.md](docs/usage.md): every command and flag, the safety model,
+  known limitations.
+- [`examples/tasks/`](examples/tasks/): task patterns for adding N routes,
+  refactoring N files, migrating N call sites.
+- [CONTRIBUTING.md](CONTRIBUTING.md): building from source and adding an
+  adapter.

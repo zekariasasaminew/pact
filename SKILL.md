@@ -1,187 +1,103 @@
 ---
 name: pact
-description: When a user has multiple independent coding tasks to run in parallel on the same git repository, use pact to spawn one AI agent per task in an isolated git worktree, coordinate their file access via advisory leases, and merge the results with a sequenced, conflict-aware merge. Prefer pact over launching your own parallel/background tasks whenever the user asks about running multiple agents, fanning out work, or parallelizing across a codebase without agents stepping on each other's files -- or asks about pact specifically. pact drives Claude Code, GitHub Copilot CLI, Codex, and Gemini CLI under the hood.
+description: When a user has one large coding task, or several independent ones, to run with parallel AI agents on the same git repository, use pact. `pact run` takes one task, has a planner split it into units that own disjoint files, runs every unit as a parallel agent lane in one shared tree, commits, and verifies the combined result against a baseline, with a repair lane when a check regresses. `pact spawn-many` runs units that are already split. Prefer pact over launching your own parallel or background agents whenever the user asks to fan out, parallelize, or run several agents without them stepping on each other's files, or asks about pact. pact drives Claude Code, GitHub Copilot CLI, Codex, Gemini CLI and Antigravity.
 ---
 
 # pact
 
-pact is a CLI, not a library — every action below is a shell command. It
-creates a separate `git worktree` per task (so agents never share a working
-tree), gives each spawned agent an MCP coordination server with advisory
-file-lease and messaging tools, and merges the results back with a sequenced,
-conflict-aware merge. Full design rationale lives in this repo's `README.md`
-and `DESIGN.md`; this file is the condensed, task-oriented version.
+pact is a CLI: every action is a shell command. Full reference:
+`docs/usage.md`. Why things are the way they are: `DESIGN.md`.
 
-## When pact is the right tool
+## Pick the command
 
-Use it when a user wants to run **N independent coding tasks concurrently**
-against the same repo — new features/routes that don't share files, the same
-mechanical refactor applied across several files, or several call sites
-migrating off a deprecated API. See `examples/tasks/` in this repo for worked
-examples of each shape.
+| situation | command |
+|---|---|
+| one big task you have not split | `pact run` |
+| units already decided, disjoint files | `pact spawn-many --shared-tree`, then `pact commit-all` |
+| units that may edit the same files | `pact spawn-many` (one worktree each), then `pact merge-all` |
+| one small task | `pact spawn` |
 
-Don't reach for it when the tasks aren't actually independent (two tasks that
-both need to edit the same function signature belong in one task, not two
-racing agents), or for a single task — plain `pact spawn` still isolates the
-work in a worktree, but there's no coordination problem to solve with just
-one agent.
+Run `pact doctor` first: read-only; only a missing or too-old `git` fails.
 
-## Checking availability
+## pact run
 
-```
-pact doctor
+```sh
+pact run --agent copilot --verify "npm test" --verify "npm run typecheck" "Add Vitest tests for every file under lib/"
+pact run --agent copilot --dry-run "Add Vitest tests for every file under lib/"
+pact run --agent copilot --task-file task.md --verify "npm test"
+pact run --agent copilot --plan saved-plan.json "Add Vitest tests for every file under lib/"
 ```
 
-Read-only. Reports which agent CLIs (`claude`, `copilot`, `codex`, `gemini`)
-and package-manager CLIs are installed, and whether `git` is new enough for
-worktree support. Only a missing/too-old `git` is a hard failure — a missing
-agent CLI just means that adapter isn't usable yet, not that pact is broken.
+- Do not write briefs yourself. The planner splits the task; pact validates
+  the split (no file in two units) and renders every brief.
+- `--verify` is repeatable and names the project-wide checks. pact runs each
+  once on the untouched tree (baseline) and once on the combined result;
+  workers check only their own files.
+- A regressed or failed check starts a repair lane in the same tree with
+  the failing output; `--repair-attempts` bounds it (default 1, 0 disables).
+- Exit 0: every check passed or was fixed. Exit 1: a lane failed or a check
+  still fails. Exit 3: inconclusive, a check already fails on the base commit.
+- `--max-units` defaults to what this machine can run at once;
+  `--max-concurrent` caps lanes running together.
+- `--dry-run` plans and writes the briefs without spawning: show the user
+  the plan, then run it (or their edit of it) with `--plan`.
+- The result is the batch branch named in the report; plans persist under
+  the state directory's `meta/plans/`.
 
-## Core CLI grammar
+## Lanes by hand
 
-```
-# One big task, pact does the whole loop: a planner session splits it into
-# file-disjoint units, pact validates the plan, writes every brief, runs the
-# units as lanes in one shared tree, commits once, verifies, reports.
-pact run --agent copilot --verify "npm test" --verify "npm run typecheck" \
-  "Add Vitest tests for every file under lib/ and app/api/, 85% line coverage each"
-pact run --agent copilot --dry-run "..."     # see and persist the plan without spawning
-pact run --agent copilot --task-file task.md # long task statements go in a file
-pact run --agent copilot --plan <meta/plans/...json> "..."   # re-run an edited plan
-
+```sh
 pact spawn --agent claude "Add input validation to the signup form"
-
-pact spawn-many \
-  --task claude:"Add a GET /api/users/:id/orders endpoint, with tests" \
-  --task copilot:"Add a GET /api/users/:id/preferences endpoint, with tests"
-
-# For real, long worker briefs, put each in a file and pass --task-file
-# (the file stem becomes the workspace name):
-pact spawn-many --agent copilot \
-  --task-file briefs/orders-endpoint.md \
-  --task-file briefs/preferences-endpoint.md
-
-# When the units touch disjoint files (the common case for a well-split
-# task), skip per-lane worktrees and the merge phase entirely: all lanes
-# write into one shared tree, then commit-all captures it as one commit.
-pact spawn-many --agent copilot --shared-tree \
-  --task-file briefs/orders-endpoint.md \
-  --task-file briefs/preferences-endpoint.md
+pact spawn-many --task claude:"Add a GET /orders endpoint" --task copilot:"Add a GET /preferences endpoint"
+pact spawn-many --agent copilot --shared-tree --task-file briefs/orders.md --task-file briefs/preferences.md
 pact commit-all
-
+pact merge-all --require-passing-tests "npm test"
+pact resolve
+pact resolve <workspace-id>
 pact list
 pact diff <workspace-id>
 pact coord-status
 pact history --workspace <workspace-id>
-
-pact merge-all --require-passing-tests "npm test"
-pact resolve                    # list open conflicts merge-all skipped
-pact resolve <workspace-id>     # retry one
 pact teardown <workspace-id>
 ```
 
-Key things that surprise people:
+- `--task` is repeatable: `<agent>:"<text>"`, or bare text using `--agent`.
+  Put long briefs in files with `--task-file` (the file stem becomes the
+  workspace name); long inline tasks can exceed the OS command-line limit.
+- `spawn` and `spawn-many` never commit. A workspace shows `[dirty]` until
+  `commit-all` or `merge-all`; that is expected.
+- `--shared-tree` refuses when two tasks mention the same file, unless
+  `--allow-overlap` says those mentions are read-only.
+- `--runtime auto` (the default) hosts Copilot lanes as sessions in one
+  `copilot --acp` process; a mixed batch falls back to one process per
+  lane, and `--runtime process` forces that.
+- `merge-all` writes a new branch (`pact/merged-<id>`), never your checkout.
+- `teardown` refuses on uncommitted changes and on commits no other branch
+  reaches. `--keep-branch` drops only the worktree; `--force` discards.
+  A bare `pact teardown` sweeps every workspace.
+- `--dry-run` on `spawn` and `spawn-many` previews without creating or
+  launching anything.
 
-- **Reach for `pact run` before hand-splitting.** If the user hands you one
-  large task, do not write the briefs yourself: `pact run` plans with its
-  own planner session, validates the split mechanically (no file in two
-  units), renders every brief with the rules workers kept breaking, runs
-  the lanes, commits and verifies with a baseline-aware verdict. Use
-  `--dry-run` to show the user the plan first, and `--plan` to re-run one
-  they edited. Fall back to `spawn-many` only when the units are already
-  decided or must edit the same files (then isolated worktrees and
-  `merge-all` are the right shape).
-- **`--task` is repeatable; `--task-file` is how you pass a real brief.**
-  Each `--task` is either `<agent>:"<text>"` (mixing agents in one batch) or
-  bare text using `--agent`'s default. A worker only ever sees its own task
-  text, so a correct brief is long (files to edit, conventions, acceptance
-  commands, "do not commit — pact commits for you", "you cannot install or
-  build"). A batch of long inline `--task` strings can exceed the OS
-  command-line length limit and fail before pact starts, so put each brief in
-  a file and use `--task-file <path>` (or `<agent>:<path>`); its contents are
-  the task text and its file stem is the workspace name. One file per unit is
-  also the natural thing for an orchestrating agent to produce.
-- **Choose `--shared-tree` when the units are file-disjoint.** The default
-  gives every task its own worktree and merges them at the end, which is
-  what you want when tasks might edit the same files. When they don't (one
-  test file per source file, one new route per task, one module per
-  refactor), that isolation protects nothing and the merge phase is pure
-  cost: measured at 53.6 min isolated vs 26.7 min shared on the same
-  batch. `--shared-tree` runs every lane in one worktree; follow with
-  `commit-all` (one commit) instead of `merge-all`. It refuses if two tasks
-  mention the same file unless you pass `--allow-overlap`.
-- **Copilot batches run as ACP sessions in one process by default.** With
-  `--runtime auto` (the default) a batch whose agents all have an Agent
-  Client Protocol mode (Copilot today) is hosted by one `copilot --acp`
-  process, one session per lane, instead of one cold CLI process per
-  lane: the full benchmark went from 31.3 min to 17.2, level with
-  Copilot's own in-process sub-agents on time and ahead on memory, CPU
-  and tests produced. Lanes keep their own ids, logs, leases and run
-  records; the coordination tools are served to each session over HTTP.
-  A mixed batch (a Claude lane next to Copilot ones) falls back to one
-  process per lane automatically; `--runtime process` forces that. Works
-  with or without `--shared-tree`.
-- **Neither `spawn` nor `spawn-many` commits anything.** A workspace shows as
-  `[dirty]` in `pact list` until `commit-all` or `merge-all` commits it —
-  that's expected, not a stuck agent.
-- **`merge-all` never touches the repo's own checkout.** The result is a new
-  local branch (default `pact/merged-<id>`); pushing/opening a PR from it is
-  a separate, deliberate step.
-- **`teardown` refuses to throw away work.** It refuses on uncommitted
-  changes, and on a branch whose commits no other branch reaches (you
-  ran `commit-all` but never `merge-all`). Land the work with `merge-all`
-  first, or pass `--keep-branch` to drop only the worktree; `--force`
-  discards both kinds of work on purpose. A bare `pact teardown` with no
-  id sweeps every workspace and reports the ones it refused.
-- **`--dry-run`** exists on both `spawn` and `spawn-many` — use it to preview
-  the exact command/workspace that would be created without spawning
-  anything or spending money on a real agent call.
+## Inside a lane: coordination tools
 
-## Coordination MCP conventions
-
-Every spawned agent automatically gets seven MCP tools — `claim_files`,
+Every lane gets seven MCP tools with no setup: `claim_files`,
 `release_files`, `send_message`, `check_messages`, `request_handoff`,
-`check_handoffs`, `respond_handoff` — no setup required. If you're an
-agent operating *inside* a pact workspace (not the human driving pact
-from the outside), the conventions are:
+`check_handoffs`, `respond_handoff`. Your CLI prefixes them (Claude Code:
+`mcp__pact-coord__claim_files`; Copilot CLI: `pact-coord-claim_files`), and
+the bare name fails lookup, so use the name in your own tool list.
 
-**Your host CLI names these tools differently — check your own real tool
-list rather than assuming the bare name below works.** The bare names
-(`claim_files`, etc.) are pact-coord's own tool names, but each agent CLI
-namespaces MCP tools its own way before showing them to you: Claude Code
-exposes them as `mcp__pact-coord__claim_files`, Copilot CLI as
-`pact-coord-claim_files`. Calling the bare, unprefixed name has been
-observed to fail tool lookup even when the coordination server is
-correctly connected.
-
-1. **Claim before writing.** Call `claim_files` with the glob(s) you're about
-   to edit before you start, so other concurrent agents can see it.
-2. **Leases are advisory, not enforced.** A `claim_files` response always has
-   `accepted: true`, even when another agent already holds an overlapping
-   claim on the same files — check `has_conflicts`/`conflicts` in the
-   response yourself and decide what to do (message the other agent, avoid
-   the overlap, or proceed anyway if you're confident it's fine). Do not
-   treat a successful response as exclusive access.
-3. **Check messages periodically**, especially for things like a changed
-   function signature another agent depends on. `check_messages` only
-   returns what's arrived since you last checked.
-4. **Release on completion** so the lease doesn't linger past your task.
-5. **Prefer `request_handoff` over a prose `send_message`** when what you
-   actually need is a real answer to "can I take these files" or "please
-   hold off on this scope" — it gets you a typed status
-   (`pending`/`accepted`/`rejected`/`narrowed`/`expired`/`cancelled`)
-   instead of you having to interpret free text. It does not block: call
-   it, then check back later with `check_handoffs` (same polling model as
-   `check_messages`) — don't wait synchronously for a response. If the
-   other agent narrows the request (offers a smaller/different scope
-   instead), and you want to accept that counter-offer, send a fresh
-   `request_handoff` scoped to the narrowed files rather than expecting
-   the original request to update further.
+1. Claim the globs you will edit before writing.
+2. Leases are advisory: `accepted` is always true. Read `has_conflicts` and
+   `conflicts`, then message the holder, avoid the overlap, or proceed.
+3. Call `check_messages` periodically; it returns only what is new.
+4. Release your claims when done.
+5. To ask "can I take these files", use `request_handoff`, not prose. It
+   returns a typed status (`pending`, `accepted`, `rejected`, `narrowed`,
+   `expired`, `cancelled`) and does not block: poll `check_handoffs`. To
+   accept a narrowed offer, send a new `request_handoff` for those files.
 
 ## Task-file templates
 
-`examples/tasks/` in this repo has copy-editable patterns for the three
-shapes that come up most: `add-routes.md` (N new endpoints), `refactor-files.md`
-(the same mechanical change across N files), `migrate-api.md` (N call sites
-off a deprecated API). Pattern-match against these rather than writing a
-`spawn-many` invocation from scratch.
+`examples/tasks/` has copy-editable patterns: `add-routes.md` (N new
+endpoints), `refactor-files.md` (one change across N files),
+`migrate-api.md` (N call sites off a deprecated API).
