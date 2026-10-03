@@ -1,5 +1,11 @@
 # pact
 
+> **Status: experimental, not actively developed (October 2026).** pact works
+> as documented here and the code stays open, but nobody is working on it and
+> issues may not get a reply. Open problems are tracked on GitHub (#366,
+> #371-#374); benchmark evidence is on #308. Use it to experiment, read the
+> design notes, or fork it.
+
 pact runs several AI coding agents (Claude Code, GitHub Copilot CLI, Codex,
 Gemini CLI, Antigravity) on one repository at the same time and hands back
 one verified branch. Give it a single task: a planner splits it into units
@@ -126,6 +132,10 @@ issue #308.
 | Copilot CLI's own sub-agents, 8 in one session | 15.8 min | 4.29 GB | 2.22 GB | $16.20 | 98.2% |
 | pact, one git worktree per agent plus merge (8 lanes) | 53.6 min | 8.26 GB | 2.45 GB | $23.68 | 98.5% |
 | **`pact run`, 8 lanes, shared tree, ACP sessions** | **12.5 min** | **3.17 GB** | **1.13 GB** | **$12.79** | **99.3%** |
+
+Each row is a single run. The advantage did not hold on a weaker model: in a
+back-to-back pair on claude-haiku-4.5, Copilot's sub-agents took 51.3 min and
+`pact run` 70.8 min, and neither finished the task cleanly.
 
 Per-agent worktrees were the first cost to go: for units that own disjoint
 files, isolation and the merge are pure overhead. One agent process hosting
