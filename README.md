@@ -6,6 +6,9 @@
 > #371-#374); benchmark evidence is on #308. Use it to experiment, read the
 > design notes, or fork it.
 
+**Write-up:** [The fastest isolation is the one you skip](https://www.zekariasasaminew.com/blog/pact),
+the whole arc from worktree-per-agent to `pact run`, with the benchmark numbers.
+
 pact runs several AI coding agents (Claude Code, GitHub Copilot CLI, Codex,
 Gemini CLI, Antigravity) on one repository at the same time and hands back
 one verified branch. Give it a single task: a planner splits it into units
