@@ -2039,6 +2039,17 @@ fn restore_all(workspaces: &pact_vcs::WorkspaceManager, worktree_path: &Path, sn
     }
 }
 
+/// Whether `content` still holds a git conflict: a line starting with
+/// `<<<<<<<` or `>>>>>>>`. A bare `=======` line is not enough on its own,
+/// see DESIGN.md ("pact-core > Arbiter marker check", issue #380).
+fn has_conflict_markers(content: &str) -> bool {
+    content.lines().any(|line| {
+        ["<<<<<<<", ">>>>>>>"]
+            .iter()
+            .any(|marker| line.strip_prefix(marker).is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')))
+    })
+}
+
 fn validate_arbiter_scope(
     worktree_path: &Path,
     files: &[String],
@@ -2049,7 +2060,7 @@ fn validate_arbiter_scope(
         let Ok(content) = std::fs::read_to_string(worktree_path.join(file)) else {
             return Err(format!("could not re-read {file} after the agent ran"));
         };
-        if content.contains("<<<<<<<") || content.contains("=======") || content.contains(">>>>>>>") {
+        if has_conflict_markers(&content) {
             return Err(format!("left conflict markers in {file}"));
         }
         if pre_run_lengths.get(file).copied().unwrap_or(0) > 0 && content.trim().is_empty() {
@@ -2608,6 +2619,46 @@ mod tests {
         let err = validate_arbiter_scope(&root, &files, &pre, &[]).unwrap_err();
         assert!(err.contains("conflict markers"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validate_arbiter_scope_accepts_rst_heading_underlines() {
+        let root = arbiter_test_repo("accepts-rst");
+        let files = vec!["conflicted.txt".to_string()];
+        let pre = pre_run_lengths_for(&root, &files);
+
+        std::fs::write(root.join("conflicted.txt"), "Install
+=======
+
+Quickstart guide
+================
+").unwrap();
+
+        assert!(validate_arbiter_scope(&root, &files, &pre, &[]).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn has_conflict_markers_finds_only_line_anchored_markers() {
+        assert!(has_conflict_markers("a
+<<<<<<< HEAD
+b
+=======
+c
+>>>>>>> theirs
+"));
+        assert!(has_conflict_markers("kept
+>>>>>>> theirs
+"));
+        assert!(has_conflict_markers("<<<<<<<
+"));
+        assert!(!has_conflict_markers("Title
+=======
+"));
+        assert!(!has_conflict_markers("x = \"<<<<<<< not a marker\"
+"));
+        assert!(!has_conflict_markers("<<<<<<<<< nine
+"));
     }
 
     #[test]

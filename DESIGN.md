@@ -1854,6 +1854,21 @@ conflict, resumable via `pact resolve`. This redesign makes Arbiter
 and verified improvement over a 0% success rate -- it does not yet make
 every attempt succeed.
 
+### Arbiter marker check (issue #380)
+
+`validate_arbiter_scope` used to reject any resolution containing the
+substring `=======`. reStructuredText underlines headings with runs of
+`=`, so every `.rst` file with a heading of seven or more characters was
+unresolvable by construction. The real-conflict benchmark (issue #379)
+found 5 of 105 mined conflicts whose maintainer-committed resolution
+that check would have rejected.
+
+A leftover conflict always keeps a line that starts with `<<<<<<<` or
+`>>>>>>>` followed by a space or the end of the line. A bare `=======`
+line cannot be told apart from a seven-character underline, so it no
+longer counts on its own; it never appears without the other two in a
+real leftover.
+
 ### Arbiter merge-state neutralization (issue #185)
 
 Follow-up to the previous section's leading hypothesis, not chased
