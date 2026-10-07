@@ -1,0 +1,517 @@
+{
+  "cases": 44,
+  "repos": {
+    "click": 31,
+    "flask": 13
+  },
+  "skipped": [],
+  "outcomes": {
+    "partial": 14,
+    "faithful": 9,
+    "match": 21
+  },
+  "with_test_gate": 35,
+  "gate_pass": {
+    "ours": "33/35",
+    "theirs": "33/35",
+    "arbiter": "35/35"
+  },
+  "exact_match_human": {
+    "ours": "9/44",
+    "theirs": "5/44",
+    "arbiter": "21/44"
+  },
+  "outcomes_by_side": {
+    "ours": {
+      "partial": 32,
+      "caught": 2,
+      "faithful": 1,
+      "match": 9
+    },
+    "theirs": {
+      "partial": 33,
+      "faithful": 4,
+      "match": 5,
+      "caught": 2
+    },
+    "arbiter": {
+      "partial": 14,
+      "faithful": 9,
+      "match": 21
+    }
+  },
+  "kept_change_rate": {
+    "ours": 0.435,
+    "theirs": 0.602,
+    "arbiter": 0.892
+  },
+  "code_cases": 20,
+  "code_outcomes": {
+    "match": 12,
+    "partial": 5,
+    "faithful": 3
+  },
+  "mean_similarity": {
+    "ours": 0.982,
+    "theirs": 0.953,
+    "arbiter": 0.996
+  },
+  "arbiter_cost_usd_total": 0,
+  "arbiter_cost_usd_mean": 0.0,
+  "arbiter_seconds_median": 70.02115399999457,
+  "per_case": [
+    {
+      "id": "click-0a81393fdf",
+      "repo": "click",
+      "files": [
+        "src/click/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-0aec1168ac",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst",
+        "src/click/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-0c85d80b07",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9963,
+      "gate": true
+    },
+    {
+      "id": "click-11f48e2cd1",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9706,
+      "gate": true
+    },
+    {
+      "id": "click-19da7c1a80",
+      "repo": "click",
+      "files": [
+        ".github/workflows/tests.yaml"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9821,
+      "gate": true
+    },
+    {
+      "id": "click-2608132a84",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.9992,
+      "gate": true
+    },
+    {
+      "id": "click-29df8795dc",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst",
+        "src/click/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-2c6e0eb9aa",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9992,
+      "gate": true
+    },
+    {
+      "id": "click-3a40e43e8f",
+      "repo": "click",
+      "files": [
+        "tests/test_shell_completion.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-3f5eea3438",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.9985,
+      "gate": true
+    },
+    {
+      "id": "click-49164faca6",
+      "repo": "click",
+      "files": [
+        "setup.cfg",
+        "tox.ini"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.995,
+      "gate": true
+    },
+    {
+      "id": "click-65eceb08e3",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst",
+        "src/click/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-6b1278f4d4",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.9985,
+      "gate": true
+    },
+    {
+      "id": "click-7586834cab",
+      "repo": "click",
+      "files": [
+        ".github/workflows/lock.yaml"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-9e9fe41a53",
+      "repo": "click",
+      "files": [
+        "setup.cfg"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-9f63c3b477",
+      "repo": "click",
+      "files": [
+        "tox.ini"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-a683017931",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-a8910b382d",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst",
+        "src/click/__init__.py"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.9998,
+      "gate": true
+    },
+    {
+      "id": "click-a931cfd59a",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9985,
+      "gate": true
+    },
+    {
+      "id": "click-b2f26437c7",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-b72256a7a6",
+      "repo": "click",
+      "files": [
+        "docs/index.rst"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.991,
+      "gate": true
+    },
+    {
+      "id": "click-c1d0729bbb",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst",
+        "src/click/__init__.py"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.9998,
+      "gate": true
+    },
+    {
+      "id": "click-c364303901",
+      "repo": "click",
+      "files": [
+        ".pre-commit-config.yaml"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-cba52fa761",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst",
+        "src/click/__init__.py"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9981,
+      "gate": true
+    },
+    {
+      "id": "click-cbc676549e",
+      "repo": "click",
+      "files": [
+        "src/click/shell_completion.py"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9975,
+      "gate": true
+    },
+    {
+      "id": "click-d1f8651428",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-d79f0fb61c",
+      "repo": "click",
+      "files": [
+        "docs/advanced.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9473,
+      "gate": true
+    },
+    {
+      "id": "click-dc8e539775",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9984,
+      "gate": true
+    },
+    {
+      "id": "click-e11a1efc33",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9992,
+      "gate": true
+    },
+    {
+      "id": "click-e7cff2a3dc",
+      "repo": "click",
+      "files": [
+        "src/click/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "click-fe3677f856",
+      "repo": "click",
+      "files": [
+        "CHANGES.rst"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9988,
+      "gate": true
+    },
+    {
+      "id": "flask-00be8d24ac",
+      "repo": "flask",
+      "files": [
+        "src/flask/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": false
+    },
+    {
+      "id": "flask-153433f612",
+      "repo": "flask",
+      "files": [
+        "src/flask/__init__.py"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9756,
+      "gate": true
+    },
+    {
+      "id": "flask-218880c7fd",
+      "repo": "flask",
+      "files": [
+        "pyproject.toml"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "flask-258d68b6ff",
+      "repo": "flask",
+      "files": [
+        "tests/test_reqctx.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "flask-36af821edf",
+      "repo": "flask",
+      "files": [
+        "src/flask/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": false
+    },
+    {
+      "id": "flask-73739a29f4",
+      "repo": "flask",
+      "files": [
+        ".github/workflows/tests.yaml",
+        "src/flask/__init__.py"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9951,
+      "gate": false
+    },
+    {
+      "id": "flask-7a2d5fb6df",
+      "repo": "flask",
+      "files": [
+        "src/flask/blueprints.py",
+        "src/flask/scaffold.py",
+        "src/flask/typing.py"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.997,
+      "gate": false
+    },
+    {
+      "id": "flask-b78b5a210b",
+      "repo": "flask",
+      "files": [
+        "src/flask/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": true
+    },
+    {
+      "id": "flask-cb4f742543",
+      "repo": "flask",
+      "files": [
+        "CHANGES.rst",
+        "src/flask/__init__.py"
+      ],
+      "outcome": "partial",
+      "similarity": 0.9988,
+      "gate": false
+    },
+    {
+      "id": "flask-cfa863c357",
+      "repo": "flask",
+      "files": [
+        "requirements/tests-pallets-min.txt",
+        "requirements/tests.txt"
+      ],
+      "outcome": "faithful",
+      "similarity": 0.9773,
+      "gate": false
+    },
+    {
+      "id": "flask-d0bf462866",
+      "repo": "flask",
+      "files": [
+        ".github/workflows/publish.yaml"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": false
+    },
+    {
+      "id": "flask-ed5b240417",
+      "repo": "flask",
+      "files": [
+        "docs/config.rst",
+        "src/flask/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": false
+    },
+    {
+      "id": "flask-f976d5bb88",
+      "repo": "flask",
+      "files": [
+        "src/flask/__init__.py"
+      ],
+      "outcome": "match",
+      "similarity": 1.0,
+      "gate": false
+    }
+  ]
+}
