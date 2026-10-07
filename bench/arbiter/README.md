@@ -51,6 +51,33 @@ python summarize.py <results dir>/results.jsonl --json-out summary.json
 `--venvs` holds one virtualenv per repository name with that project's test
 dependencies; the worktree's `src/` and root go on `PYTHONPATH`, so the
 package under test is always the replayed tree. `--skip-agent` scores only the
-baselines, which is free. Arbiter runs through `claude -p`, so a full run costs
-real model usage; the pilot measured about $0.68 per conflict on Sonnet.
-`results/` holds the run reported on issue #379 and in the write-up.
+baselines, which is free. Arbiter runs through `claude -p` or `codex exec`, so a
+run spends real model quota (a Sonnet pilot measured about $0.68 of list-price
+usage per conflict). A usage-limit error stops the run without recording
+anything, and rerunning the same command resumes where it stopped.
+
+`gate.py` scores a reference-free preservation gate on the results: a line one
+side added is required when its hunk is a pure insertion or does not overlap
+the other side's hunks.
+
+## Results (October 2026)
+
+`results/` holds the run reported on issue #379: 105 conflicts mined from
+click, flask, jinja, werkzeug, marshmallow and pluggy (`cases.json`), of which
+the first 44 (all 31 from click, 13 from flask, merged 2021 to 2026) were
+resolved before the account's quota ran out. Arbiter ran on Codex CLI with
+gpt-5.6-sol at medium reasoning, one attempt per conflict.
+
+| | Arbiter | take ours | take theirs |
+|---|---|---|---|
+| identical to the human merge | 21 | 9 | 5 |
+| every kept change, different text | 9 | 1 | 4 |
+| silently dropped a change | 14 | 32 | 33 |
+| changes kept (by line) | 89% | 44% | 60% |
+| passed the test gate (35 with a suite) | 35/35 | 33/35 | 33/35 |
+
+The test gate passed every lossy Arbiter resolution. The preservation gate
+flagged 10 of the 14 lossy ones and 1 of the 30 good ones; requiring every
+added line flags 13 of 14 but also 19 of 30 good ones. Mining also found that
+Arbiter's substring marker check rejected `.rst` files with headings (5 of
+the 105 cases), fixed in #381.

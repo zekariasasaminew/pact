@@ -1,0 +1,1411 @@
+[
+  {
+    "id": "click-cbc676549e",
+    "repo": "click",
+    "merge": "cbc676549ec50e391c75560a8e560f37aa3ab524",
+    "ours": "1ac08db953684e10ed97adbbda81381efd82ce09",
+    "theirs": "240603f240a9ff179d834fede836060d897c6980",
+    "base": "679a7a0eccbdded7a6e85680bdaaf08003765e01",
+    "files": [
+      "src/click/shell_completion.py"
+    ],
+    "task_text": "Merge remote-tracking branch 'upstream/stable' into merge-stable-into-main\nRelease version 8.4.2 (#3631)\nRelease version 8.4.2\nFix `package_name` resolution when module differs from distribution name (#3582)\nFix `package_name` resolution when top-level module differs from distribution name\nFix tests to not rely on `-Wdefault` option (#3591)\nFix double-bracketing of choices in synopsis (#3578)\nCheck for warning exception with idiomatic context manager\nStatic typing improvements in `click.shell_completion` (#3460)\nFix double-bracketing of choices in synopsis",
+    "subject": "Merge remote-tracking branch 'origin/main' into zhihua/powershell"
+  },
+  {
+    "id": "click-3a40e43e8f",
+    "repo": "click",
+    "merge": "3a40e43e8f61761cb7bd4f3e27ae3060690a84eb",
+    "ours": "c3535905c77a29afc84861b29d3ad366ce5451bd",
+    "theirs": "648d7c403829013ade629d63ddbfe808f6b2b770",
+    "base": "a42300ab9eb032c986ad030fae65f1eb58518dae",
+    "files": [
+      "tests/test_shell_completion.py"
+    ],
+    "task_text": "Backport #3504 from `main` to `stable` branch (#3508)\nAdd changelog entry, fix admonition and add test\nFix broken fish completion and multiline help string\nAdd example for Group Help Page in documentation (#3472)\nActivate nightly workflow for random and stress tests\nfix: update example invocation in Group Help Page documentation\nAdd example for Group Help Page in documentation",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "click-a683017931",
+    "repo": "click",
+    "merge": "a683017931b5bcb211e18685fa623e968727aa3b",
+    "ours": "c653ec820093ed1dda41aae8d35bff7834b0344a",
+    "theirs": "60cad4ad6583bf885c62d6f4597f3555d1ee1a0f",
+    "base": "878de46100e9c29aea9dab5b385b8116863cb5e3",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Mark `make_default_short_help` as private API (#3250)\nMove Commands doc from reST to MyST (#3243)\nMerge branch 'stable' into mark-private-api\nExpose original file descriptor in `CliRunner` (#3244)\nMove Commands-and-Groups doc from reST to MyST (#3259)\ndocs: add standalone application guide with Briefcase (#3315)\nMark `make_default_short_help` as private API\nExpose original file descriptor in `CliRunner`\nMerge branch 'stable' into docs/breifcase-click-standalone-app\ndocs: add standalone application guide with Briefcase",
+    "subject": "Merge branch 'stable' into fix-bool-flag-default-true"
+  },
+  {
+    "id": "click-a931cfd59a",
+    "repo": "click",
+    "merge": "a931cfd59a040c4caa8300b41fd6f698e0548bf3",
+    "ours": "790ebd665ce03f25990e037b3e9f16951a2723aa",
+    "theirs": "89af4ae2d682e8ab9f14a036bad19e8990d828d4",
+    "base": "878de46100e9c29aea9dab5b385b8116863cb5e3",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Expose original file descriptor in `CliRunner` (#3244)\nMove Commands-and-Groups doc from reST to MyST (#3259)\ndocs: add standalone application guide with Briefcase (#3315)\nExpose original file descriptor in `CliRunner`\nMerge branch 'stable' into docs/breifcase-click-standalone-app\ndocs: add standalone application guide with Briefcase\nrefactor from rest to myst\nrename extension from .rst to .md",
+    "subject": "Merge branch 'stable' into mark-private-api"
+  },
+  {
+    "id": "click-6b1278f4d4",
+    "repo": "click",
+    "merge": "6b1278f4d4e5ce89fc367b2e9a3ec7a8777e4f2e",
+    "ours": "18d29196c508b249ef1111f1f29c9133e0a8b097",
+    "theirs": "06f52a45782a0bd2cb9aa5f289afb68ac3b2b2e5",
+    "base": "27aaed3fe5bcd6adedd6e91de234914af9859cf1",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Document option no option pattern better (#3103)\nAdd clarifying docs for on/off flag pattern.\nFix rendering when `prompt_suffix` is empty (#3021)\nFix _pipepager()/_tempfilepage() to work with multi-call binaries (#2944)\nFix _pipepager()/_tempfilepage() to work with multi-call binaries\nMove License and Handling-files doc pages from reST to MyST (#3093)\nConvert api.rst to api.md (#3092)\nAdd {doc}\nconvert from reST to MyST\nswitch extension from .rst to .md",
+    "subject": "Merge branch 'stable' into fix-type-cast-sees-unset"
+  },
+  {
+    "id": "click-3f5eea3438",
+    "repo": "click",
+    "merge": "3f5eea3438946b9ad51e5f7a22b405f910f2261b",
+    "ours": "7db1f209b0b01939ba1e864fe74d3f00dac89dd5",
+    "theirs": "35e6a78646c58a8cc1ba3cda603a6bd4fb87f9d5",
+    "base": "2a0e3ba907927ade6951d5732b775f11b54cb766",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Add new section to changes.rst. Change version in pyproject.toml (#3082)\nAdd new section to changes.rst. Change version in pyproject.toml\nConvert advanced.rst to MyST (#3061)\nMove Option-decorators doc from reST to MyST (#3063)\nInject a missing whitespace needed for RST to parse well @ `CHANGES.rst` (#3078)\nInject a missing whitespace needed for RST to parse well @ `CHANGES.rst`\nchangelog v8.3.0: remove duplicate line (#3074)\nchangelog v8.3.0: remove duplicate line\nRequire flit-core v3.11+ to ensure license metadata in the distribution (#3070)\nRequire flit-core v3.11+ to ensure license metadata in the distribution",
+    "subject": "Merge branch 'stable' into pager-process-without-shell"
+  },
+  {
+    "id": "click-2608132a84",
+    "repo": "click",
+    "merge": "2608132a84cc1cd2e822c845d697dc50130e4a67",
+    "ours": "812b8000f79c1fbb747a2de5114fc74515558857",
+    "theirs": "81a482fbfdd5a553cf4704f822ade04c3b102fbc",
+    "base": "a8b41c077b225c30921a78190507a463a20ebb1b",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Merge branch 'main' into stable\nRelease version 8.3.0 (#3060)\nMove Parameter-types doc from reST to MyST (#3041)\nRelease version 8.3.0\ntesting/CliRunner: Fix regression related to EOF introduced in 262bdf0 (#2940)\nMerge branch 'main' into fix-cli-runner-prompt-eof-handling\nForward exception information to resources registered in a context (#3058)\n#2447 Add summary of PR to changelog for 8.3.x\n#2447 Split resource exception handling tests in single and nested\n#2447 Added exception forwarding to context tests",
+    "subject": "Merge branch 'main' into fix_prompt_suffix"
+  },
+  {
+    "id": "click-e11a1efc33",
+    "repo": "click",
+    "merge": "e11a1efc3395e998a1521a0dc35672a799e78d30",
+    "ours": "93c6966eb3a575c2b600434d1cc9f4b3aee505ac",
+    "theirs": "36deba8a95a2585de1a2aa4475b7f054f52830ac",
+    "base": "b63239d657aab7c4e04667a62e7177f617b37230",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Forward exception information to resources registered in a context (#3058)\n#2447 Add summary of PR to changelog for 8.3.x\n#2447 Split resource exception handling tests in single and nested\n#2447 Added exception forwarding to context tests\n#2447 Forward exception data to exit stack when calling `__exit__`\nAdd more tests on `Enum` rendering (#3053)\nAdd more tests on Enum rendering their item's names and not values\nTone-down the case of `default=True` for flags in documentation (#3049)\nTone-down the case of `default=True` for flags\nRegroup sentinels (#3048)",
+    "subject": "Merge branch 'main' into fix-cli-runner-prompt-eof-handling"
+  },
+  {
+    "id": "click-dc8e539775",
+    "repo": "click",
+    "merge": "dc8e539775aab2b881d90cfd27e815d33df75918",
+    "ours": "285f45cf68070b13d460093c494b8307cdfe6e41",
+    "theirs": "d1ba34cb322e7ff8bcdf21590a03cf8e7ccd73e5",
+    "base": "1f4002096439d6661f1df5ceff7eccd3862153ac",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Merge Stable into main (#3046)\nImprove discoverability of Context.max_content_width (#3011)\nAdd missing changes entries. (#3042)\nAdd missing changes entries.\nMerge stable into main (#3037)\nMove Prompts doc from reST to MyST (#3034)\nMerge branch 'rstTomyst' of https://github.com/denuoweb/click into rstTomyst\nreplace rst with python code blocks\nMerge branch 'stable' into rstTomyst\n[pre-commit.ci lite] apply automatic fixes",
+    "subject": "Merge branch 'main' into fix-flag-none-value"
+  },
+  {
+    "id": "click-11f48e2cd1",
+    "repo": "click",
+    "merge": "11f48e2cd1812692ec118cf14dbf2866b83db10a",
+    "ours": "7fc377138a1d61c71c5bec2048ec6bb6de1015aa",
+    "theirs": "1c68e531ef5e45f6facdb777c720d0f984614b81",
+    "base": "45f89cd5d39db37b9aa1a014da000f12da532ddc",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Move Quickstart doc from reST to MyST and reinstate Utils doc directives (#3026)\nremove redundant click. module link\nMerge branch 'rst2myst' of https://github.com/denuoweb/click into rst2myst\nadd newline at eof\n[pre-commit.ci lite] apply automatic fixes\nrestore \u201ceval-rst \u2026 click:example::\u201d directives\nconvert from reST to MyST\nRelease 8.2.2 (#3014)\nchange ext from .rst to .md\nMove Setuptools and Shell-completion docs from reST to MyST (#2987)",
+    "subject": "Merge branch 'stable' into bugfix/OptionsAutoCompletion"
+  },
+  {
+    "id": "click-d1f8651428",
+    "repo": "click",
+    "merge": "d1f865142812584b9a1630106cce3f2309751e71",
+    "ours": "2c6e0eb9aa924cc8c2e1a5cb15a63dcab08ada7e",
+    "theirs": "c88f333de440c5066ff563f784a6561f4713cf78",
+    "base": "44fd6394b72c1186feae31e793cd1196e1024fe2",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "add missing changelog entry for PR #2991 (#3009)\nadd missing changelog entry for PR #2991",
+    "subject": "Merge branch 'stable' into error-hint-no-envvar"
+  },
+  {
+    "id": "click-2c6e0eb9aa",
+    "repo": "click",
+    "merge": "2c6e0eb9aa924cc8c2e1a5cb15a63dcab08ada7e",
+    "ours": "1b0e19f50595a07957bd96a600c37cd44b7e0cc3",
+    "theirs": "44fd6394b72c1186feae31e793cd1196e1024fe2",
+    "base": "499bbeea64fbc251ece62188bcee185bfcec2316",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Merge branch 'main' into stable\nfix a race in `click.testing.StreamMixer`'s finalization, seen in a multi-threaded context (#2991)\nUsing correct typing for `param_hint` (#2990)\nMerge branch 'stable' into fix-typing-bad-param\nFix rendering of Enum choices' default (#3004)\nMerge branch 'stable' into fix-enum-default-rendering\nFix Zsh completions with colons (#2846)\nUse the value of Enum choices to render default\nMerge stable into main (#3001)\nTST: adjust tests",
+    "subject": "Merge branch 'stable' into error-hint-no-envvar"
+  },
+  {
+    "id": "click-b2f26437c7",
+    "repo": "click",
+    "merge": "b2f26437c7621c9b86508c49f6cf7038aa8d2a37",
+    "ours": "3155dcac03fec1bbbcca5afcec10d1c097ad8092",
+    "theirs": "eaf33a957975e7d0943fad8d2b4b905b6bd98cb9",
+    "base": "565f36d5bc4a15d304337b749e113fb4477b1843",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Fix rendering of Enum choices' default (#3004)\nMerge branch 'stable' into fix-enum-default-rendering\nFix Zsh completions with colons (#2846)\nUse the value of Enum choices to render default",
+    "subject": "Merge branch 'stable' into fix-typing-bad-param"
+  },
+  {
+    "id": "click-fe3677f856",
+    "repo": "click",
+    "merge": "fe3677f85644434d67506ac92a3df6d08a96c764",
+    "ours": "f2ae679984c3dfaa0c7639686cd793f59eb4d9b8",
+    "theirs": "a1235aacb1be55dc66ddcfefbf64dec44b6ab54d",
+    "base": "565f36d5bc4a15d304337b749e113fb4477b1843",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Fix Zsh completions with colons (#2846)",
+    "subject": "Merge branch 'stable' into fix-enum-default-rendering"
+  },
+  {
+    "id": "click-d79f0fb61c",
+    "repo": "click",
+    "merge": "d79f0fb61ceed72e309b792063f395694541710a",
+    "ours": "ff4b7f7b78620e23757e9d761e4c4f60fd222ec1",
+    "theirs": "c9f7d9d8a02f0cf9b24db6210b083e687a5cf020",
+    "base": "5dd628854c0b61bbdc07f22004c5da8fa8ee9481",
+    "files": [
+      "docs/advanced.rst"
+    ],
+    "task_text": "Move `--help` option defaults from its class to its decorator (#2840)\nAllow customization of help option right from its decorator.\nRewrite Commands and Groups docs. (#2838)\nRewrite testing docs and move from rst to myst (#2857)\nFix a few typos in testing docs.\nMove testing docs to myst.\nPolish testing docs changes.\nRough out testing docs changes.\nCleanup typos.\nAdd more detail to command and group docs.",
+    "subject": "Resolve merge conflict from merging in main."
+  },
+  {
+    "id": "click-b72256a7a6",
+    "repo": "click",
+    "merge": "b72256a7a61840909376d229824b694b6c1befbd",
+    "ours": "e2f2d84ef0bbcec4f024ea8ea21f3994eddde5f7",
+    "theirs": "8fcf9b0c5bbfcc9231298d76cde29ae8b0fc50d0",
+    "base": "8a47580a00f3404e7071b9ecfec3692a1e18309f",
+    "files": [
+      "docs/index.rst"
+    ],
+    "task_text": "CHANGES: fix rst markup.\nAdd missing PR to CHANGES.\nRewrite first half of options docs (#2825)\nExpand `Choice` token normalization + make generic (#2796)",
+    "subject": "Resolve conflicts from main."
+  },
+  {
+    "id": "click-9f63c3b477",
+    "repo": "click",
+    "merge": "9f63c3b477d444245b0cc21ac23c28f6e8f4c385",
+    "ours": "dd639594be61fc7318b68c5315d81ff57671c41f",
+    "theirs": "b54eb6e61568d807eef835ff20ab90b173accd3f",
+    "base": "aa52d17a97213a4caddaa548111dbff30bf3f162",
+    "files": [
+      "tox.ini"
+    ],
+    "task_text": "test with python 3.13 (#2719)\ntest with python 3.13",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-c364303901",
+    "repo": "click",
+    "merge": "c3643039019f285a200bd67ce7b7c566f832c733",
+    "ours": "b0efabc8ee9895b587230475eae6109b6a5720c9",
+    "theirs": "76cb8410d9b28c3fb55be1bdff5eed14225a7366",
+    "base": "6986b08a7e4107e23f81ec7101d862e7116bc574",
+    "files": [
+      ".pre-commit-config.yaml"
+    ],
+    "task_text": "[pre-commit.ci] pre-commit autoupdate (#2619)\n[pre-commit.ci] pre-commit autoupdate",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-7586834cab",
+    "repo": "click",
+    "merge": "7586834cab38c5592d9d6de3ee0ebe75d4353bfb",
+    "ours": "347529dde549e5c832aefce799ccee2fd5667944",
+    "theirs": "7714728d55cbb93e0ec3e0a21b595f8c4d54292f",
+    "base": "c0092d2242479216ad633e12c87eabe33bacca2d",
+    "files": [
+      ".github/workflows/lock.yaml"
+    ],
+    "task_text": "build, provenance, publish workflow (#2439)\nbuild, provenance, publish workflow",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-cba52fa761",
+    "repo": "click",
+    "merge": "cba52fa76135af2edf46c154203b47106f898eb3",
+    "ours": "725e3e4a8da6f45441d48ec9f6a526583b6e162c",
+    "theirs": "c0092d2242479216ad633e12c87eabe33bacca2d",
+    "base": "b6b5d6280c40b8963b4fa607d00ee0629cbd8a9e",
+    "files": [
+      "CHANGES.rst",
+      "src/click/__init__.py"
+    ],
+    "task_text": "Types: don't leave generic types without a parameter (#2401)\nignore bugbear opinion\nAdd a changelog note on the typehint improvements.\nType hinting: improve decorator annotations\nType hinting: Low-hanging fruit improvements\nTypes: don't leave generic types without a parameter\nstart version 8.1.4",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-19da7c1a80",
+    "repo": "click",
+    "merge": "19da7c1a80ef8c4a8b478810affd28aaca133be7",
+    "ours": "9595a190d79e80945f6827a79f12937a8212f307",
+    "theirs": "b6b5d6280c40b8963b4fa607d00ee0629cbd8a9e",
+    "base": "06a2c0f2ec24ef0a3e5ee97ce9ccbcc51ab49d3a",
+    "files": [
+      ".github/workflows/tests.yaml"
+    ],
+    "task_text": "update tested python versions (#2430)\nupdate tested python versions",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-0aec1168ac",
+    "repo": "click",
+    "merge": "0aec1168ac591e159baf6f61026d6ae322c53aaf",
+    "ours": "6bd8e56de957a423a707362cecfe2d5560afba0b",
+    "theirs": "9c6f4c8e1bb8670ce827c98559f57f6ee5935cd0",
+    "base": "4883c93a786f561108a806cbae7873e5c2b604a3",
+    "files": [
+      "CHANGES.rst",
+      "src/click/__init__.py"
+    ],
+    "task_text": "Merge pull request #2262 from pallets/release-8.1.3\nrelease version 8.1.3\nupdate requirements\nMerge pull request #2248 from jreese/8.1.x\ndisallow use of is_flag and multiple in option\nMerge pull request #2256 from Jonxslays/patch/typing-fix\nuse verbose Callable for @command and @group\nstart version 8.1.3",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-a8910b382d",
+    "repo": "click",
+    "merge": "a8910b382d37cce14adeb44a73aca1d4e87c2413",
+    "ours": "c1d0729bbb26e3f8b0a28440fb0ebca352535c25",
+    "theirs": "030f53cf677ee1de534359c535d465eed0ec1d99",
+    "base": "a41e349ae738c55bce46dfb8715159463074d6e9",
+    "files": [
+      "CHANGES.rst",
+      "src/click/__init__.py"
+    ],
+    "task_text": "Merge pull request #2238 from pallets/release-8.1.2\nrelease version 8.1.2\nMerge pull request #2237 from pallets/param-order\nrestore Path param order\nMerge pull request #2236 from shadchin/patch-1\nfix readable path check error message\nstart version 8.1.2",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-c1d0729bbb",
+    "repo": "click",
+    "merge": "c1d0729bbb26e3f8b0a28440fb0ebca352535c25",
+    "ours": "f467dd3aefc3f01563e20e649d0d3c3ba978325e",
+    "theirs": "a41e349ae738c55bce46dfb8715159463074d6e9",
+    "base": "e4aceee8d2bf7fe9461915b0a21c4359ddcb8dc2",
+    "files": [
+      "CHANGES.rst",
+      "src/click/__init__.py"
+    ],
+    "task_text": "Merge pull request #2234 from pallets/release-8.1.1\nrelease version 8.1.1\nMerge pull request #2233 from henryiii/henryiii/fix/commandtype\nfix(types): decorator typing fails\nstart version 8.1.1",
+    "subject": "Merge branch '8.1.x'"
+  },
+  {
+    "id": "click-e7cff2a3dc",
+    "repo": "click",
+    "merge": "e7cff2a3dcb40df267e8cf92b80396a4875dece8",
+    "ours": "91b2cd67dd04b2843fd6c71e582876c826f5b78e",
+    "theirs": "bf1a6d4956cbbbfd0a6f4dd6310c8110cf89f7fe",
+    "base": "e8b350b6662c4b688122567109a848438cf19a66",
+    "files": [
+      "src/click/__init__.py"
+    ],
+    "task_text": "Merge pull request #2197 from pallets/release-8.0.4\nrelease version 8.0.4\nMerge pull request #2187 from Yourun-proger/fix_type\nFix type for `file` argument",
+    "subject": "Merge branch '8.0.x'"
+  },
+  {
+    "id": "click-49164faca6",
+    "repo": "click",
+    "merge": "49164faca678dd476f1b11a2584fd0e1c6be70b2",
+    "ours": "c63c70dabd3f86ca68678b4f00951f78f52d0270",
+    "theirs": "928ee5b3764eadbe24d7cb3d1d914482a89e13a6",
+    "base": "ee5fdbf1f9e267247d6de765329d2cc9bdd76206",
+    "files": [
+      "setup.cfg",
+      "tox.ini"
+    ],
+    "task_text": "update tool config",
+    "subject": "Merge branch '8.0.x'"
+  },
+  {
+    "id": "click-9e9fe41a53",
+    "repo": "click",
+    "merge": "9e9fe41a53d885d96e43dec7cd9eb69e352f801a",
+    "ours": "6411f425fae545f42795665af4162006b36c5e4a",
+    "theirs": "e3388809b1ccc34984d229a7e63e2257aef70fcf",
+    "base": "df6b72d3e079a8bf1f8455486cf7ac6663ea1916",
+    "files": [
+      "setup.cfg"
+    ],
+    "task_text": "Merge pull request #2160 from pallets/update-requirements\nfix new mypy findings\nupdate requirements",
+    "subject": "Merge branch '8.0.x'"
+  },
+  {
+    "id": "click-0c85d80b07",
+    "repo": "click",
+    "merge": "0c85d80b07742b9f9ed4d583d694c37fce1d1292",
+    "ours": "65eceb08e392e74dcc761be2090e951274ccbe36",
+    "theirs": "e415d3a811fda506c8d7917e615b97ae9dcd1194",
+    "base": "41f5b7a7967bb65910e8837bd4e8542a18feec6c",
+    "files": [
+      "CHANGES.rst"
+    ],
+    "task_text": "Merge pull request #2107 from pallets/path-dash-docs\nupdate docs for open_file and types.Path\nopen_file hanldes pathlib.Path(\"-\")",
+    "subject": "Merge branch '8.0.x'"
+  },
+  {
+    "id": "click-65eceb08e3",
+    "repo": "click",
+    "merge": "65eceb08e392e74dcc761be2090e951274ccbe36",
+    "ours": "0a81393fdf41edb0ab9d2f527eccdc8ce38d7d42",
+    "theirs": "41f5b7a7967bb65910e8837bd4e8542a18feec6c",
+    "base": "96146c9d0b25d700d00b65c916739bd491dd15e0",
+    "files": [
+      "CHANGES.rst",
+      "src/click/__init__.py"
+    ],
+    "task_text": "Merge pull request #2096 from pallets/release-8.0.3\nrelease version 8.0.3\nMerge pull request #2095 from pallets/invoke-cast-default\ninvoke type casts default values\nMerge pull request #2093 from alex-ball/patch-1\nclick.confirm preserves prompt when readline is imported\nMerge pull request #2094 from pallets/path-resolve-symlink\nuse pathlib to resolve symlinks",
+    "subject": "Merge branch '8.0.x'"
+  },
+  {
+    "id": "click-0a81393fdf",
+    "repo": "click",
+    "merge": "0a81393fdf41edb0ab9d2f527eccdc8ce38d7d42",
+    "ours": "655918a61e22cade722dacb9bf798e86b13093af",
+    "theirs": "96146c9d0b25d700d00b65c916739bd491dd15e0",
+    "base": "3e88d3dcadbe357c90059bbaeb691f4a2d20d9e6",
+    "files": [
+      "src/click/__init__.py"
+    ],
+    "task_text": "Merge pull request #2087 from pallets/release-8.0.2\nrelease version 8.0.2\nMerge pull request #2004 from ikapelyukhin/fix-multiple-default-values\noption with multiple and flag_value replaces internal placeholder\nMerge pull request #2086 from pallets/default-type-cast\ngetting default value doesn't perform type cast\nMerge pull request #2084 from pallets/count-type-help\ncount help doesn't show default range type",
+    "subject": "Merge branch '8.0.x'"
+  },
+  {
+    "id": "click-29df8795dc",
+    "repo": "click",
+    "merge": "29df8795dc146ddea328e458068185d3314820e5",
+    "ours": "e4301614347d20b90d7fad943a52e9f19bee6be9",
+    "theirs": "d6071202cc3a8853cd69398b43f03c3422171ead",
+    "base": "5295f0402644a1e3748e8c5891638743c5eaa5cc",
+    "files": [
+      "CHANGES.rst",
+      "src/click/__init__.py"
+    ],
+    "task_text": "start version 8.0.2.dev0\nMerge pull request #1919 from pallets/release-8.0.1\nrelease version 8.0.1\nMerge pull request #1918 from pallets/disable-windows-expansion\nflag to control Windows pattern expansion\nMerge pull request #1916 from pallets/default-resilient\nshow help text with invalid default\nMerge pull request #1915 from pallets/command-name\nreturn resolved name, not original name\nMerge pull request #1914 from pallets/custom-type-value",
+    "subject": "Merge branch '8.0.x'"
+  },
+  {
+    "id": "flask-258d68b6ff",
+    "repo": "flask",
+    "merge": "258d68b6ff5e2244386540f48b48bab90d6ab827",
+    "ours": "e4e4bf6543ac1f132afddb1ffd0bf02bea4c93f7",
+    "theirs": "a31e6b73469cb2bf7eb8f70b5ff21f710fd2e23c",
+    "base": "b21425d6df207fec0c47e9563faa10a2819984ca",
+    "files": [
+      "tests/test_reqctx.py"
+    ],
+    "task_text": "remove werkzeug host tests",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "flask-218880c7fd",
+    "repo": "flask",
+    "merge": "218880c7fdedee139ac09caaf93da469b4dba14c",
+    "ours": "96a01e420b741c59af59301f15612fde39bfb39d",
+    "theirs": "917000097fc17875104176e2c71318ab25c508c3",
+    "base": "da6d075dfde71b2e2a64f39b29ba957d5ffb00b0",
+    "files": [
+      "pyproject.toml"
+    ],
+    "task_text": "test py3.14",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "flask-b78b5a210b",
+    "repo": "flask",
+    "merge": "b78b5a210bde49e7e04b62a2a4f453ca10e0048c",
+    "ours": "f61172b8dd3f962d33f25c50b2f5405e90ceffa5",
+    "theirs": "e7851665071cb93b3c70b1e7103f82d1e6d01f5d",
+    "base": "959052fb8d49c4473f6d8a928d745ae7c38c7e95",
+    "files": [
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Async Iterable Response (#5659)\nAccept `AsyncIterable` for responses\nadd ghsa links\nremove tests about deprecated pkgutil.get_loader (#5702)\nremove tests about deprecated pkgutil.get_loader\nadd endpoint name in favicon example (#5701)\nadd endpoint name in favicon example\nbetter type checking during deprecation (#5700)\nbetter type checking during deprecation\nRemove HTTP Public Key Pinning from docs (#5695)",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "flask-153433f612",
+    "repo": "flask",
+    "merge": "153433f612585409f3494a3c44160d888c02612d",
+    "ours": "65271c105f7c247ecffc9a7121815276e092bd10",
+    "theirs": "a6007373b5c521297e2ec24f820b9c7c32659af8",
+    "base": "02736640095ed6d5a4a409a9658eaca373fd1d48",
+    "files": [
+      "src/flask/__init__.py"
+    ],
+    "task_text": "release version 2.3.3 (#5232)\nrelease version 2.3.3\nbump werkzeug 2.3.7",
+    "subject": "Merge remote-tracking branch 'origin/2.3.x'"
+  },
+  {
+    "id": "flask-d0bf462866",
+    "repo": "flask",
+    "merge": "d0bf462866289ad8bfe29b6e4e1e0f531003ab34",
+    "ours": "57e926c7916ef5fd7d4abac965273ea185e497d2",
+    "theirs": "4911012cf426af25668e5d9beb756a732ca1a4f4",
+    "base": "859d63902e5c9549fda4c167e9787a42c0136413",
+    "files": [
+      ".github/workflows/publish.yaml"
+    ],
+    "task_text": "update workflows",
+    "subject": "Merge branch '2.3.x'"
+  },
+  {
+    "id": "flask-73739a29f4",
+    "repo": "flask",
+    "merge": "73739a29f4c16cf539b57e711a4ea2a686cd707a",
+    "ours": "cd1b68cf6ebb214bfc8cf9bc233c593f15580172",
+    "theirs": "ddc7accaa2e83b328f969c120af2ce0804876b4a",
+    "base": "64bc45874daf4b9828830ea0037a19beb8364ee3",
+    "files": [
+      ".github/workflows/tests.yaml",
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #5081 from pallets/release-2.2.4\nrelease version 2.2.4\nupdate dev env",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "flask-cfa863c357",
+    "repo": "flask",
+    "merge": "cfa863c357c4a40cfc11fe1b9a4f36d8e75cf52f",
+    "ours": "9a4d370ea221b13d7fff5e2120007986c08f85fb",
+    "theirs": "db7d2d2d685c004ea8da6cbcc7c56ecc36276632",
+    "base": "694183ce22a0f63f5e5020dd799c2bd4dd5272a1",
+    "files": [
+      "requirements/tests-pallets-min.txt",
+      "requirements/tests.txt"
+    ],
+    "task_text": "Merge pull request #5067 from pallets/tox-constraints\nupdate dependencies\nenforce minimum versions in env\nMerge pull request #5066 from pallets/docs-passthrough\ndocument passthrough_errors\nMerge pull request #5029 from lettow-humain/main\nfix parentheses",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "flask-ed5b240417",
+    "repo": "flask",
+    "merge": "ed5b240417414cbd0322efa95c91f759928ba154",
+    "ours": "aa040c085c8c560616069f06c34cf796c10b05f1",
+    "theirs": "6a392afbb6404236897ce7c0d02ac78b199e31bb",
+    "base": "b945f988f94fd6f84fef31bd0bb668d71780f78b",
+    "files": [
+      "docs/config.rst",
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4980 from pallets/release-2.2.3\nrelease version 2.2.3\nshow 'run --debug' in docs",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "flask-00be8d24ac",
+    "repo": "flask",
+    "merge": "00be8d24ac3a2a68f35011001e3b0b0550501afd",
+    "ours": "73b9bacbf7e7440e5a8a65e61fecfe3d0ce75579",
+    "theirs": "e7b2ce9a50c4a3a1ff5d032f201ed43d8cd39f17",
+    "base": "ce6ad90ecf79daf759e177e0403f27c469c7f6a8",
+    "files": [
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Add missing .dev to version (#4801)",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "flask-36af821edf",
+    "repo": "flask",
+    "merge": "36af821edf741562cdcb6c60d63f23fa9a1d8776",
+    "ours": "c779ac4f5f9046ce614c7ea30dee4838541b84b5",
+    "theirs": "a1c478bc93d3dc018a6e7a1ba3cf5409553c9df3",
+    "base": "6ab3cb8d0cb1fa28dd2e0118c07e481720bd684a",
+    "files": [
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4755 from pallets/release-2.2.2\nrelease version 2.2.2\nMerge pull request #4754 from pallets/werkzeug-version\nrequire werkzeug >= 2.2.2",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "flask-48fe96588c",
+    "repo": "flask",
+    "merge": "48fe96588c5318be34c843233ada92c7787e720d",
+    "ours": "67310ab49613be97a121053dfbbced14657b96eb",
+    "theirs": "187d7179f605d28c3d24e9f4d65d3295fb099afe",
+    "base": "e4c4fd57710097c7405f7b185b9048c1c8c72d3e",
+    "files": [
+      "docs/api.rst",
+      "src/flask/__init__.py",
+      "src/flask/templating.py"
+    ],
+    "task_text": "Merge pull request #4694 from pallets/release-2.1.3\nrelease version 2.1.3\nMerge pull request #4693 from Yourun-proger/msg_app_ctx\nerror for render_template outside app context\nupdate requirements\nMerge pull request #4681 from earlruby/patch-1\nNew URL for the Quart project\nMerge pull request #4675 from tiesjan/2.1.x\nDocument serialization of Decimal in JSONEncoder",
+    "subject": "Merge branch '2.1.x'"
+  },
+  {
+    "id": "flask-7a2d5fb6df",
+    "repo": "flask",
+    "merge": "7a2d5fb6df1f2c066b94dd88686137353ada9cc6",
+    "ours": "9e2e1de2fcf185ee9ebe9a546f830792403c9160",
+    "theirs": "c7f2ab8e7a512bd643bc640ce015bbe48e74e16e",
+    "base": "21d32ee0672c69573303ac78ff308109b06c9c91",
+    "files": [
+      "src/flask/blueprints.py",
+      "src/flask/scaffold.py",
+      "src/flask/typing.py"
+    ],
+    "task_text": "Merge pull request #4610 from eprigorodov/feature-4602-namespace-path\nremove outdated instance path test\nfix uninstalled package tests under tox\ninstance_path for namespace packages uses path closest to submodule\nMerge pull request #4579 from lecovi/docs/#4574-test-typing\nadd typing tests to mypy config\nMerge pull request #4620 from Numerlor/remove-extra-backtick\nadd errorhandler type check tests\nview function is actually type checked\nRemove extra backtick",
+    "subject": "Merge branch '2.1.x'"
+  },
+  {
+    "id": "flask-f976d5bb88",
+    "repo": "flask",
+    "merge": "f976d5bb88216e921a96998f767df31d7039e4ef",
+    "ours": "918fc07dd95224f990c2f01ea301e8e581fefc7f",
+    "theirs": "50374e3cfe815acd24fd390c861561a0dd17bfbb",
+    "base": "ef7d01f0a03be512b22d2a28b5a4229fdc87ea9a",
+    "files": [
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4558 from pallets/release-2.1.2\nrelease version 2.1.2\nMerge pull request #4555 from pallets/pytest_raises_cleanup\nclean up pytest.raises tests",
+    "subject": "Merge branch '2.1.x'"
+  },
+  {
+    "id": "flask-cb4f742543",
+    "repo": "flask",
+    "merge": "cb4f7425435c39a85c3ed17e395677597d9aaf31",
+    "ours": "a03719b01076a5bfdc2c8f4024eda7b874614bc1",
+    "theirs": "2ec11930951d91dfa9cf02ad80a7da33b9b919b6",
+    "base": "5334e28f6e107e1b021bc9655e9a308c80826593",
+    "files": [
+      "CHANGES.rst",
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4544 from bebleo/mark_run_cert_option_eager\nevaluate --cert before --key\nMerge pull request #4534 from rzimmerdev/main\nfix annotation for json.loads\nstart version 2.1.2\nMerge pull request #4537 from MeViMo/2.1.x\nSyntax error in testing.rst\nremove old test",
+    "subject": "Merge branch '2.1.x'"
+  },
+  {
+    "id": "flask-45fc77d926",
+    "repo": "flask",
+    "merge": "45fc77d9266cd8101b2ab1e0487053db27b57ec2",
+    "ours": "b109b092a95036de875246f05cdc377a2c7faab8",
+    "theirs": "188bd17ff1f3e1d9c9ddd015c8765280e95ffb83",
+    "base": "65b0eef303dfec6b7baa66ff34253e0285e1c3bf",
+    "files": [
+      "CHANGES.rst",
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4511 from pallets/release-2.1.1\nrelease version 2.1.1\nMerge pull request #4510 from pallets/release-2.1.1\nrelease version 2.1.1\nMerge pull request #4509 from pallets/importlib_metadata-min-version\nset importlib_metadata minimum version\nstart version 2.1.1",
+    "subject": "Merge branch '2.1.x'"
+  },
+  {
+    "id": "flask-b6a8ccd2cf",
+    "repo": "flask",
+    "merge": "b6a8ccd2cf65939401fe4ccb6b550d2b19423b06",
+    "ours": "48ee204dd5bdc47f397553fb45b5fe37003c07d1",
+    "theirs": "ef557b3ff2602b9956a2f3ac02c6e134c529fccc",
+    "base": "d6496c8e290adfded887e72083817de2693cdbe2",
+    "files": [
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4449 from pallets/release-2.0.3\nrelease version 2.0.3\nMerge pull request #4448 from pallets/testing-docs\nrewrite testing docs",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "flask-d03df1fff3",
+    "repo": "flask",
+    "merge": "d03df1fff396052d55bedbfc10cbe41a98caad14",
+    "ours": "e103747c544494d67aad64ec2da668d2d69493c3",
+    "theirs": "66f2ac669610accd76395a98b623a21b1f15a9c8",
+    "base": "a025ee3f25044145a38e650aaf097f32bc5b2e83",
+    "files": [
+      "setup.cfg"
+    ],
+    "task_text": "update tool config",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "flask-ea66c68553",
+    "repo": "flask",
+    "merge": "ea66c685537c437e38b2ff3627fb7733e37fa4cd",
+    "ours": "7860c1de87400ab8e43a2b4dada7d8b8f0eb51ab",
+    "theirs": "372066983fb206d4871a4a98c8db8b3953ce4394",
+    "base": "7a5aa570c09cb573b440c089d73a5f1e9cfcf179",
+    "files": [
+      "CHANGES.rst",
+      "tox.ini"
+    ],
+    "task_text": "Merge pull request #4341 from pallets/test-min-dev\ndeprecate as_tuple\nexclude greenlet tests on python 3.11\ntest min/dev versions of pallets deps\nMerge pull request #4332 from vinzid/patch-1\nCorrect the actual unescaped character",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "flask-1cf43e08e3",
+    "repo": "flask",
+    "merge": "1cf43e08e3211e7ff21005dd778613e39b20a449",
+    "ours": "5684f48f7037f33312a1c6b2a4c6d877f66685cd",
+    "theirs": "6f7762538bffe3ce9d03508ecab230bfff3e3dcd",
+    "base": "6d637f0fdb0e18b2722ab2b19b79a5c954d22637",
+    "files": [
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4287 from pallets/release-2.0.2\nrelease version 2.0.2",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "flask-24aab7a08d",
+    "repo": "flask",
+    "merge": "24aab7a08d0b3f40d9fc9e49706854ef8be7a05f",
+    "ours": "6f852d0d22a9be486f3881d500ae83292a76cd46",
+    "theirs": "313a70da6ef4b265f9334f909d946b2d9bbae701",
+    "base": "3261a9451aba86853e2d89e51722380558fb6e27",
+    "files": [
+      "requirements/dev.txt"
+    ],
+    "task_text": "update requirements\nupdate pre-commit hooks\nFix typo in docs (#4261)\nUpdate cherokee links in docs/deploying (#4249)",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "flask-7161776824",
+    "repo": "flask",
+    "merge": "7161776824734fc2797fe2b4fc974d183487ebf8",
+    "ours": "83f7efa04708a22c9701488f0f29b59c2b756bef",
+    "theirs": "e22021d531499af87f65d75f1e37e6329e7385ed",
+    "base": "0cfce9a0ec62795091af6f548cf3ca45f0dac448",
+    "files": [
+      "CHANGES.rst",
+      "src/flask/__init__.py"
+    ],
+    "task_text": "start version 2.0.2.dev0\nMerge pull request #4091 from pallets/release-2.0.1\nrelease version 2.0.1\nMerge pull request #4090 from pallets/stream-type\nimprove typing for `stream_with_context`\nMerge pull request #4087 from greyli/gitignore\nMerge pull request #4074 from pgjones/bp\nFix blueprint renaming\nFix blueprint self registration\nwarn when registering same blueprint with same name",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "flask-8648750997",
+    "repo": "flask",
+    "merge": "864875099762fd0209bacbb26985ce2bcd7f2ec0",
+    "ours": "5bd959fbec98cb14c785868e8890d6850971038e",
+    "theirs": "1ca199f9b38b70a4e97cb47a4252ffd7fccc008c",
+    "base": "c04b0de558fe8e1ccb8edb4525d40e725ae9a24d",
+    "files": [
+      "CHANGES.rst",
+      "src/flask/__init__.py",
+      "src/flask/helpers.py"
+    ],
+    "task_text": "Merge pull request #4051 from pallets/release-1.1.4\nrelease version 1.1.4\nMerge pull request #4049 from brettlangdon/fix.os.fspath\nUse compat fspath instead of os.fspath When 7ba35c4 was cherry-picked it introduced the usage of os.fspath which is not supported on Python <3.6",
+    "subject": "Merge branch '1.1.x' into 2.0.x"
+  },
+  {
+    "id": "flask-1ce0f774c9",
+    "repo": "flask",
+    "merge": "1ce0f774c947ee39924cf6604e444b23c51e4cec",
+    "ours": "4240ace59710d86c478111affd4ad6fb4c8cad9e",
+    "theirs": "5bd959fbec98cb14c785868e8890d6850971038e",
+    "base": "f3551c8b907d468b6dc8a11a14384333d6126014",
+    "files": [
+      "setup.py"
+    ],
+    "task_text": "Merge branch '1.1.x' into 2.0.x\nMerge pull request #4048 from pallets/release-1.1.3\nrelease version 1.1.3\nMerge pull request #4047 from pallets/maximum-versions\nset maximum versions of pallets dependencies",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "flask-5bd959fbec",
+    "repo": "flask",
+    "merge": "5bd959fbec98cb14c785868e8890d6850971038e",
+    "ours": "f3551c8b907d468b6dc8a11a14384333d6126014",
+    "theirs": "c04b0de558fe8e1ccb8edb4525d40e725ae9a24d",
+    "base": "1672c5f565c9bba0269e2c5ef3f2cc7038551641",
+    "files": [
+      "CHANGES.rst",
+      "setup.py",
+      "src/flask/__init__.py"
+    ],
+    "task_text": "Merge pull request #4048 from pallets/release-1.1.3\nrelease version 1.1.3\nMerge pull request #4047 from pallets/maximum-versions\nset maximum versions of pallets dependencies",
+    "subject": "Merge branch '1.1.x' into 2.0.x"
+  },
+  {
+    "id": "flask-7d2ba3e1fc",
+    "repo": "flask",
+    "merge": "7d2ba3e1fc55e8d04308ede674263727c85c86d2",
+    "ours": "d42eac90f6e3f0c84736005a78c262a66187cc74",
+    "theirs": "444550ab0c2ba8b1e003dee198b5628bc58302ce",
+    "base": "7d3ae48d57e1f989dfec42e98997ca8b75370c9a",
+    "files": [
+      "src/flask/json/__init__.py"
+    ],
+    "task_text": "Merge pull request #3862 from huimingz/patch-1\nDocument parameter description error",
+    "subject": "Merge remote-tracking branch 'origin/1.1.x'"
+  },
+  {
+    "id": "jinja-5ef70112a1",
+    "repo": "jinja",
+    "merge": "5ef70112a1ff19c05324ff889dd30405b1002044",
+    "ours": "0514dce5097f8929f22edc247cad1576c64e8d48",
+    "theirs": "284501eb0f8dc8b7f1b4713d71f38477e3ac99f3",
+    "base": "ede7905d3017740a4e4e8bb2c2bda3448a28f934",
+    "files": [
+      ".github/workflows/publish.yaml"
+    ],
+    "task_text": "remove slsa provenance (#2105)\nremove slsa provenance",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "jinja-77092a882a",
+    "repo": "jinja",
+    "merge": "77092a882a39b7dfe9bf1ff82152cb650de63d93",
+    "ours": "10304827e46780c7a1bd08f2fa6b304dbe47d6b8",
+    "theirs": "0b08e13cac2b350af70f53f396df3066c8a32a09",
+    "base": "01d0bab939f46a03fb3babb9f4770cadb50aaef0",
+    "files": [
+      ".readthedocs.yaml"
+    ],
+    "task_text": "svg logo (#2102)\nsvg logo",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "jinja-6aeab5d1da",
+    "repo": "jinja",
+    "merge": "6aeab5d1da0bc0793406d7b402693e779b6cca7a",
+    "ours": "d680a959324400487b4f0e8b8119bed7376b7973",
+    "theirs": "ab8218c7a1b66b62e0ad6b941bd514e3a64a358f",
+    "base": "d3d0910d8a05b3f97a3bcfe881a2d99f15f69ced",
+    "files": [
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "use project advisory link instead of global\nrelease version 3.1.5 (#2066)\nrelease version 3.1.5\nremove test pypi\nupdate dev dependencies\nFix bug involving calling set on a template parameter within all branches of an if block (#1665)\nFix bug where set would sometimes fail within if\nAdd support for namespaces in tuple parsing (#1664)\nmore comments about nsref assignment\nAdd support for namespaces in tuple assignment",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "jinja-11550f9df9",
+    "repo": "jinja",
+    "merge": "11550f9df9ded3fe3f787523a039792776de2409",
+    "ours": "bbd5bcee7b15d7420a764d407bd383142957c4c3",
+    "theirs": "6e7b0face69b9fa498795c4568f28d437a859cab",
+    "base": "a7863ba9d3521f1450f821119c50d19d7ecea329",
+    "files": [
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "release version 3.1.4 (#1974)\nrelease version 3.1.4\nMerge pull request from GHSA-h75v-3vvj-5mfj\ndisallow invalid characters in keys to xmlattr filter",
+    "subject": "Merge branch '3.1.x'"
+  },
+  {
+    "id": "jinja-bbd5bcee7b",
+    "repo": "jinja",
+    "merge": "bbd5bcee7b15d7420a764d407bd383142957c4c3",
+    "ours": "c6dd4bac243828a7381b39d78ba00d387401f061",
+    "theirs": "a7863ba9d3521f1450f821119c50d19d7ecea329",
+    "base": "da3a9f0b804199845fcb76f2e08748bdaeba93ee",
+    "files": [
+      "CHANGES.rst",
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "add ghsa links\nstart version 3.1.4",
+    "subject": "Merge branch '3.1.x'"
+  },
+  {
+    "id": "jinja-3fd91e4d11",
+    "repo": "jinja",
+    "merge": "3fd91e4d11bdd131d8c12805177dbe74d85e7b82",
+    "ours": "7f8fb54782d6617e95e5024c2f40bd24e333f6e0",
+    "theirs": "36f98854c721f98ba103f97f65a8a098da5af0d7",
+    "base": "d80f1868323347a843370163eac0b7db182b9cd6",
+    "files": [
+      ".github/workflows/publish.yaml",
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "fix pr link\nrelease version 3.1.3 (#1926)\nrelease version 3.1.3\nskip test pypi\nuse trusted publishing\nuse trusted publishing\nuse trusted publishing\nupdate pre-commit hooks\nMake nested-trans-block exceptions nicer (#1918)\nMake nested-trans-block exceptions nicer",
+    "subject": "Merge branch '3.1.x'"
+  },
+  {
+    "id": "jinja-495b889b7c",
+    "repo": "jinja",
+    "merge": "495b889b7c978268cc9c5939106aa6f4ce76c7f5",
+    "ours": "80e7a83235025bcd4190a88dfd3fe7c644462954",
+    "theirs": "782151081d53121b1a5b3e0a699709a6bbf7d021",
+    "base": "3fadee01b712580d811bdd2cb06cd8a1b5ee0821",
+    "files": [
+      ".github/workflows/tests.yaml"
+    ],
+    "task_text": "update tested python versions",
+    "subject": "Merge branch '3.1.x'"
+  },
+  {
+    "id": "jinja-1b714c7e82",
+    "repo": "jinja",
+    "merge": "1b714c7e82c73575d1dba48f560db07fe9a5cb74",
+    "ours": "52843b5cbf635b37a82ac0b6c901921a8ee076ff",
+    "theirs": "b08cd4bc64bb980df86ed2876978ae5735572280",
+    "base": "8efee35092404ba67ede8316566be4f430e7b61d",
+    "files": [
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "Merge pull request #1660 from pallets/release-3.1.2\nrelease version 3.1.2",
+    "subject": "Merge branch '3.1.x'"
+  },
+  {
+    "id": "jinja-a0dd7753d0",
+    "repo": "jinja",
+    "merge": "a0dd7753d082f8fe6c3225bb3e51de0bbd6fb7e8",
+    "ours": "c3a61d6ef654f389ea2bdeddce0ffc74d656be8b",
+    "theirs": "466a200ea40642b674db77588d13889abbad55f5",
+    "base": "9b521347aa74439641e729b048081557f13079e4",
+    "files": [
+      "CHANGES.rst",
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "update requirements\nMerge pull request #1647 from Tom-Brouwer/202204/add-missing-overlay-options\nfix flake8-bugbear finding\nadd missing options to overlay from __init__\nstart version 3.1.2",
+    "subject": "Merge branch '3.1.x'"
+  },
+  {
+    "id": "jinja-6f79daafe8",
+    "repo": "jinja",
+    "merge": "6f79daafe868b8ef20baecdcb45d12299529ed2e",
+    "ours": "e542e100027aaa131df73ad06b71ba9a4ee348c8",
+    "theirs": "7f66a58a967ec11b56c76d37782990d9e72353ab",
+    "base": "84c0e2cf4e58655032930aeb200b979e3c6f5f32",
+    "files": [
+      "CHANGES.rst",
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "Merge pull request #1639 from pallets/release-3.1.1\nrelease version 3.1.1\nMerge pull request #1638 from pallets/windows-altsep\nnormpath on final template filename\nstart version 3.1.1",
+    "subject": "Merge branch '3.1.x'"
+  },
+  {
+    "id": "jinja-b2b41c0c6d",
+    "repo": "jinja",
+    "merge": "b2b41c0c6d3b3ac95c9d911043f2dd1a7e3e1c63",
+    "ours": "27d0687ef7f4790c9c16f0d3664620233487fdd4",
+    "theirs": "24d3215f06c6d87a7b6b327c774703bc0acbedcd",
+    "base": "69f9b087dc830fbbe1e8badc2fa86065cbbdd5cc",
+    "files": [
+      "setup.cfg",
+      "tox.ini"
+    ],
+    "task_text": "update tool config",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "jinja-a42b291bf2",
+    "repo": "jinja",
+    "merge": "a42b291bf2a3ac69f978ee88418ca6d0c7879d1e",
+    "ours": "b2bc7be67fb2d376b349b1769ba493cee6cedf1d",
+    "theirs": "2a48dd898d72f1a119ee923996e70aa43da04ea4",
+    "base": "a83aded81063fa5e29801cbbc5c7e45adf66aa09",
+    "files": [
+      "CHANGES.rst",
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "Merge pull request #1543 from pallets/release-3.0.3\nrelease version 3.0.3\nMerge pull request #1542 from pallets/package-loader-file\nPackageLoader works with single module file\nMerge pull request #1541 from pallets/docs-pow-order\ndocument chained pow order\nMerge pull request #1540 from pallets/docs-macro-defaults\nrewrite docs about extending template objects\nMerge pull request #1539 from pallets/docs-macro-defaults\nremove reference to macro.defaults",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "jinja-f20a9c9ccb",
+    "repo": "jinja",
+    "merge": "f20a9c9ccbbfae312581ca9e740dcbecc218fad0",
+    "ours": "e20a52ed50ab73203c5304cc2aae35767fbb482c",
+    "theirs": "b7d12b6b1597ea5d38de8dac2013749be266edd0",
+    "base": "fb9cac66e94f5acb68828aae0b1cd5bbfedf191f",
+    "files": [
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "Merge pull request #1506 from pallets/release-3.0.2\nrelease version 3.0.2\nMerge pull request #1505 from pallets/package-loader-path\nomit curdir from PackageLoader root path\nMerge pull request #1495 from daniel-stoneuk/patch-async-globals\nimported macros can access template globals in async mode",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "jinja-e20a52ed50",
+    "repo": "jinja",
+    "merge": "e20a52ed50ab73203c5304cc2aae35767fbb482c",
+    "ours": "647677d37fd4d95d5fb1571a3120c8b185bad4bf",
+    "theirs": "fb9cac66e94f5acb68828aae0b1cd5bbfedf191f",
+    "base": "024fa10f1014fec14c4d80057d1dbbcd333ff5ee",
+    "files": [
+      ".pre-commit-config.yaml",
+      "requirements/dev.txt",
+      "requirements/typing.txt"
+    ],
+    "task_text": "Merge pull request #1504 from pallets/update-requirements\napply pyupgrade\nupdate pre-commit hooks\nupdate requirements\nMerge pull request #1503 from pallets/except-chain\nuse exception chaining\nMerge pull request #1501 from pallets/ignore-internal-warning\nignore internal asyncio warning\nreplace http with https in docs",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "jinja-cdbda09e44",
+    "repo": "jinja",
+    "merge": "cdbda09e4493b4f53c0bd3a9188786b463bef9fe",
+    "ours": "ab7840328f3c6303b4509972f7751e9ab1ee36c7",
+    "theirs": "738644d8162941241c92dd52f1534fba4ac8ffbb",
+    "base": "f562a4fdea7bc10039ffa555367f8891e790ab53",
+    "files": [
+      "CHANGES.rst",
+      "src/jinja2/__init__.py"
+    ],
+    "task_text": "start version 3.0.2.dev0\nMerge pull request #1445 from pallets/release-3.0.1\nrelease version 3.0.1\nMerge pull request #1444 from pallets/event-loop\nuse asyncio.run\nMerge pull request #1442 from dannysepler/use-pathlib-in-places\nUse pathlib in some test places\nMerge pull request #1440 from pallets/deprecated-markup",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "jinja-076d380361",
+    "repo": "jinja",
+    "merge": "076d3803614ae433b1591a99572e8026a6004496",
+    "ours": "1cad38c44b6dba6999eb16de83417025affc0079",
+    "theirs": "cf215390d4a4d6f0a4de27e2687eed176878f13d",
+    "base": "9ec465baefe32e305bd4e61da49e6c39360c194e",
+    "files": [
+      "CHANGES.rst",
+      "src/jinja2/__init__.py",
+      "src/jinja2/utils.py"
+    ],
+    "task_text": "release version 2.11.3\nMerge pull request #1343 from pallets/urlize-speedup\nspeed up urlize matching\nMerge pull request #1207 from mhansen/patch-1\nMerge pull request #1209 from mhansen/patch-3\ndo_dictsort: update example ready to copy/paste\napi.rst: bugfix in docs, import PackageLoader",
+    "subject": "Merge branch '2.11.x'"
+  },
+  {
+    "id": "marshmallow-944f6de1b7",
+    "repo": "marshmallow",
+    "merge": "944f6de1b7528d87f190e20f132348be360b6e3c",
+    "ours": "7eefd04c7ca6f4cf386e464f536f9e5265efe7c2",
+    "theirs": "94234acd1a98e5fd8b21ba3e8f78ac87a4996949",
+    "base": "0f073e6413f3ace8d44e3c7be55df02b696eb30f",
+    "files": [
+      "tests/test_decorators.py"
+    ],
+    "task_text": "Handle post_load methods that append to data (#2797)",
+    "subject": "Merge branch '3.x-line' into dev"
+  },
+  {
+    "id": "marshmallow-5a8fa1a95d",
+    "repo": "marshmallow",
+    "merge": "5a8fa1a95dd92b2fc38d7efc1ee3b4159d9b773f",
+    "ours": "f8b86b93b3885d3ed2d19cb35889c78d1ac6aa01",
+    "theirs": "eabaa83360392a8690dc2326dc9886e956567f4b",
+    "base": "abc4ea9ae3dab09f41c1f83016d491fa06f931d0",
+    "files": [
+      "src/marshmallow/schema.py"
+    ],
+    "task_text": "Fix typing of validates_schema (#2793)\nFix handling data_key in ValidationErrors raised in schema validators (#2792)\nUpdate ruff source paths to include tests and examples (#2791)",
+    "subject": "Merge branch '3.x-line' into dev"
+  },
+  {
+    "id": "marshmallow-7d6afb60fc",
+    "repo": "marshmallow",
+    "merge": "7d6afb60fc64308e60916554b4fc3f3e84355a06",
+    "ours": "61f2e888774f862e9967bb45c3c375bbeea85ac7",
+    "theirs": "56178cf29e6ddced9b71b447ac90b5e9ac80283e",
+    "base": "9c90557df56ed4a7a22a4b2ea20e06552ee28541",
+    "files": [
+      "docs/_static/custom.css"
+    ],
+    "task_text": "Minor docs improvements (#2783)\nFix broken links (#2782)",
+    "subject": "Merge branch '3.x-line' into dev"
+  },
+  {
+    "id": "marshmallow-c62584cf2c",
+    "repo": "marshmallow",
+    "merge": "c62584cf2ccf8998ce363d0cbc98a6f06fb17885",
+    "ours": "50b2849ccaf6659fcfc362111102d2b62d0165f1",
+    "theirs": "e136bec78f30ec95fc03389d44575f9284fd558c",
+    "base": "bff2b4cd4a2ea287374c64bc96a1de311bb9687f",
+    "files": [
+      "tox.ini"
+    ],
+    "task_text": "Fix mypy setup (#2775)",
+    "subject": "Merge branch '3.x-line' into dev"
+  },
+  {
+    "id": "marshmallow-c4bb15aee0",
+    "repo": "marshmallow",
+    "merge": "c4bb15aee0f40c8672c7d5ff77aa95f464a131d8",
+    "ours": "701f52c83e1054ab4ead9ef17f1a99b6fc6e4636",
+    "theirs": "c2a44d03666fc57d1b95375d4e7740e125105f25",
+    "base": "3b923a57bde8b046cc76b582704a2fd72c21638b",
+    "files": [
+      "src/marshmallow/schema.py",
+      "src/marshmallow/types.py"
+    ],
+    "task_text": "Fix typing of loads (#2769)",
+    "subject": "Merge branch '3.x-line' into dev"
+  },
+  {
+    "id": "marshmallow-7d4f3eeb98",
+    "repo": "marshmallow",
+    "merge": "7d4f3eeb9854d243a56154026e3834d94dd8678f",
+    "ours": "3273a5beb9db746217390589d72e92230255fede",
+    "theirs": "a3049aa8295d497a0c5e14b8d14c775911a68547",
+    "base": "560eed7a3c957931402b301e9a430aecb7bac75c",
+    "files": [
+      "docs/install.rst",
+      "docs/quickstart.rst"
+    ],
+    "task_text": "One more casing fix\nMake casing consistent across docs (#2726)",
+    "subject": "Merge branch 'dev' into 4.0"
+  },
+  {
+    "id": "pluggy-f2c8133592",
+    "repo": "pluggy",
+    "merge": "f2c8133592fc1649f2f78f2474d817c8af291776",
+    "ours": "51ec4486b9d47da944725b0326a412cf9b7518bf",
+    "theirs": "f51e3a70c7f8414bff96e05c4ddb066972353376",
+    "base": "87e45202858dbb725c2ea7d6472a11c1a2624518",
+    "files": [
+      "src/pluggy/_callers.py",
+      "src/pluggy/_hooks.py"
+    ],
+    "task_text": "Merge pull request #741 from RonnyPfannschmidt/register-two-pass\nVerify hookimpls whose spec appears during historic replay\nValidate all hookimpls before registering a plugin\nMerge pull request #703 from RonnyPfannschmidt/refactor/split-hook-modules\nchore(structure): split hook modules into role-specific files\nMerge pull request #728 from RonnyPfannschmidt/fix/tracing-safe-repr\nDrop an unused repr from a tracing test double\nCover the unpresentable object paths in tracing\nKeep trace output str-based\nMake hook tracing defensive about repr and surrogates",
+    "subject": "Merge branch 'main' into default-precedence"
+  },
+  {
+    "id": "pluggy-11a75a96df",
+    "repo": "pluggy",
+    "merge": "11a75a96df9ed3411669a96ef117b8e06f6d538c",
+    "ours": "c5ba2d87f1153c61ae8e64e82d1d587f55093f30",
+    "theirs": "e3b41ed0a848509069453883a74d159fcbea8122",
+    "base": "52165925fa955e8b20fbedc61a685f3f2c78fc08",
+    "files": [
+      ".github/workflows/main.yml"
+    ],
+    "task_text": "Merge pull request #502 from pytest-dev/dependabot/github_actions/actions/setup-python-5\nMerge pull request #497 from bluetech/release-1.5.0\nMerge pull request #501 from pytest-dev/dependabot/github_actions/pypa/gh-action-pypi-publish-1.8.14\nbuild(deps): bump actions/setup-python from 4 to 5\nbuild(deps): bump pypa/gh-action-pypi-publish from 1.8.6 to 1.8.14\nMerge pull request #499 from pytest-dev/RonnyPfannschmidt-dependabot\nCreate dependabot.yml\nPreparing release 1.5.0",
+    "subject": "Merge branch 'main' into RonnyPfannschmidt-oidc-permissions"
+  },
+  {
+    "id": "werkzeug-002fcc5450",
+    "repo": "werkzeug",
+    "merge": "002fcc5450870362028d3ffb3d91f05a4f1fa559",
+    "ours": "53633feffb843932cd7b9f77eb6e42dbc6cb1a58",
+    "theirs": "a6b49f446d479c802e9d479049f9271cfadbc3dd",
+    "base": "3474ff43371fdb7d9c129d9a13021fda38812f2d",
+    "files": [
+      "src/werkzeug/http.py"
+    ],
+    "task_text": "improve performance of etag parsing\nvalidate base64 in basic auth parser (#3248)\nvalidate base64\ninclude the entire cgroup line (#3246)\ninclude the entire cgroup line",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "werkzeug-ef518e429b",
+    "repo": "werkzeug",
+    "merge": "ef518e429b67a91a307de37a1845c93110180371",
+    "ours": "218a653fd952b0a7fde05657dff00c40be5b8291",
+    "theirs": "3474ff43371fdb7d9c129d9a13021fda38812f2d",
+    "base": "c1a9de83bc78e5954b614e54f639a3524547af82",
+    "files": [
+      "src/werkzeug/sansio/utils.py"
+    ],
+    "task_text": "int URL 404s when longer than max_int_str_digits (#3238)\nint URL 404s when longer than max_int_str_digits\nvalidate host port (#3236)\nvalidate host port\nhandle unclosed quote",
+    "subject": "Merge remote-tracking branch 'origin/stable'"
+  },
+  {
+    "id": "werkzeug-efa80bff0a",
+    "repo": "werkzeug",
+    "merge": "efa80bff0ac50824ea4f7d848a10001cc614c893",
+    "ours": "94e9e5b95e253ff75e6f0bc68bdf4786e8a28bcf",
+    "theirs": "c1a9de83bc78e5954b614e54f639a3524547af82",
+    "base": "ad00b2d44be45eb41da2fe468b18659f0f547f65",
+    "files": [
+      "src/werkzeug/http.py"
+    ],
+    "task_text": "require delimiters in etag parsing",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "werkzeug-94e9e5b95e",
+    "repo": "werkzeug",
+    "merge": "94e9e5b95e253ff75e6f0bc68bdf4786e8a28bcf",
+    "ours": "08887995ed524668c2554337ef611e8e08ed7b04",
+    "theirs": "ad00b2d44be45eb41da2fe468b18659f0f547f65",
+    "base": "a180826b70a2911fb01db9fb07e72493971a0331",
+    "files": [
+      "src/werkzeug/http.py",
+      "src/werkzeug/sansio/http.py"
+    ],
+    "task_text": "additional etag cleanup",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "werkzeug-decab7ed68",
+    "repo": "werkzeug",
+    "merge": "decab7ed68c5d6a096b110b63716a097d98ef2c9",
+    "ours": "a9f6b3c7924912e62ea74f39f10fb611d6e7725e",
+    "theirs": "d9cda879dd5cd13202fd7299b1eb407a6f92e0ff",
+    "base": "042c4c5a65f0de381b316d60c5e826b11e4f37b5",
+    "files": [
+      ".pre-commit-config.yaml"
+    ],
+    "task_text": "update dev dependencies\nAdd Literal[True] overload for MultiDict.to_dict(). (#3074)\nAdd Literal[True] overload for MultiDict.to_dict().",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "werkzeug-357681fc26",
+    "repo": "werkzeug",
+    "merge": "357681fc26dd46ec5b7c3c067732873f57db0bc8",
+    "ours": "1e775e391fbfc086254dd7a279cdd9e75e44d87c",
+    "theirs": "07af92d053cfb5b387e05c555538dc5270ade565",
+    "base": "d1f60d68ac9788aec05712aca29867abd00d5cc3",
+    "files": [
+      "pyproject.toml"
+    ],
+    "task_text": "release version 3.1.1 (#2987)\nrelease version 3.1.1\nfix `str(request.headers)` (#2986)\nfix str(request.headers)",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "werkzeug-cae1702c04",
+    "repo": "werkzeug",
+    "merge": "cae1702c043686fac339143962543b1fdd1aa6dd",
+    "ours": "07cf5374b6e709b3c2358e92b6878c2d45f49d20",
+    "theirs": "a7b121abc781b9a6557ca204f23247db654d0253",
+    "base": "5661b960fcf21a9ad851c5ccb631fb8b6b74a494",
+    "files": [
+      "pyproject.toml"
+    ],
+    "task_text": "release version 3.0.5 (#2961)\nrelease version 3.0.5\ncatch OSError from getpass.getuser (#2960)\ncatch OSError from getpass.getuser",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "werkzeug-454ddcdf63",
+    "repo": "werkzeug",
+    "merge": "454ddcdf637b4a5a6e873775d19f5cf135552dd1",
+    "ours": "5add63c955131fd73531d7369f16b2f1b4e342d4",
+    "theirs": "889eafd9f9bfbbdabed67a428637d643e8962bad",
+    "base": "0c8136bd10ff2b685efbeb3abc340e4a9fef9be1",
+    "files": [
+      "requirements/tests.in",
+      "requirements/tests.txt"
+    ],
+    "task_text": "update test workflow trigger\nupdate dev dependencies",
+    "subject": "Merge branch 'stable'"
+  },
+  {
+    "id": "werkzeug-098d0d5a6b",
+    "repo": "werkzeug",
+    "merge": "098d0d5a6b06c96f0158ce99ed7a5ac419d61652",
+    "ours": "65d3a84a28bad7752f333a082360682adb3d925c",
+    "theirs": "eed59db046d5cf85055ebd7574e0cb8a20f42482",
+    "base": "554a333476732459598eb71ef747115774ca99f2",
+    "files": [
+      "pyproject.toml"
+    ],
+    "task_text": "release version 3.0.4 (#2943)\nrelease version 3.0.4\ndebugger works on urls with query string (#2942)\ndebugger works on urls with query string\ntreat SSLEOFError as dropped connection (#2941)\ntreat SSLEOFError as dropped connection\nsynchronize failed pin entry (#2940)\nsynchronize failed pin entry\nimprove parse_options_header performance (#2939)\nimprove parse_options_header performance",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "werkzeug-9fd8f5dcd4",
+    "repo": "werkzeug",
+    "merge": "9fd8f5dcd4e4496a3a0bcc7785d2da0a7e07e000",
+    "ours": "e87f60b7b985d356f17333b69e7cb135aa75cd92",
+    "theirs": "c7cde2427892004f43e1b672ea85fba6062f8bfd",
+    "base": "69dc333a65ecfc814c8eb99e32246281fb17c5c1",
+    "files": [
+      ".pre-commit-config.yaml",
+      "requirements/dev.txt",
+      "requirements/typing.txt"
+    ],
+    "task_text": "update dev dependencies\nsplit tox update envs",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "werkzeug-5d33a39956",
+    "repo": "werkzeug",
+    "merge": "5d33a399564516d06f864e2869e5bc6b2827c5e4",
+    "ours": "c58d391a0f455e5dfee72846b184f2a4b1d486fc",
+    "theirs": "1565490a7fd0a476dc70e42939890bdc8e01c325",
+    "base": "3c45bc15c31496bf62ee524167d1dabb7e6bc68d",
+    "files": [
+      "pyproject.toml"
+    ],
+    "task_text": "release version 3.0.3 (#2896)\nrelease version 3.0.3\nMerge pull request from GHSA-2g68-c3qc-8985\nonly require trusted host for evalex\nrestrict debugger trusted hosts\nendpoint type is Any (#2895)\nendpoint type is Any\nremove iri_to_uri redirect workaround (#2894)\nremove _invalid_iri_to_uri workaround\nmake cn field a valid single hostname, and use wildcard in SANs field. (#2892)",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "werkzeug-eafbed0ce2",
+    "repo": "werkzeug",
+    "merge": "eafbed0ce2a6bdf60e62de82bf4a8365188ac334",
+    "ours": "c1435615a66db5dbce5e51a44d956e751a6fa895",
+    "theirs": "6eafc0ed4610720482fc397476b3d4e4890bc72e",
+    "base": "d30ef25b1decacfcb79f7283ea19a2b8b080f50b",
+    "files": [
+      ".pre-commit-config.yaml"
+    ],
+    "task_text": "Merge branch '2.3.x' into 3.0.x\nuse ruff lint and format (#2813)\nuse ruff lint and format",
+    "subject": "Merge branch '3.0.x'"
+  },
+  {
+    "id": "werkzeug-76b049dd45",
+    "repo": "werkzeug",
+    "merge": "76b049dd45fd072fb62a54bccc0e8d513b03f4d8",
+    "ours": "cdb48907ca5933facd8521700ac80ddbcaac2211",
+    "theirs": "f7cac2c1505978a689a3a6a51272792e342bf986",
+    "base": "9389b350a5a78c7f92922e5fe7a8b60e74ce568d",
+    "files": [
+      ".github/workflows/publish.yaml"
+    ],
+    "task_text": "update workflows (#2699)\nremove pip upgrade\nupdate publish parameter names",
+    "subject": "Merge branch '2.3.x'"
+  },
+  {
+    "id": "werkzeug-30b4ff65fa",
+    "repo": "werkzeug",
+    "merge": "30b4ff65fa7f00774d52836f22b84b682d9b6b2d",
+    "ours": "cfebee06d2e0d1682e33d7f12cbf25e57650ffcd",
+    "theirs": "922b562d8deccffa8e109ceea3cf5547589c7a9d",
+    "base": "7c7ce5cb73f3f7d3b9c09340e4f322aeb583dbc5",
+    "files": [
+      "src/werkzeug/__init__.py"
+    ],
+    "task_text": "release version 2.2.3 (#2587)\nrelease version 2.2.3\nMerge pull request from GHSA-xg9f-g7g7-2323\nrewrite docs about request data limits\nclean up docs\nlimit the maximum number of multipart form parts\nMerge pull request from GHSA-px8h-6qxv-m22q\ndon't strip leading = when parsing cookie",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "werkzeug-4032d5c198",
+    "repo": "werkzeug",
+    "merge": "4032d5c198e85086f1379f694a4b59e8400dbad0",
+    "ours": "4af628004dd1c03d4d6d2431118a8c82c66ee8f2",
+    "theirs": "529a26393272383754d3e2fe126d7854d8dd96f7",
+    "base": "7ac56b43239a84a7e4610661d4c4b33fc2561cb1",
+    "files": [
+      ".github/workflows/tests.yaml"
+    ],
+    "task_text": "relax actions/cache pin",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "werkzeug-4346ab54f2",
+    "repo": "werkzeug",
+    "merge": "4346ab54f246302c5aefe99ccebb9167fa952191",
+    "ours": "6e8bc96f289d0d1a75817469f37eb29ca80393a5",
+    "theirs": "2db62e44137ce270abbbd79ab9789585f9523ee3",
+    "base": "99f328cf2721e913bd8a3128a9cdd95ca97c334c",
+    "files": [
+      ".pre-commit-config.yaml"
+    ],
+    "task_text": "update dependencies\nBump pytest xprocess to latest version and fix issue with junk binary data to log streams (#2568)\nbump pytest-xprocess, fix reading junk in log\n[pre-commit.ci] pre-commit autoupdate (#2543)\n[pre-commit.ci] pre-commit autoupdate (#2538)",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "werkzeug-5dff30f819",
+    "repo": "werkzeug",
+    "merge": "5dff30f8191589ddc5faf1aa2f445fe30befcbcf",
+    "ours": "f0c26b5e842fde616530a5f12a0087228f29d0ae",
+    "theirs": "15fcb87d36f4ed45b127692d2d739266b918503c",
+    "base": "4f6098fa182db56468fd3b94b3079e99f8de67c1",
+    "files": [
+      "src/werkzeug/__init__.py"
+    ],
+    "task_text": "Merge pull request #2499 from pallets/release-2.2.2\nrelease version 2.2.2\nMerge pull request #2498 from pallets/socket-warning\nhandle unclosed socket resource warning\nMerge pull request #2497 from pallets/local-wrapped\nLocalProxy.__wrapped__ is always set when unbound\nMerge pull request #2496 from pallets/deploy-docs\nmodernize deployment docs\nMerge pull request #2495 from pallets/dev-server-warning\nalways show dev server warning",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "werkzeug-aaf12a75ba",
+    "repo": "werkzeug",
+    "merge": "aaf12a75baeb04b442187b855370ab3f795daec3",
+    "ours": "e40f1c11ef5610df7ff2eca41170a62dedbd21e7",
+    "theirs": "410c87843f07991ad0b4bb5e9dd1bd8c7f8f2332",
+    "base": "7ae6bc12fa9b99c942f4f04022a175426a8414e9",
+    "files": [
+      "src/werkzeug/__init__.py"
+    ],
+    "task_text": "release version 2.2.1\nMerge pull request #2472 from pgjones/2.2.x\nBugfix the calculation of weighting based on static parts\nMerge pull request #2470 from pgjones/2.2.x\nSwitch $\\Z to \\Z in matching regex\nBugfix ensure that the entire part is matched\nMerge pull request #2468 from pgjones/2.2.x\nRestore ValidationError as part of the werkzeug.routing API\nEnsure that rules without strict slashes match paths with slashes",
+    "subject": "Merge branch '2.2.x'"
+  },
+  {
+    "id": "werkzeug-c2320cd77b",
+    "repo": "werkzeug",
+    "merge": "c2320cd77bfe7bbc17475dc08277630b367100c7",
+    "ours": "070014116a3c6b6a96077918d000de2daf572d99",
+    "theirs": "810cd659153a7c9923e2557a00c587c8bc77d74a",
+    "base": "0ff699a356f3f6424359267077cf0bfbe37da274",
+    "files": [
+      "src/werkzeug/__init__.py"
+    ],
+    "task_text": "Merge pull request #2403 from pallets/release-2.1.2\nrelease version 2.1.2",
+    "subject": "Merge branch '2.1.x'"
+  },
+  {
+    "id": "werkzeug-e1398527d6",
+    "repo": "werkzeug",
+    "merge": "e1398527d69239edd715735a749a5dc43bfaa9e3",
+    "ours": "5d0bc6ce2d73f2f70ef57c9f9d8a01bb476b820d",
+    "theirs": "38e655ec8a7a7d357143f2c83db582526b3f8b95",
+    "base": "0bee9aeb31212372305ee74d73c07c272393d3f2",
+    "files": [
+      "src/werkzeug/__init__.py"
+    ],
+    "task_text": "Merge pull request #2336 from pallets/release-2.0.3\nrelease version 2.0.3",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "werkzeug-3f4430bcc7",
+    "repo": "werkzeug",
+    "merge": "3f4430bcc7958be488e9f857d34b6cd3dc87234a",
+    "ours": "be48ac6b85f733a507d7999be2fef81c779d7351",
+    "theirs": "0bee9aeb31212372305ee74d73c07c272393d3f2",
+    "base": "9b27fb0e1fcba3b76585e28ca06fce8240149420",
+    "files": [
+      "requirements/dev.txt",
+      "src/werkzeug/debug/tbtools.py",
+      "tests/test_test.py"
+    ],
+    "task_text": "Merge pull request #2334 from pallets/update-requirements\nstop using dependabot for python, too noisy\ncache pip with setup-python action\nuse pip-compile-multi for requirements\nupdate pre-commit\nMerge pull request #2318 from Yourun-proger/fix_collect\ntell pytest to skip collecting TestResponse\nMerge pull request #2152 from mrcljx/fix-redirect\ntest client request_uri stays in sync with path\nMerge pull request #2308 from sobolevn/patch-1",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "werkzeug-9efe8c00dc",
+    "repo": "werkzeug",
+    "merge": "9efe8c00dcb2b6fc086961ba304729db01912652",
+    "ours": "18b9f7e30b30e209711910942746a9d5306eed09",
+    "theirs": "9b27fb0e1fcba3b76585e28ca06fce8240149420",
+    "base": "f74edc6d1ff461badef391aabfd38765d1f48ade",
+    "files": [
+      "setup.cfg",
+      "tox.ini"
+    ],
+    "task_text": "update tool config",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "werkzeug-347291802f",
+    "repo": "werkzeug",
+    "merge": "347291802fcf89bc89660cc9dc62eb1303337bc2",
+    "ours": "bfa6c975b41ed61a0e760c5bb4310965b75b5e23",
+    "theirs": "175942940f447b3fcfface3ee77197d292d898b7",
+    "base": "5f910ac0071fec6d99e24b84bffe577146e4aa9a",
+    "files": [
+      "src/werkzeug/sansio/request.py"
+    ],
+    "task_text": "Merge pull request #2306 from pallets:proxy-fallback-attr\nfix proxy fallback for __class__ and __doc__ attrs\nMerge pull request #2305 from pallets/user_agent_type\nfix type for user_agent_class\nMerge pull request #2290 from zjmil/fix-make-conditional-typing\nfix typing for request_or_environ parameters",
+    "subject": "Merge remote-tracking branch 'origin/2.0.x'"
+  },
+  {
+    "id": "werkzeug-d72a713efd",
+    "repo": "werkzeug",
+    "merge": "d72a713efde2587e9d69fc52e9a5e299ced7ea3b",
+    "ours": "2d6b621f4c876072d8509655e900dfd88e830157",
+    "theirs": "532479573ab3ecd815795df58a48ae7d68777ee0",
+    "base": "33155ce3998054be91cfd13dc68436a442223bf8",
+    "files": [
+      "src/werkzeug/__init__.py"
+    ],
+    "task_text": "Merge pull request #2255 from pallets/release-2.0.2\nrelease version 2.0.2\nMerge pull request #2248 from kjurka/handle_exception_wo_traceback\nhandle an exception without a traceback\nfix changelog typo\nMerge pull request #2239 from mireq/main\nFixed expand frame exception\nMerge pull request #2237 from pgjones/csp\nfix setting CSP header options",
+    "subject": "Merge branch '2.0.x'"
+  },
+  {
+    "id": "werkzeug-1403ae1888",
+    "repo": "werkzeug",
+    "merge": "1403ae188809e8dc375855ddda1f481f35882b27",
+    "ours": "bd8b7199edbabfeaa2affa2f6fa1ab677fbdb4e4",
+    "theirs": "24440ad5873c9b3a16cec6f0e4b7db05bf72c548",
+    "base": "d49a64ca8b02196067993b4f0cdc112d8250ea25",
+    "files": [
+      ".pre-commit-config.yaml",
+      "requirements/dev.txt"
+    ],
+    "task_text": "Merge pull request #2211 from pallets/update-requirements\nrun pyupgrade\nupdate pre-commit hooks\nupdate requirements\nMerge pull request #2210 from pallets/update-mypy\nfix new mypy errors\nadd type stub packages\nupdate mypy",
+    "subject": "Merge remote-tracking branch 'origin/2.0.x'"
+  }
+]
