@@ -26,7 +26,7 @@ import subprocess
 import threading
 import xml.etree.ElementTree as ET
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 CONFLICT_MARKER = re.compile(r"^(<{7}|>{7})( |$)", re.MULTILINE)
@@ -375,6 +375,8 @@ def main() -> None:
             case = futures[future]
             try:
                 record = future.result()
+            except CancelledError:
+                continue
             except UsageLimitHit as err:
                 print(f"{case['id']}: usage limit hit, not recorded: {err}", flush=True)
                 for pending in futures:
