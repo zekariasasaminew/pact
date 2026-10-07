@@ -2627,12 +2627,7 @@ mod tests {
         let files = vec!["conflicted.txt".to_string()];
         let pre = pre_run_lengths_for(&root, &files);
 
-        std::fs::write(root.join("conflicted.txt"), "Install
-=======
-
-Quickstart guide
-================
-").unwrap();
+        std::fs::write(root.join("conflicted.txt"), "Install\n=======\n\nQuickstart guide\n================\n").unwrap();
 
         assert!(validate_arbiter_scope(&root, &files, &pre, &[]).is_ok());
         let _ = std::fs::remove_dir_all(&root);
@@ -2640,25 +2635,12 @@ Quickstart guide
 
     #[test]
     fn has_conflict_markers_finds_only_line_anchored_markers() {
-        assert!(has_conflict_markers("a
-<<<<<<< HEAD
-b
-=======
-c
->>>>>>> theirs
-"));
-        assert!(has_conflict_markers("kept
->>>>>>> theirs
-"));
-        assert!(has_conflict_markers("<<<<<<<
-"));
-        assert!(!has_conflict_markers("Title
-=======
-"));
-        assert!(!has_conflict_markers("x = \"<<<<<<< not a marker\"
-"));
-        assert!(!has_conflict_markers("<<<<<<<<< nine
-"));
+        assert!(has_conflict_markers("a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> theirs\n"));
+        assert!(has_conflict_markers("kept\n>>>>>>> theirs\n"));
+        assert!(has_conflict_markers("<<<<<<<\n"));
+        assert!(!has_conflict_markers("Title\n=======\n"));
+        assert!(!has_conflict_markers("x = \"<<<<<<< not a marker\"\n"));
+        assert!(!has_conflict_markers("<<<<<<<<< nine\n"));
     }
 
     #[test]
