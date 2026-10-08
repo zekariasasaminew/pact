@@ -1,11 +1,5 @@
 # pact
 
-> **Status: experimental, not actively developed (October 2026).** pact works
-> as documented here and the code stays open, but nobody is working on it and
-> issues may not get a reply. Open problems are tracked on GitHub (#366,
-> #371-#374); benchmark evidence is on #308. Use it to experiment, read the
-> design notes, or fork it.
-
 **Write-up:** [The fastest isolation is the one you skip](https://www.zekariasasaminew.com/blog/pact),
 the whole arc from worktree-per-agent to `pact run`, with the benchmark numbers.
 
