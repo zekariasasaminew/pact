@@ -54,6 +54,60 @@ in-process sub-agents, 21% cheaper, with higher coverage, 26% less peak
 and 49% less mean memory, and nobody wrote a brief. One wave only for
 now: units that depend on each other are #282.
 
+### Independent tasks across repositories: `pact fleet`
+
+```sh
+pact fleet tasks.toml --dry-run          # what each task would create and launch, nothing started
+pact fleet tasks.toml --max-concurrent 3
+```
+
+`pact fleet` (issue #388) is for work that does not belong together:
+several unrelated tasks, in the same repository or in different ones,
+each on the agent and model that suits it. Every task gets a workspace
+and a `pact/<name>` branch of its own in its repository, and nothing is
+merged; you review and land each one separately. One limit covers the
+whole fleet, every repository included: at most `--max-concurrent`
+agents (default 4) run at once, and another starts only while
+`--min-free-mem-mb` (default 1500) of memory would stay free.
+
+```toml
+[defaults]
+agent = "claude"              # for tasks that name no agent
+
+[tiers.chore]                 # a tier maps each agent to a model
+claude = "haiku"
+codex = "gpt-5-mini"
+
+[[task]]
+name = "fix-login"            # workspace and branch name, unique in the file
+repo = "../app"               # relative to this file; default: the repo pact runs in
+tier = "chore"                # or model = "..."
+prompt = "The login form accepts an empty password. Fix it and add a test."
+
+[[task]]
+name = "changelog"
+repo = "../docs-site"
+agent = "codex"
+model = "gpt-5"
+prompt_file = "briefs/changelog.md"
+```
+
+`[defaults]` and `[tiers.<name>]` mean what they mean in `pact.toml`,
+but only this file's are read: a task's repository is not asked for its
+own `pact.toml`. When every task names a `repo`, the command runs from
+anywhere, inside a git repository or not.
+
+pact adds a short report to the end of every prompt, asking the agent to
+finish with `STATUS` (done, blocked or failed), `CHANGED`, `VERIFIED`,
+`NOT VERIFIED` and `NOTES`. A task counts as done only when its agent
+process succeeded and it reported `STATUS: done`; an agent that stops to
+ask a question reports `blocked` and its question is printed under its
+row of the closing table, and one that ends with no report is listed as
+`unreported`. The command exits 1 when any task is not done. The parsed
+report is kept in the task's run record (`meta/runs/<name>.json`). Each
+task's changes are left uncommitted in its workspace, like `spawn`:
+`pact --repo <repo> diff <name>` shows them.
+
 ### Running agents in parallel by hand
 
 ```sh

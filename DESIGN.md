@@ -1452,6 +1452,62 @@ fake agent as both planner (a canned reply for prose prompts) and workers
 check against Copilot CLI produced a valid two-unit plan in one attempt
 and 36 s.
 
+### `pact fleet`: independent tasks (issue #388)
+
+`spawn-many` and `pact run` assume one repository and one result: the
+lanes are merged, or share a tree. The audit in #386 found the other
+common shape was being run by a PowerShell script outside pact: several
+unrelated tasks, often in different repositories, each wanting its own
+model and its own review. `pact fleet` is that shape. `run_fleet`
+(`pact-core/src/fleet.rs`) opens one `Orchestrator` per distinct
+repository and runs one thread per task through the same
+`spawn_with_supervisor` every other lane uses, so a fleet task is an
+ordinary workspace afterwards (`list`, `diff`, `inspect`, `teardown` all
+work on it with `--repo`).
+
+**One `Admission`, one `Supervisor`.** The memory floor is a property of
+the machine, not of a repository, so the admission gate is shared across
+every repository in the fleet; a per-repository gate would admit N times
+the budget. One `Supervisor` because `ctrlc` allows one handler per
+process, and one Ctrl-C should stop every agent.
+
+**The file carries its own `[defaults]` and `[tiers]`.** It is parsed as
+a `PactConfig` plus a `[[task]]` array, so the vocabulary is the one
+`pact.toml` already taught. The task repositories' own `pact.toml` files
+are not consulted: a fleet file is written by one person for one run,
+and a model that changed because of a file in some other repository
+would be a cost surprise. For the same reason `prepare` commands from
+those files are not run. `repo` resolves through `git rev-parse
+--show-toplevel`, so naming a subdirectory still puts the state
+directory beside the repository root.
+
+**Process lanes only.** An ACP batch is one agent process bound to one
+repository's coordination server, and it cannot set a model per lane yet
+(#374). Per-task models are the point of a fleet, so every task is its
+own process whatever the agent.
+
+**The worker report contract.** A process exit code says the CLI did not
+crash; it does not say the task is finished: an agent that stops to ask
+a question, or gives up, exits 0 the same as one that finished (#212
+found the same gap for a task that touched no files). So
+`SpawnOptions::report_contract`, the contract proposed in #385, appends
+a five-field
+report request to the prompt and `parse_worker_report` reads it back out
+of the final message into `RunMetadata::report`. Done means the process
+succeeded and the report says `done`; no report is `unreported`, which
+counts as not done, because silence was the failure the contract exists
+to catch. The parser takes the last `STATUS:` line (a model that quotes
+the contract back and then answers is still read correctly), skips the
+template line itself (the one with `|` between the choices), and
+tolerates the markdown models wrap labels in. The contract is appended
+inside `spawn_with_supervisor`, after the workspace is created, so the
+workspace's recorded task stays the user's own prompt. The flag lives on
+`SpawnOptions` rather than in the fleet module so other commands can opt
+in later without a second code path.
+
+Not in this slice: committing or landing a task's branch (#389), a
+read-only task mode that skips the worktree, and the GUI (#390).
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched
