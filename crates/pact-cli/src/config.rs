@@ -113,13 +113,13 @@ impl PactConfig {
             let Some(models) = self.tiers.get(tier) else {
                 let known: Vec<&str> = self.tiers.keys().map(String::as_str).collect();
                 bail!(
-                    "--tier '{tier}' is not defined in pact.toml (defined: {})",
+                    "tier '{tier}' is not defined in the config file (defined: {})",
                     if known.is_empty() { "none; add a [tiers.<name>] table".to_string() } else { known.join(", ") }
                 );
             };
             return match models.get(agent) {
                 Some(model) => Ok(Some(model.clone())),
-                None => bail!("tier '{tier}' in pact.toml has no model for agent '{agent}'; add `{agent} = \"<model>\"` under [tiers.{tier}]"),
+                None => bail!("tier '{tier}' has no model for agent '{agent}'; add `{agent} = \"<model>\"` under [tiers.{tier}]"),
             };
         }
         Ok(self.defaults.model.clone())

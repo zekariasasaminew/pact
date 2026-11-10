@@ -4,6 +4,7 @@ use std::process::Command;
 
 mod acp_runtime;
 mod admission;
+pub mod fleet;
 pub mod run;
 pub use acp_runtime::{effective_runtime, LaneRuntime};
 pub use admission::{available_memory_mb, decide, lanes_that_fit, suggested_units, Admission, AdmissionDecision, AdmissionPolicy, MAX_AUTO_UNITS, MIN_AUTO_UNITS};
@@ -96,6 +97,11 @@ pub struct RunMetadata {
     /// its own. See DESIGN.md ("pact-core > Structured run metadata").
     pub files_touched: bool,
     pub log_path: PathBuf,
+    /// The worker report parsed from the agent's final message (issue
+    /// #388), when the prompt carried the report contract and the agent
+    /// honoured it.
+    #[serde(default)]
+    pub report: Option<fleet::WorkerReport>,
 }
 
 /// Ties together workspace lifecycle (pact-vcs), dependency
@@ -201,6 +207,9 @@ pub struct SpawnOptions<'a> {
     /// (issue #387). `None` keeps each CLI's default. Process lanes only:
     /// an ACP lane with a model is an error until #374.
     pub model: Option<&'a str>,
+    /// Append `fleet::REPORT_CONTRACT` to the prompt and record the
+    /// parsed report in the run metadata (issue #388).
+    pub report_contract: bool,
 }
 
 impl Default for SpawnOptions<'_> {
@@ -215,6 +224,7 @@ impl Default for SpawnOptions<'_> {
             runtime: LaneRuntime::default(),
             prepare: &[],
             model: None,
+            report_contract: false,
         }
     }
 }
@@ -1061,6 +1071,13 @@ impl Orchestrator {
             }
             None => task,
         };
+        let contract_task;
+        let task = if options.report_contract {
+            contract_task = fleet::with_report_contract(task);
+            contract_task.as_str()
+        } else {
+            task
+        };
 
         if let Some(acp) = acp {
             if let Some(model) = options.model {
@@ -1068,7 +1085,16 @@ impl Orchestrator {
                     "model '{model}' was requested for an ACP lane, which cannot set a model yet (issue #374); use --runtime process"
                 );
             }
-            return self.run_lane_acp(acp, agent, workspace, task, coord_name, admission, &mut on_event);
+            return self.run_lane_acp(
+                acp,
+                agent,
+                workspace,
+                task,
+                coord_name,
+                admission,
+                options.report_contract,
+                &mut on_event,
+            );
         }
 
         let coord = match self.coord_config(&workspace, coord_name, options.coord_override) {
@@ -1187,6 +1213,7 @@ impl Orchestrator {
             // "nothing happened" read.
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             log_path: log_path.clone(),
+            report: reported(options.report_contract, &run_result),
         };
         let run_meta_path = self.workspaces.run_report_path(&workspace.id);
         if let Err(err) = write_sidecar(&run_meta_path, &run_metadata) {
@@ -1212,6 +1239,7 @@ impl Orchestrator {
         task: &str,
         coord_name: &str,
         admission: Option<&Admission>,
+        report_contract: bool,
         on_event: &mut impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
         let runtime = acp
@@ -1333,6 +1361,7 @@ impl Orchestrator {
             model: None,
             runtime: LaneRuntime::Acp.as_str().to_string(),
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
+            report: reported(report_contract, &run_result),
             log_path,
         };
         let run_meta_path = self.workspaces.run_report_path(&workspace.id);
@@ -1749,6 +1778,11 @@ impl Orchestrator {
 enum ArbiterOutcome {
     Accepted { resolved_files: Vec<String> },
     Rejected { reason: String, test_passed: Option<bool> },
+}
+
+fn reported(report_contract: bool, run: &Result<RunOutcome>) -> Option<fleet::WorkerReport> {
+    let run = run.as_ref().ok().filter(|_| report_contract)?;
+    fleet::parse_worker_report(&run.summary)
 }
 
 fn agent_kind_name(kind: AgentKind) -> &'static str {
@@ -2789,6 +2823,7 @@ mod tests {
             runtime: String::new(),
             files_touched: true,
             log_path: PathBuf::from("/tmp/state/logs/ws-1.jsonl"),
+            report: None,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -2835,6 +2870,7 @@ mod tests {
             runtime: String::new(),
             files_touched: false,
             log_path: PathBuf::from("/tmp/state/logs/ws-2.jsonl"),
+            report: None,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();

@@ -10,6 +10,7 @@ use pact_core::{
 
 mod config;
 mod demo;
+mod fleet;
 use config::PactConfig;
 
 /// CLI spelling of `pact_vcs::GateMode` for `merge-all --gate` (issue
@@ -784,6 +785,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run independent tasks from a TOML file, each in a workspace and
+    /// branch of its own and each in its own repository if the file says
+    /// so, under one concurrency and memory budget for the whole fleet.
+    /// Nothing is merged: every task is reviewed and landed on its own.
+    /// Each agent must end with a short report (STATUS, CHANGED, VERIFIED,
+    /// NOT VERIFIED, NOTES), and a task counts as done only when it
+    /// reports `STATUS: done`. Exits 1 when any task is not done. Works
+    /// from outside a git repository when every task names its `repo`.
+    Fleet(fleet::FleetArgs),
 }
 
 fn main() -> Result<()> {
@@ -808,6 +818,10 @@ fn main() -> Result<()> {
 
     if let Command::Demo = cli.command {
         return demo::run();
+    }
+
+    if let Command::Fleet(args) = cli.command {
+        return fleet::run(args, cli.repo.as_deref(), verbose);
     }
 
     // Absolutized once, here, before anything derives a path from it
@@ -877,7 +891,6 @@ fn main() -> Result<()> {
             let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent)?;
             let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
-            let adapter = pact_agents::adapter(kind);
             let coord_override = coord_command.map(|command| CoordServerOverride {
                 command,
                 args: coord_args,
@@ -899,18 +912,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            match &safety {
-                Some(s) => eprintln!(
-                    "warning: running '{agent}' with an explicit safety override ({}) -- \
-                     verify this doesn't hang the session on a permission prompt in headless mode.",
-                    describe_resolved_safety(kind, s)
-                ),
-                None => eprintln!(
-                    "warning: running '{agent}' unattended with no human in the loop, using: {}. \
-                     Pass --safety explicitly to use a different setting.",
-                    adapter.default_safety_description()
-                ),
-            }
+            warn_unattended(kind, &agent, safety.as_deref());
 
             let spawn_options = pact_core::SpawnOptions {
                 safety_override: safety.as_deref(),
@@ -922,6 +924,7 @@ fn main() -> Result<()> {
                 runtime,
                 prepare: &prepare,
                 model: model.as_deref(),
+                report_contract: false,
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -1035,19 +1038,7 @@ fn main() -> Result<()> {
                     if !warned_agents.insert(*kind) {
                         continue;
                     }
-                    let adapter = pact_agents::adapter(*kind);
-                    match &safety {
-                        Some(s) => eprintln!(
-                            "warning: running '{agent_name}' with an explicit safety override ({}) -- \
-                             verify this doesn't hang the session on a permission prompt in headless mode.",
-                            describe_resolved_safety(*kind, s)
-                        ),
-                        None => eprintln!(
-                            "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
-                             Pass --safety explicitly to use a different setting.",
-                            adapter.default_safety_description()
-                        ),
-                    }
+                    warn_unattended(*kind, agent_name, safety.as_deref());
                 }
             }
 
@@ -1125,6 +1116,7 @@ fn main() -> Result<()> {
                 runtime,
                 prepare: &prepare,
                 model: None,
+                report_contract: false,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -1249,19 +1241,7 @@ fn main() -> Result<()> {
                 per_lane_reserve_mb,
             };
             if !dry_run {
-                let adapter = pact_agents::adapter(kind);
-                match &safety {
-                    Some(s) => eprintln!(
-                        "warning: running '{agent_name}' with an explicit safety override ({}) -- \
-                         verify this doesn't hang the session on a permission prompt in headless mode.",
-                        describe_resolved_safety(kind, s)
-                    ),
-                    None => eprintln!(
-                        "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
-                         Pass --safety explicitly to use a different setting.",
-                        adapter.default_safety_description()
-                    ),
-                }
+                warn_unattended(kind, &agent_name, safety.as_deref());
             }
             let spawn_options = pact_core::SpawnOptions {
                 safety_override: safety.as_deref(),
@@ -1273,6 +1253,7 @@ fn main() -> Result<()> {
                 runtime,
                 prepare: &prepare,
                 model: model.as_deref(),
+                report_contract: false,
             };
             let run_options = pact_core::run::RunOptions {
                 agent: kind,
@@ -1560,6 +1541,7 @@ fn main() -> Result<()> {
         Command::Doctor { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Init { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Demo => unreachable!("handled above, before the orchestrator opens"),
+        Command::Fleet(_) => unreachable!("handled above, before the orchestrator opens"),
     }
 
     Ok(())
@@ -2414,6 +2396,21 @@ fn describe_resolved_safety(kind: AgentKind, raw: &str) -> String {
         Some(resolved) if resolved != raw => format!("{raw} -> {resolved}"),
         Some(_) => raw.to_string(),
         None => format!("{raw} -> pact's own existing default for this adapter"),
+    }
+}
+
+fn warn_unattended(kind: AgentKind, agent_name: &str, safety: Option<&str>) {
+    match safety {
+        Some(s) => eprintln!(
+            "warning: running '{agent_name}' with an explicit safety override ({}) -- \
+             verify this doesn't hang the session on a permission prompt in headless mode.",
+            describe_resolved_safety(kind, s)
+        ),
+        None => eprintln!(
+            "warning: running '{agent_name}' unattended with no human in the loop, using: {}. \
+             Pass --safety explicitly to use a different setting.",
+            pact_agents::adapter(kind).default_safety_description()
+        ),
     }
 }
 

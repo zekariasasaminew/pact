@@ -147,6 +147,7 @@ When you already know the split, drive the lanes yourself:
 pact spawn --agent claude "Add input validation to the signup form"
 pact spawn-many --task claude:"Add a GET /orders endpoint" --task copilot:"Add a GET /preferences endpoint"
 pact spawn-many --agent copilot --shared-tree --task "Write tests for lib/" --task "Write tests for app/api/"
+pact fleet tasks.toml               # unrelated tasks, any repositories, a branch each (docs/usage.md)
 pact list
 pact diff <id>
 pact coord-status
