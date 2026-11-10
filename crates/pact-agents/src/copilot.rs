@@ -110,6 +110,7 @@ impl AgentAdapter for CopilotAdapter {
     fn build_launch(&self, request: &LaunchRequest<'_>) -> LaunchSpec {
         let (program, mut args) =
             self.build_command(request.task, request.safety_override, request.coord, request.workspace_path);
+        crate::adapter::push_model(&mut args, request.model);
         if !request.lean {
             return LaunchSpec { program, args, env: Vec::new() };
         }
@@ -317,6 +318,7 @@ mod tests {
             agent_home,
             session_id: "11111111-2222-3333-4444-555555555555",
             lean,
+            model: None,
         }
     }
 

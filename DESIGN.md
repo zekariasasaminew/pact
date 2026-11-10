@@ -3088,6 +3088,33 @@ rejected: `-p` skips the trust dialog anyway, and that file is already
 known to corrupt under concurrent instances (anthropics/claude-code#28847),
 so pact must not add another writer.
 
+### Model selection and tiers (issue #387)
+
+Every lane used to run on the CLI's default model, which for most users
+is the top-priced one. The audit in #386 measured that the cheapest lever
+for running many agents is the model mix, so model choice is a launch
+parameter, not an adapter feature: `LaunchRequest::model`, appended as
+`--model <id>` by `push_model` inside every `build_launch` (the default
+and both overrides), because all five CLIs spell the flag the same way.
+A per-adapter hook was not added; one CLI that diverges can override
+`build_launch` the way Claude and Copilot already do.
+
+Tiers live in `pact.toml` rather than in pact, because model availability
+is plan-specific (#385: a ChatGPT-backed Codex login rejects some
+models, Copilot rejects others), and a tier maps per agent so one
+`--tier chore` works for a mixed batch. Resolution is `--model`, then
+`--tier`, then `defaults.model`, then the CLI default. A tier that is
+unknown or lacks the task's agent fails the command: falling back to the
+CLI default would silently run at the price the user was trying to avoid.
+
+ACP lanes share one agent process per agent kind, so a model is a
+per-session setting there (`session/set_config_option`, #374), not a
+launch flag. Until that lands, a requested model turns `--runtime auto`
+into `process` (more memory per lane, but the model the user asked for)
+and refuses an explicit `--runtime acp`; `spawn_with_supervisor` also
+refuses an ACP lane with a model, so a library caller cannot get the
+silent default either.
+
 ## pact-coord — MCP coordination server
 
 Advisory, glob-based, TTL-expiring file leases plus a threaded message log

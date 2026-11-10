@@ -666,7 +666,7 @@ impl Orchestrator {
             let path = briefs_dir.join(format!("{}.md", unit.name));
             std::fs::write(&path, &brief).with_context(|| format!("writing {}", path.display()))?;
             brief_paths.push(path);
-            tasks.push(SpawnManyTask { agent: options.agent, task: brief, name: Some(unit.name.clone()) });
+            tasks.push(SpawnManyTask { agent: options.agent, task: brief, name: Some(unit.name.clone()), model: None });
         }
 
         if options.dry_run {
@@ -731,6 +731,7 @@ impl Orchestrator {
                     agent: options.agent,
                     task: render_repair_brief(attempt, options.repair_attempts, &verify, &touched_files),
                     name: Some(repair_lane_name(attempt, &plan)),
+                    model: None,
                 };
                 let repair_index = plan.units.len() + attempt - 1;
                 let mut repair_outcomes = self.spawn_many_in(vec![task], spawn_options, Some(batch.clone()), |_, agent, event| {
@@ -918,6 +919,7 @@ impl Orchestrator {
                     agent_home: &agent_home,
                     session_id: &session_id,
                     lean: spawn.lean,
+                    model: spawn.model,
                 });
                 let supervisor = Supervisor::new();
                 let run = pact_agents::run_and_stream(

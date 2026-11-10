@@ -44,6 +44,9 @@ pub struct LaunchRequest<'a> {
     /// CLI on the same trivial prompt. `false` reproduces the pre-#284
     /// launch exactly.
     pub lean: bool,
+    /// The model id to pass as `--model` (issue #387), or `None` for the
+    /// CLI's own default. All five CLIs take the same flag.
+    pub model: Option<&'a str>,
 }
 
 /// One concrete headless launch: what to run, with which arguments, and
@@ -96,8 +99,9 @@ pub trait AgentAdapter {
     /// does (Copilot CLI's relocated `COPILOT_HOME`) overrides this and
     /// leaves `build_command` as its non-lean path.
     fn build_launch(&self, request: &LaunchRequest<'_>) -> LaunchSpec {
-        let (program, args) =
+        let (program, mut args) =
             self.build_command(request.task, request.safety_override, request.coord, request.workspace_path);
+        push_model(&mut args, request.model);
         LaunchSpec { program, args, env: Vec::new() }
     }
 
@@ -279,6 +283,15 @@ fn raw_safety_value_warning(agent: AgentKind, name: &str) -> Option<String> {
          and ignores it entirely -- if this was meant to be one of pact's own portable profile \
          names (strict/workspace-write/unrestricted), it may be a typo"
     ))
+}
+
+/// Appends `--model <id>` when a model was requested. Every `build_launch`
+/// calls this, so an override cannot forget it.
+pub(crate) fn push_model(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
 }
 
 /// Writes `{"mcpServers": {<name>: {"command": ..., "args": [...]}}}` to
