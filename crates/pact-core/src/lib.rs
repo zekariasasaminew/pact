@@ -74,6 +74,10 @@ pub struct RunMetadata {
     /// further coordination tool call for the rest of the run). See
     /// DESIGN.md ("pact-core > Structured run metadata", issue #201).
     pub coord_status: Option<String>,
+    /// The model pact asked the CLI for (issue #387), `None` for the CLI's
+    /// own default and for records written before the field existed.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Which lane runtime ran this: `process` (its own agent CLI process)
     /// or `acp` (a session inside a shared agent process, issue #331).
     /// Empty for records written before the field existed.
@@ -113,6 +117,8 @@ pub struct SpawnManyTask {
     /// random suffix, so `--dry-run`'s preview id and the real run's id
     /// actually agree.
     pub name: Option<String>,
+    /// This lane's model (issue #387); `None` uses `SpawnOptions::model`.
+    pub model: Option<String>,
 }
 
 /// What `spawn`/`spawn-many` would do for one task, without doing any of
@@ -191,6 +197,10 @@ pub struct SpawnOptions<'a> {
     /// clients, codegen) are not working projects until they run.
     /// Failures warn, like dependency prep.
     pub prepare: &'a [String],
+    /// The model every lane launches with unless its task names its own
+    /// (issue #387). `None` keeps each CLI's default. Process lanes only:
+    /// an ACP lane with a model is an error until #374.
+    pub model: Option<&'a str>,
 }
 
 impl Default for SpawnOptions<'_> {
@@ -204,6 +214,7 @@ impl Default for SpawnOptions<'_> {
             shared_tree: false,
             runtime: LaneRuntime::default(),
             prepare: &[],
+            model: None,
         }
     }
 }
@@ -783,12 +794,13 @@ impl Orchestrator {
                     let shared_batch = shared_batch.as_ref();
                     let acp = acp.as_ref();
                     let handle = scope.spawn(move || {
+                        let lane_options = SpawnOptions { model: spec.model.as_deref().or(options.model), ..*options };
                         self.spawn_with_supervisor(
                             supervisor,
                             spec.agent,
                             &spec.task,
                             spec.name.as_deref(),
-                            options,
+                            &lane_options,
                             Some(admission),
                             shared_batch,
                             acp,
@@ -839,6 +851,7 @@ impl Orchestrator {
     /// anything. See DESIGN.md ("pact-core > --dry-run preview") for why
     /// `build_command`'s MCP-config-file side effect has to be cleaned up
     /// here rather than left as a stray file.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_preview(
         &self,
         agent: AgentKind,
@@ -847,6 +860,7 @@ impl Orchestrator {
         safety_override: Option<&str>,
         coord_override: Option<&CoordServerOverride>,
         lean: bool,
+        model: Option<&str>,
     ) -> Result<SpawnPreview> {
         let (workspace_id, branch, path) = self.workspaces.preview_workspace_location(task, name);
         let package_managers = pact_deps::detect(&self.repo_root);
@@ -884,6 +898,7 @@ impl Orchestrator {
             agent_home: &agent_home,
             session_id: "<session-id assigned at spawn>",
             lean,
+            model,
         });
         if let Some(coord) = &coord {
             let _ = std::fs::remove_file(&coord.config_path);
@@ -1048,6 +1063,11 @@ impl Orchestrator {
         };
 
         if let Some(acp) = acp {
+            if let Some(model) = options.model {
+                anyhow::bail!(
+                    "model '{model}' was requested for an ACP lane, which cannot set a model yet (issue #374); use --runtime process"
+                );
+            }
             return self.run_lane_acp(acp, agent, workspace, task, coord_name, admission, &mut on_event);
         }
 
@@ -1077,6 +1097,7 @@ impl Orchestrator {
             agent_home: &agent_home,
             session_id: &session_id,
             lean: options.lean,
+            model: options.model,
         });
         let log_path = self
             .workspaces
@@ -1158,6 +1179,7 @@ impl Orchestrator {
                 Err(err) => format!("failed to run: {err:#}"),
             },
             coord_status: coord_last_status,
+            model: options.model.map(str::to_string),
             runtime: LaneRuntime::Process.as_str().to_string(),
             // Fails closed (assumes touched) on a `git status` error,
             // matching `validate_arbiter_scope`'s existing "can't verify
@@ -1308,6 +1330,7 @@ impl Orchestrator {
                 Err(err) => format!("failed to run: {err:#}"),
             },
             coord_status,
+            model: None,
             runtime: LaneRuntime::Acp.as_str().to_string(),
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             log_path,
@@ -2175,7 +2198,7 @@ mod tests {
     use super::*;
 
     fn task(agent: AgentKind, text: &str) -> SpawnManyTask {
-        SpawnManyTask { agent, task: text.to_string(), name: None }
+        SpawnManyTask { agent, task: text.to_string(), name: None, model: None }
     }
 
     fn fake_prep_report(manager: &str, success: bool) -> pact_deps::ManagerPrepReport {
@@ -2762,6 +2785,7 @@ mod tests {
             exit_success: true,
             summary: "Created foo.rs".to_string(),
             coord_status: Some("connected".to_string()),
+            model: None,
             runtime: String::new(),
             files_touched: true,
             log_path: PathBuf::from("/tmp/state/logs/ws-1.jsonl"),
@@ -2807,6 +2831,7 @@ mod tests {
             exit_success: false,
             summary: "failed to run: spawn error".to_string(),
             coord_status: None,
+            model: None,
             runtime: String::new(),
             files_touched: false,
             log_path: PathBuf::from("/tmp/state/logs/ws-2.jsonl"),

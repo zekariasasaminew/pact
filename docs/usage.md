@@ -237,6 +237,35 @@ pact spawn-many --agent copilot --runtime acp --shared-tree \
   --task-file briefs/api-tests.md --task-file briefs/ui-tests.md --task-file briefs/lib-tests.md
 ```
 
+**Choosing the model.** By default each agent CLI runs on its own default
+model, which is usually the most expensive one configured. `--model <id>`
+on `spawn`, `spawn-many` and `run` passes `--model <id>` to the CLI (all
+five take that flag). For a mixed batch, name tiers in `pact.toml` and
+pick one with `--tier`; each task resolves the tier for its own agent:
+
+```toml
+[defaults]
+model = "sonnet"          # used when neither --model nor --tier is given
+
+[tiers.chore]
+claude = "haiku"
+codex = "gpt-5-mini"
+
+[tiers.plan]
+claude = "opus"
+```
+
+```sh
+pact spawn-many --tier chore --task "claude:rename the helper" --task "codex:fix the typo in README"
+```
+
+`--model` wins over `--tier`, which wins over `defaults.model`. An unknown
+tier, or a tier with no model for a task's agent, is an error rather than
+a silent fallback to the default model. ACP lanes cannot set a model yet
+(#374), so a model makes `--runtime auto` pick `process`, and `--runtime
+acp` with a model is refused. `--dry-run` shows the `--model` argument
+each lane would get, and `meta/runs/<id>.json` records it as `model`.
+
 **Neither `spawn` nor `spawn-many` commits anything.** An agent's changes
 land in its workspace's working tree; `pact list` shows it as `[dirty]`
 once the agent is done, which is expected, not a sign anything needs your

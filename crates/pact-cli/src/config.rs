@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 /// Repo-local defaults for `--agent`/`--safety`, read from `pact.toml` at
@@ -11,6 +13,9 @@ use serde::Deserialize;
 pub struct PactConfig {
     #[serde(default)]
     defaults: Defaults,
+    /// `[tiers.<name>]`: agent name to model id (issue #387).
+    #[serde(default)]
+    tiers: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -23,6 +28,7 @@ struct Defaults {
     stagger_ms: Option<u64>,
     per_lane_reserve_mb: Option<u64>,
     runtime: Option<String>,
+    model: Option<String>,
     #[serde(default)]
     prepare: Vec<String>,
 }
@@ -93,6 +99,31 @@ impl PactConfig {
     pub fn default_prepare(&self) -> &[String] {
         &self.defaults.prepare
     }
+
+    /// The model for one lane of `agent` (issue #387): `--model`, then
+    /// `--tier` looked up in `[tiers]`, then `defaults.model`, then `None`
+    /// for the CLI's own default. A tier that is unknown or has no entry
+    /// for `agent` is an error, so a typo never falls back to the CLI's
+    /// default and its price.
+    pub fn resolve_model(&self, model: Option<&str>, tier: Option<&str>, agent: &str) -> Result<Option<String>> {
+        if let Some(model) = model {
+            return Ok(Some(model.to_string()));
+        }
+        if let Some(tier) = tier {
+            let Some(models) = self.tiers.get(tier) else {
+                let known: Vec<&str> = self.tiers.keys().map(String::as_str).collect();
+                bail!(
+                    "--tier '{tier}' is not defined in pact.toml (defined: {})",
+                    if known.is_empty() { "none; add a [tiers.<name>] table".to_string() } else { known.join(", ") }
+                );
+            };
+            return match models.get(agent) {
+                Some(model) => Ok(Some(model.clone())),
+                None => bail!("tier '{tier}' in pact.toml has no model for agent '{agent}'; add `{agent} = \"<model>\"` under [tiers.{tier}]"),
+            };
+        }
+        Ok(self.defaults.model.clone())
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +162,25 @@ mod tests {
         assert_eq!(config.default_stagger_ms(), Some(500));
         assert_eq!(config.default_per_lane_reserve_mb(), Some(900));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_model_prefers_flag_then_tier_then_default() {
+        let config: PactConfig = toml::from_str(
+            "[defaults]
+model = \"sonnet\"
+[tiers.chore]
+claude = \"haiku\"
+codex = \"gpt-5-mini\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.resolve_model(Some("opus"), Some("chore"), "claude").unwrap().as_deref(), Some("opus"));
+        assert_eq!(config.resolve_model(None, Some("chore"), "codex").unwrap().as_deref(), Some("gpt-5-mini"));
+        assert_eq!(config.resolve_model(None, None, "claude").unwrap().as_deref(), Some("sonnet"));
+        assert!(config.resolve_model(None, Some("chore"), "copilot").is_err());
+        assert!(config.resolve_model(None, Some("plan"), "claude").is_err());
+        assert_eq!(PactConfig::default().resolve_model(None, None, "claude").unwrap(), None);
     }
 
     #[test]

@@ -83,6 +83,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn build_launch(&self, request: &LaunchRequest<'_>) -> LaunchSpec {
         let (program, mut args) =
             self.build_command(request.task, request.safety_override, request.coord, request.workspace_path);
+        crate::adapter::push_model(&mut args, request.model);
         if !request.lean {
             return LaunchSpec { program, args, env: Vec::new() };
         }
@@ -251,6 +252,7 @@ mod tests {
             agent_home,
             session_id: "11111111-2222-3333-4444-555555555555",
             lean,
+            model: None,
         }
     }
 
@@ -292,6 +294,17 @@ mod tests {
         assert_eq!(std::path::Path::new(&launch.args[mcp + 1]), home.join("empty-mcp.json"));
         assert!(home.join("empty-mcp.json").exists());
         assert!(launch.env.is_empty(), "the Claude profile relocates nothing");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_requested_model_is_passed_in_both_profiles() {
+        let home = scratch("model");
+        for lean in [false, true] {
+            let launch = ClaudeCodeAdapter.build_launch(&LaunchRequest { model: Some("haiku"), ..request(&home, None, lean) });
+            let at = launch.args.iter().position(|a| a == "--model").expect("--model");
+            assert_eq!(launch.args[at + 1], "haiku");
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 

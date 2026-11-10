@@ -199,6 +199,18 @@ enum Command {
         /// prefix. Must contain at least one ASCII alphanumeric character.
         #[arg(long)]
         name: Option<String>,
+
+        /// Model id passed to the agent CLI as `--model` (issue #387), e.g.
+        /// `haiku` for Claude Code. Falls back to --tier, then `pact.toml`'s
+        /// `defaults.model`, then the CLI's own default. Process lanes only:
+        /// with a model, `--runtime auto` picks `process`.
+        #[arg(long, conflicts_with = "tier")]
+        model: Option<String>,
+
+        /// Named model tier from `pact.toml`'s `[tiers.<name>]` table, which
+        /// maps each agent to a model, e.g. `[tiers.chore] claude = "haiku"`.
+        #[arg(long)]
+        tier: Option<String>,
     },
     /// Create N isolated agent workspaces and run N agent CLIs in them
     /// concurrently, streaming their combined output live with each line
@@ -378,6 +390,18 @@ enum Command {
         /// than guessing which task each name belongs to.
         #[arg(long = "name")]
         names: Vec<String>,
+
+        /// Model id passed to the agent CLI as `--model` (issue #387), applied to every
+        /// task; a tier resolves per task's agent. Falls back to --tier, then `pact.toml`'s
+        /// `defaults.model`, then the CLI's own default. Process lanes only:
+        /// with a model, `--runtime auto` picks `process`.
+        #[arg(long, conflicts_with = "tier")]
+        model: Option<String>,
+
+        /// Named model tier from `pact.toml`'s `[tiers.<name>]` table, which
+        /// maps each agent to a model, e.g. `[tiers.chore] claude = "haiku"`.
+        #[arg(long)]
+        tier: Option<String>,
     },
     /// Run one big task end to end (issue #305): a planner session splits
     /// it into file-disjoint units, pact validates the plan, writes one
@@ -463,6 +487,18 @@ enum Command {
         /// verification baseline and the lanes (issue #301).
         #[arg(long = "prepare")]
         prepare: Vec<String>,
+
+        /// Model id passed to the agent CLI as `--model` (issue #387), for the
+        /// planner, every lane and the repair lane. Falls back to --tier, then `pact.toml`'s
+        /// `defaults.model`, then the CLI's own default. Process lanes only:
+        /// with a model, `--runtime auto` picks `process`.
+        #[arg(long, conflicts_with = "tier")]
+        model: Option<String>,
+
+        /// Named model tier from `pact.toml`'s `[tiers.<name>]` table, which
+        /// maps each agent to a model, e.g. `[tiers.chore] claude = "haiku"`.
+        #[arg(long)]
+        tier: Option<String>,
     },
     /// List active agent workspaces
     List,
@@ -821,6 +857,8 @@ fn main() -> Result<()> {
             runtime,
             prepare,
             name,
+            model,
+            tier,
         } => {
             if let Some(n) = &name {
                 validate_workspace_name(n)?;
@@ -836,6 +874,8 @@ fn main() -> Result<()> {
                      try: pact doctor"
                 )
             })?;
+            let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent)?;
+            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let adapter = pact_agents::adapter(kind);
             let coord_override = coord_command.map(|command| CoordServerOverride {
@@ -851,6 +891,7 @@ fn main() -> Result<()> {
                     safety.as_deref(),
                     coord_override.as_ref(),
                     !no_lean,
+                    model.as_deref(),
                 )?;
                 print_spawn_preview(&preview, deps);
                 print_prepare_preview(&prepare);
@@ -880,6 +921,7 @@ fn main() -> Result<()> {
                 shared_tree: false,
                 runtime,
                 prepare: &prepare,
+                model: model.as_deref(),
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -914,6 +956,8 @@ fn main() -> Result<()> {
             runtime,
             prepare,
             names,
+            model,
+            tier,
         } => {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;
@@ -957,13 +1001,15 @@ fn main() -> Result<()> {
             let mut batch_agents: Vec<(AgentKind, String)> = Vec::with_capacity(batch.capacity());
             for (index, raw) in tasks.iter().enumerate() {
                 let (agent, task, agent_name) = parse_task_spec(raw, default_agent)?;
+                let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent_name)?;
                 batch_agents.push((agent, agent_name));
-                batch.push(SpawnManyTask { agent, task, name: names.get(index).cloned() });
+                batch.push(SpawnManyTask { agent, task, name: names.get(index).cloned(), model });
             }
             for raw in &task_files {
                 let (agent, task, agent_name, name) = parse_task_file_spec(raw, default_agent)?;
+                let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent_name)?;
                 batch_agents.push((agent, agent_name));
-                batch.push(SpawnManyTask { agent, task, name: Some(name) });
+                batch.push(SpawnManyTask { agent, task, name: Some(name), model });
             }
             if let Some(dup) = first_duplicate(&batch.iter().filter_map(|t| t.name.clone()).collect::<Vec<_>>()) {
                 bail!(
@@ -972,6 +1018,7 @@ fn main() -> Result<()> {
                 );
             }
             let agents: Vec<AgentKind> = batch.iter().map(|t| t.agent).collect();
+            let requested_runtime = runtime_for_model(requested_runtime, batch.iter().any(|t| t.model.is_some()))?;
             let runtime = pact_core::effective_runtime(requested_runtime, &agents);
             let admission = pact_core::AdmissionPolicy {
                 max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
@@ -1054,6 +1101,7 @@ fn main() -> Result<()> {
                         safety.as_deref(),
                         coord_override.as_ref(),
                         !no_lean,
+                        task.model.as_deref(),
                     )?;
                     println!("task #{index} ({}):", agent_label(task.agent));
                     print_spawn_preview(&preview, deps);
@@ -1076,6 +1124,7 @@ fn main() -> Result<()> {
                 shared_tree,
                 runtime,
                 prepare: &prepare,
+                model: None,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -1145,6 +1194,8 @@ fn main() -> Result<()> {
             per_lane_reserve_mb,
             runtime,
             prepare,
+            model,
+            tier,
         } => {
             if max_units == Some(0) {
                 bail!("--max-units must be at least 1");
@@ -1168,6 +1219,8 @@ fn main() -> Result<()> {
             let kind = AgentKind::parse(&agent_name).ok_or_else(|| {
                 anyhow::anyhow!("unknown --agent '{agent_name}' (expected claude, copilot, codex, gemini, or agy) -- try: pact doctor")
             })?;
+            let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent_name)?;
+            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let min_free_mem_mb = min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500);
@@ -1219,6 +1272,7 @@ fn main() -> Result<()> {
                 shared_tree: true,
                 runtime,
                 prepare: &prepare,
+                model: model.as_deref(),
             };
             let run_options = pact_core::run::RunOptions {
                 agent: kind,
@@ -2422,7 +2476,12 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n\
          # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; default 1200 (process) or 400 (acp); 0 disables\n\
          # runtime = \"auto\"  # auto (acp when every agent in the batch supports it, else process), process, or acp\n\
-         # prepare = [\"npx next typegen\"]  # shell commands run in every new workspace after dependency prep, for generated gitignored files\n"
+         # prepare = [\"npx next typegen\"]  # shell commands run in every new workspace after dependency prep, for generated gitignored files\n\
+         # model = \"sonnet\"  # --model for every agent when neither --model nor --tier is given\n\
+         \n\
+         # Named model tiers for --tier: agent name to model id.\n\
+         # [tiers.chore]\n\
+         # claude = \"haiku\"\n"
     );
 
     std::fs::write(&config_path, contents)
@@ -2552,6 +2611,18 @@ fn resolve_runtime(flag: Option<String>, config: &PactConfig) -> Result<pact_cor
         Some(value) => pact_core::LaneRuntime::parse(value)
             .ok_or_else(|| anyhow::anyhow!("--runtime: unknown value '{value}' (expected auto, process or acp)")),
         None => Ok(pact_core::LaneRuntime::Auto),
+    }
+}
+
+/// A requested model rules out the ACP runtime until it can set one (issue
+/// #374): `auto` becomes `process`, an explicit `acp` is refused.
+fn runtime_for_model(requested: pact_core::LaneRuntime, has_model: bool) -> Result<pact_core::LaneRuntime> {
+    match (requested, has_model) {
+        (pact_core::LaneRuntime::Acp, true) => {
+            bail!("--runtime acp cannot set a model yet (issue #374); use --runtime process, or drop --model/--tier and defaults.model")
+        }
+        (pact_core::LaneRuntime::Auto, true) => Ok(pact_core::LaneRuntime::Process),
+        _ => Ok(requested),
     }
 }
 
