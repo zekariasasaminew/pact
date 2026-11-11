@@ -154,3 +154,75 @@ impl WorkspaceManager {
         Ok(())
     }
 }
+
+/// A workspace's whole change as one unified diff, for the GUI's review
+/// pane (issue #390).
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspacePatch {
+    pub patch: String,
+    /// Whether `patch` was cut at the byte cap.
+    pub truncated: bool,
+}
+
+impl WorkspaceManager {
+    /// Everything the workspace holds beyond the commit it forked from,
+    /// committed, uncommitted and untracked alike, as `git diff` text cut
+    /// to `max_bytes`. The worktree's own index is left untouched: the
+    /// files are staged into a throwaway copy of it.
+    pub fn workspace_patch(&self, id: &str, max_bytes: usize) -> Result<WorkspacePatch> {
+        let workspace = self.get_workspace(id)?;
+        let base = git_stdout(&self.repo_root, &["merge-base", "HEAD", &workspace.branch])?;
+        if base.is_empty() {
+            bail!("workspace {id}'s branch shares no history with the checked-out branch, so there is no diff to show");
+        }
+
+        let scratch = self.state_dir().join("tmp");
+        std::fs::create_dir_all(&scratch).with_context(|| format!("creating {}", scratch.display()))?;
+        let index = scratch.join(format!("patch-index-{}-{id}", std::process::id()));
+        let real_index = git_stdout(&workspace.path, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        let _ = std::fs::copy(&real_index, &index);
+
+        let staged = Command::new("git")
+            .args(["add", "-A"])
+            .env("GIT_INDEX_FILE", &index)
+            .current_dir(&workspace.path)
+            .output()
+            .context("failed to spawn `git add`");
+        let diff = staged.and_then(|staged| {
+            if !staged.status.success() {
+                bail!("git add failed in workspace {id}:\n{}", String::from_utf8_lossy(&staged.stderr));
+            }
+            Command::new("git")
+                .args(["diff", "--cached", "--no-color", "--no-ext-diff", &base])
+                .env("GIT_INDEX_FILE", &index)
+                .current_dir(&workspace.path)
+                .output()
+                .context("failed to spawn `git diff`")
+        });
+        let _ = std::fs::remove_file(&index);
+        let diff = diff?;
+        if !diff.status.success() {
+            bail!("git diff failed in workspace {id}:\n{}", String::from_utf8_lossy(&diff.stderr));
+        }
+
+        let mut patch = String::from_utf8_lossy(&diff.stdout).into_owned();
+        let truncated = patch.len() > max_bytes;
+        if truncated {
+            let mut cut = max_bytes;
+            while !patch.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            patch.truncate(patch[..cut].rfind('\n').map_or(cut, |newline| newline + 1));
+        }
+        Ok(WorkspacePatch { patch, truncated })
+    }
+}
+
+fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("failed to spawn `git {}`", args.join(" ")))?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
