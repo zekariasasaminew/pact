@@ -123,6 +123,16 @@ fn make_safe_to_run(mut args: Vec<String>) -> Vec<String> {
         args.push("--plan".to_string());
         args.push("docs-grammar-check-no-such-plan.json".to_string());
     }
+    // `ui` serves until it is stopped; a repository that does not exist
+    // makes it exit 1 after argument parsing, before it serves or opens
+    // a browser.
+    if args.iter().any(|a| a == "ui") {
+        let missing = "docs-grammar-check-no-such-repo".to_string();
+        match args.iter().position(|a| a == "--repo") {
+            Some(flag) if flag + 1 < args.len() => args[flag + 1] = missing,
+            _ => args.splice(0..0, ["--repo".to_string(), missing]).for_each(drop),
+        }
+    }
     args
 }
 
