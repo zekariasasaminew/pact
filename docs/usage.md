@@ -147,6 +147,49 @@ handle each on its own, exiting 1 if any of them failed.
 (commits not yet on your checked-out branch), `agent`, `model`,
 `seconds`, `summary` and the parsed `report`.
 
+### In the browser: `pact ui`
+
+```sh
+pact ui                             # open the page; the current repository is added
+pact ui --no-open --port 0          # print the address only, on any free port
+pact --repo ../api ui --max-concurrent 2 --min-free-mem-mb 2000
+```
+
+`pact ui` (issue #390) serves one page on `http://127.0.0.1:7228/` and
+opens it in your browser. The page does what `pact fleet`, `pact land`
+and `pact discard` do, without a task file:
+
+- **Start.** Pick a repository, describe one change, pick an agent and
+  a model (the repository's default, one of its `[tiers]`, or any model
+  id), and press Start task. Start as many as you like. Add another
+  repository with the Add button; the list is remembered.
+- **Watch.** Each task is a card: setting up, waiting in line, running,
+  then done, blocked, or failed, from the agent's own report. Tasks
+  that need you are listed first. The top bar shows how many agents are
+  running, how much memory is free, and why a task is waiting.
+- **Review.** Click a card to read the task, the agent's report, its
+  live output, and the whole change as a diff, file by file, including
+  new files.
+- **Decide.** Land merges the work into the branch you have checked
+  out. Open PR pushes the branch and opens a pull request with `gh`.
+  Discard stops the agent if it is running and deletes the branch.
+
+At most `--max-concurrent` agents (default 4) run at once across every
+repository, and a new one starts only while `--min-free-mem-mb`
+(default 1500) of memory would stay free; the rest wait in line.
+`--per-lane-reserve-mb`, `--stagger-ms` and `--safety` mean what they
+do for `pact fleet`. Agents run unattended, with each agent's default
+permissions unless `--safety` or the repository's `defaults.safety`
+says otherwise; the page states which.
+
+The page talks only to your own machine. The server listens on
+127.0.0.1, and refuses any request that does not carry the secret
+token built into the page it served, so another website or another
+computer on the network cannot start an agent. Tasks started with
+`pact fleet` or `pact spawn` appear on the page too, and finished tasks
+are still there after a restart. Stopping `pact ui` (Ctrl-C) stops the
+agents it started; their workspaces stay, so nothing written is lost.
+
 ### Running agents in parallel by hand
 
 ```sh
