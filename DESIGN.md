@@ -1654,8 +1654,10 @@ confused.
 **Discarding.** A running task is discarded by `teardown --force`,
 which stops the agent. A task still waiting for admission has a
 workspace but no process; its workspace is removed and it leaves the
-page at once, and when its turn comes the launch fails on the missing
-directory and is dropped (#394 tracks cancelling the wait itself).
+page at once. Its thread is woken and leaves the admission line
+without taking a slot or writing a run record (#394): the waiter's
+cancel check is that its workspace directory is gone, so no flag has
+to be passed from the page down to the launch.
 During the short window before the workspace exists, discard is
 refused with a request to try again.
 

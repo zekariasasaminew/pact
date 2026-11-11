@@ -518,7 +518,9 @@ fn discard(app: &App, task: &TaskRef) -> Result<serde_json::Value> {
     if !has_workspace {
         return Ok(json!({ "id": task.id }));
     }
-    Ok(serde_json::to_value(Orchestrator::open(repo)?.discard(&task.id)?)?)
+    let discarded = Orchestrator::open(repo)?.discard(&task.id)?;
+    app.runner.recheck_waiters();
+    Ok(serde_json::to_value(discarded)?)
 }
 
 #[derive(Deserialize)]

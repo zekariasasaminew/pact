@@ -185,10 +185,20 @@ impl Admission {
     /// Blocks until this caller may launch, then returns a guard whose
     /// drop releases the slot. `on_wait` is told, at most every
     /// `REPORT_INTERVAL`, why the caller is still queued.
-    pub fn acquire(&self, mut on_wait: impl FnMut(&str)) -> AdmissionGuard<'_> {
+    pub fn acquire(&self, on_wait: impl FnMut(&str)) -> AdmissionGuard<'_> {
+        self.acquire_unless(on_wait, || false).expect("a waiter that is never cancelled is admitted")
+    }
+
+    /// `acquire`, except that a caller still waiting when `cancelled`
+    /// turns true leaves the line with `None` and no slot. `cancelled` is
+    /// asked before each decision, so at least every `RECHECK_INTERVAL`.
+    pub fn acquire_unless(&self, mut on_wait: impl FnMut(&str), cancelled: impl Fn() -> bool) -> Option<AdmissionGuard<'_>> {
         let mut last_report: Option<Instant> = None;
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
+            if cancelled() {
+                return None;
+            }
             let available_mb = available_memory_mb();
             match decide(state.running, &self.policy, available_mb) {
                 AdmissionDecision::Admit => {
@@ -200,7 +210,7 @@ impl Admission {
                     if due > now {
                         std::thread::sleep(due - now);
                     }
-                    return AdmissionGuard { admission: self };
+                    return Some(AdmissionGuard { admission: self });
                 }
                 decision => {
                     let message = match decision {
@@ -238,6 +248,12 @@ impl Admission {
                 }
             }
         }
+    }
+
+    /// Wakes every waiter to decide again now, for a caller that has
+    /// just changed what a waiter's `cancelled` check reads.
+    pub fn recheck(&self) {
+        self.changed.notify_all();
     }
 
     fn release(&self) {
@@ -453,5 +469,22 @@ mod tests {
         });
         let reasons = reasons.lock().unwrap();
         assert!(reasons.iter().any(|r| r.contains("1 of 1 agent slots in use")), "got: {reasons:?}");
+    }
+
+    #[test]
+    fn acquire_unless_leaves_the_line_without_a_slot_when_cancelled() {
+        let admission = Admission::new(policy(1, 0));
+        let held = admission.acquire(|_| {});
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| admission.acquire_unless(|_| {}, || cancelled.load(std::sync::atomic::Ordering::SeqCst)).is_none());
+            std::thread::sleep(Duration::from_millis(60));
+            cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+            admission.recheck();
+            assert!(waiter.join().unwrap(), "a cancelled waiter must not be admitted");
+        });
+        assert_eq!(admission.state.lock().unwrap().running, 1, "only the held slot is counted");
+        drop(held);
+        assert!(admission.acquire_unless(|_| {}, || false).is_some());
     }
 }
