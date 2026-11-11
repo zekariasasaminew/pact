@@ -86,6 +86,8 @@ details.more { margin-top: 12px; } details.more summary { cursor: pointer; font-
 #drawer .head .grow { flex: 1; min-width: 0; }
 #drawer .body { padding: 4px 20px 32px; overflow: auto; flex: 1; }
 #drawer .foot { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#drawer .foot .reply { flex: 1 0 100%; display: flex; gap: 8px; align-items: flex-end; }
+#drawer .foot .reply textarea { min-height: 58px; }
 #drawer h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 22px 0 8px; font-weight: 600; }
 .prose { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 .prose.clamp { max-height: 9em; overflow: auto; }
@@ -170,6 +172,7 @@ const GROUPS = [
 const $ = (id) => document.getElementById(id);
 let state = null, open = null, detail = null, detailFor = "", busy = new Set(), timer = 0, formSig = "", lastTasks = "";
 const openFiles = new Map();
+const replyDrafts = new Map();
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -292,6 +295,27 @@ async function act(t, what) {
   } catch (err) { toast(err.message, true); }
   busy.delete(key);
   refresh();
+}
+async function sendReply(t) {
+  const key = keyOf(t), answer = replyDrafts.get(key) || "";
+  if (busy.has(key)) return;
+  busy.add(key); render();
+  try {
+    await api("/api/reply", { repo: t.repo, id: t.id, answer });
+    replyDrafts.delete(key);
+    toast("Sent your reply. " + t.id + " is running again in the same workspace.");
+  } catch (err) { toast(err.message, true); }
+  busy.delete(key);
+  refresh();
+}
+function replyBox(t) {
+  const key = keyOf(t);
+  const box = h("textarea", { "aria-label": "Reply to the agent", disabled: busy.has(key),
+    placeholder: t.status === "blocked" ? "Answer the agent's question. It runs again here with its earlier work kept." : "Tell the agent what to do next. It runs again here with its earlier work kept.",
+    oninput: () => replyDrafts.set(key, box.value),
+    onkeydown: (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendReply(t); } });
+  box.value = replyDrafts.get(key) || "";
+  return h("div", { class: "reply" }, box, h("button", { class: t.status === "blocked" || t.status === "failed" ? "primary" : null, disabled: busy.has(key), title: "Run the same agent again in this workspace with your reply (Ctrl+Enter)", onclick: () => sendReply(t) }, "Reply"));
 }
 function actions(t) {
   const off = busy.has(keyOf(t));
@@ -444,6 +468,7 @@ function renderDrawer() {
   scroller.replaceChildren(...body.flat());
   scroller.scrollTop = at;
   const foot = actions(t);
+  if (landable(t) && t.agent) foot.unshift(replyBox(t));
   if (repo && repo.branch && landable(t)) foot.push(h("span", { class: "meta" }, "Land merges into " + repo.branch + "."));
   $("drawer-foot").replaceChildren(...foot);
 }

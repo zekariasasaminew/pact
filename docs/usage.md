@@ -173,6 +173,10 @@ and `pact discard` do, without a task file:
 - **Decide.** Land merges the work into the branch you have checked
   out. Open PR pushes the branch and opens a pull request with `gh`.
   Discard stops the agent if it is running and deletes the branch.
+- **Reply.** When a task ends blocked on a question, or you want more
+  done, type into the Reply box of its card. The same agent runs again
+  in the same workspace with its earlier work kept, and is given the
+  original task, its last message and your reply.
 
 At most `--max-concurrent` agents (default 4) run at once across every
 repository, and a new one starts only while `--min-free-mem-mb`

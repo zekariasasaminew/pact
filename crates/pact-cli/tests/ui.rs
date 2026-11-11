@@ -53,6 +53,9 @@ fn shim_dir() -> PathBuf {
 /// A running `pact ui`, killed when the test ends however it ends.
 struct Server {
     child: Child,
+    /// Held open so the lines `pact ui` prints after the first do not
+    /// hit a closed pipe.
+    _stdout: BufReader<std::process::ChildStdout>,
     host: String,
     token: String,
 }
@@ -116,8 +119,9 @@ impl Server {
             .spawn()
             .unwrap();
         let mut first = String::new();
-        BufReader::new(child.stdout.take().unwrap()).read_line(&mut first).unwrap();
-        let mut server = Self { child, host: String::new(), token: String::new() };
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        stdout.read_line(&mut first).unwrap();
+        let mut server = Self { child, _stdout: stdout, host: String::new(), token: String::new() };
         server.host = first
             .trim()
             .strip_prefix("pact ui: http://")
@@ -250,6 +254,56 @@ fn ui_refuses_strangers_then_starts_reviews_and_lands_a_task() {
     drop(server);
     let state = pact_vcs::WorkspaceManager::state_dir_for(&repo).unwrap();
     for dir in [&repo, &state, &shim, &outside] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn ui_reply_reruns_the_agent_in_the_same_workspace() {
+    let repo = init_repo("reply-repo");
+    let shim = shim_dir();
+    let outside = scratch_dir("reply-outside");
+    let server = Server::start(&outside, &shim, &outside);
+    let added = server.post("/api/repos", &json!({ "path": repo }));
+    assert_eq!(added.status, 200, "{}", added.body);
+    let repo_key = added.json()["path"].as_str().unwrap().to_string();
+
+    // A prompt that is not a script makes the fake agent end without a report.
+    let started = server.post("/api/tasks", &json!({ "repo": repo_key, "name": "ask", "agent": "claude", "prompt": "Pick a database and wire it in." }));
+    assert_eq!(started.status, 200, "{}", started.body);
+    server.wait_for_status("ask", "finished");
+    let state_dir = pact_vcs::WorkspaceManager::state_dir_for(&repo).unwrap();
+    let workspace = state_dir.join("workspaces").join("ask");
+    std::fs::write(workspace.join("earlier.txt"), "from the first run
+").unwrap();
+
+    let empty = server.post("/api/reply", &json!({ "repo": repo_key, "id": "ask", "answer": "  " }));
+    assert_eq!(empty.status, 400, "{}", empty.body);
+    let missing = server.post("/api/reply", &json!({ "repo": repo_key, "id": "nope", "answer": "x" }));
+    assert_eq!(missing.status, 400, "{}", missing.body);
+
+    let answer = json!({ "writes": { "answer.txt": "sqlite
+" }, "summary": format!("used sqlite{DONE_REPORT}") });
+    let replied = server.post("/api/reply", &json!({ "repo": repo_key, "id": "ask", "answer": answer.to_string() }));
+    assert_eq!(replied.status, 200, "{}", replied.body);
+    let task = server.wait_for_status("ask", "done");
+    assert_eq!(task["branch"], "pact/ask", "{task}");
+    assert_eq!(task["prompt"], "Pick a database and wire it in.", "the task keeps its original text: {task}");
+    assert_eq!(server.tasks().len(), 1);
+    assert!(workspace.join("earlier.txt").exists(), "the first run's work is kept");
+    assert_eq!(std::fs::read_to_string(workspace.join("answer.txt")).unwrap().trim(), "sqlite");
+
+    let record = std::fs::read_to_string(state_dir.join("meta").join("runs").join("ask.json")).unwrap();
+    assert!(record.contains("Pick a database and wire it in."), "the rerun prompt carries the task: {record}");
+    assert!(record.contains("fake-agent: done"), "and the agent's last message: {record}");
+    assert!(record.contains("The user's reply:"), "{record}");
+
+    let landed = server.post("/api/land", &json!({ "repo": repo_key, "id": "ask", "pr": false }));
+    assert_eq!(landed.status, 200, "{}", landed.body);
+    assert!(repo.join("earlier.txt").exists() && repo.join("answer.txt").exists());
+
+    drop(server);
+    for dir in [&repo, &state_dir, &shim, &outside] {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
