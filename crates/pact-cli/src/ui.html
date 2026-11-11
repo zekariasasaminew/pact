@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pact</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%232f5fd0'/%3E%3Cpath d='M4 4h3v8H4zM9 4h3v5H9z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f5f4f0; --surface: #ffffff; --sunken: #efede8; --ink: #1d1c1a; --muted: #6a675f; --line: #e2dfd7;
+  --accent: #2f5fd0; --accent-ink: #ffffff; --accent-soft: #e6ecfb;
+  --green: #1f7a45; --green-soft: #e1f2e7; --amber: #92600a; --amber-soft: #f8ecd2;
+  --red: #b3261e; --red-soft: #fbe5e3; --gray-soft: #eceae4;
+  --add: #e3f4e8; --del: #fbe6e4; --shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.06);
+  --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131312; --surface: #1c1c1a; --sunken: #171716; --ink: #eceae4; --muted: #9b988f; --line: #2e2d2a;
+    --accent: #86a6ff; --accent-ink: #0d1530; --accent-soft: #1d2740;
+    --green: #6fcf97; --green-soft: #17301f; --amber: #e5b455; --amber-soft: #33290f;
+    --red: #ff8a80; --red-soft: #3a1a17; --gray-soft: #262523;
+    --add: #15301d; --del: #3a1b18; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.4);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 18px; margin: 0; letter-spacing: -.01em; }
+header h1 span { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+.machine { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--gray-soft); color: var(--muted); font-size: 13px; white-space: nowrap; }
+.chip b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--green); } .dot.wait { background: var(--amber); }
+main { display: grid; grid-template-columns: minmax(300px, 400px) minmax(0, 1fr); gap: 24px; padding: 24px; max-width: 1400px; margin: 0 auto; align-items: start; }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); padding: 16px; } .compose, header { position: static !important; } }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.compose { padding: 18px; position: sticky; top: 76px; }
+.compose h2, .tasks h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+input[type=text], select, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+textarea { min-height: 150px; resize: vertical; line-height: 1.45; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { flex: 1; min-width: 0; } .row > button { flex: none; }
+button { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--accent); }
+button.danger { color: var(--red); }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); }
+.hint { font-size: 13px; color: var(--muted); margin: 6px 0 0; overflow-wrap: anywhere; }
+.start { width: 100%; margin-top: 16px; padding: 10px; }
+details.more { margin-top: 12px; } details.more summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+.tasks section { margin-bottom: 24px; }
+.tasks h2 .count { color: var(--ink); margin-left: 6px; }
+.task { padding: 14px 16px; margin-bottom: 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; cursor: pointer; }
+.task:hover { border-color: var(--muted); }
+.task.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.task .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.task .name { font-weight: 600; overflow-wrap: anywhere; }
+.task .meta { color: var(--muted); font-size: 13px; }
+.task .line { grid-column: 1; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task .line.muted { color: var(--muted); font-size: 13px; }
+.task .actions { grid-column: 2; grid-row: 1 / span 3; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 600px) { .task { grid-template-columns: 1fr; } .task .actions { grid-column: 1; grid-row: auto; justify-content: flex-start; order: 1; } }
+.pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--gray-soft); color: var(--muted); white-space: nowrap; }
+.pill.running, .pill.starting { background: var(--accent-soft); color: var(--accent); }
+.pill.done { background: var(--green-soft); color: var(--green); }
+.pill.blocked, .pill.queued { background: var(--amber-soft); color: var(--amber); }
+.pill.failed, .pill.error { background: var(--red-soft); color: var(--red); }
+.pill.running::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 6px; vertical-align: 1px; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .pill.running::before { animation: none; } #drawer { transition: none !important; } }
+.empty { padding: 40px 24px; text-align: center; color: var(--muted); }
+.empty strong { display: block; color: var(--ink); font-size: 17px; margin-bottom: 6px; }
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(880px, 100vw); background: var(--surface); border-left: 1px solid var(--line); box-shadow: var(--shadow); transform: translateX(100%); transition: transform .18s ease; z-index: 10; display: flex; flex-direction: column; visibility: hidden; }
+#drawer.open { transform: none; visibility: visible; }
+#drawer .head { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: flex-start; }
+#drawer .head h2 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+#drawer .head .grow { flex: 1; min-width: 0; }
+#drawer .body { padding: 4px 20px 32px; overflow: auto; flex: 1; }
+#drawer .foot { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#drawer h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 22px 0 8px; font-weight: 600; }
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.prose.clamp { max-height: 9em; overflow: auto; }
+dl.report { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; }
+dl.report dt { color: var(--muted); } dl.report dd { margin: 0; overflow-wrap: anywhere; }
+pre.log { background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: 12.5px/1.5 var(--mono); max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+details.file { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+details.file summary { padding: 7px 12px; cursor: pointer; font: 13px var(--mono); background: var(--sunken); display: flex; gap: 10px; align-items: center; }
+details.file summary .path { flex: 1; overflow-wrap: anywhere; }
+.plus { color: var(--green); } .minus { color: var(--red); }
+.diff, pre.log { font-variant-ligatures: none; }
+.diff { font: 12.5px/1.45 var(--mono); overflow-x: auto; }
+.diff div { white-space: pre; padding: 0 12px; min-width: max-content; }
+.diff .a { background: var(--add); } .diff .d { background: var(--del); }
+.diff .h { color: var(--accent); background: var(--accent-soft); padding-top: 2px; padding-bottom: 2px; }
+.diff .m { color: var(--muted); }
+.notice { background: var(--amber-soft); color: var(--amber); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin: 8px 0; }
+.notice.bad { background: var(--red-soft); color: var(--red); }
+#toasts { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 20; display: flex; flex-direction: column; gap: 8px; width: min(640px, calc(100vw - 32px)); }
+.toast { background: var(--ink); color: var(--bg); border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start; }
+.toast.bad { background: var(--red); color: #fff; }
+.toast span { flex: 1; overflow-wrap: anywhere; white-space: pre-wrap; }
+.toast a { color: inherit; } .toast button { border: 0; background: none; color: inherit; padding: 0 4px; font-size: 18px; line-height: 1; }
+#offline { display: none; background: var(--red); color: #fff; padding: 8px 24px; text-align: center; }
+#offline.on { display: block; }
+table.history { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.history td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+table.history td:first-child { white-space: nowrap; color: var(--muted); }
+code { font-family: var(--mono); font-size: .92em; background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="offline">pact ui is not answering. Start it again with <b>pact ui</b> in a terminal, then reload this page.</div>
+<header>
+  <h1>pact<span id="version"></span></h1>
+  <div class="machine" id="machine"></div>
+  <button id="activity" title="What pact has done in the selected repository">Activity</button>
+</header>
+<main>
+  <form class="compose card" id="compose" autocomplete="off">
+    <h2>New task</h2>
+    <label for="repo">Repository</label>
+    <div class="row"><select id="repo"></select><button type="button" id="repo-toggle" title="Add another repository">Add</button></div>
+    <div id="repo-add" hidden>
+      <label for="repo-path">Folder of a git repository on this computer</label>
+      <div class="row"><input type="text" id="repo-path" placeholder="C:\code\my-project or /home/me/my-project" spellcheck="false"><button type="button" id="repo-add-go">Add</button></div>
+    </div>
+    <p class="hint" id="repo-hint"></p>
+    <label for="prompt">What should the agent do?</label>
+    <textarea id="prompt" placeholder="Describe one self-contained change. The agent works in its own copy of the repository on its own branch, so several tasks can run at once without touching each other or your files."></textarea>
+    <div class="row">
+      <div><label for="agent">Agent</label><select id="agent"></select></div>
+      <div><label for="model">Model</label><select id="model"></select></div>
+    </div>
+    <div id="model-other-wrap" hidden><label for="model-other">Model id, as that agent's CLI names it</label><input type="text" id="model-other" spellcheck="false"></div>
+    <details class="more"><summary>More options</summary>
+      <label for="name">Task name (optional; becomes the branch <code>pact/&lt;name&gt;</code>)</label>
+      <input type="text" id="name" placeholder="picked from the first words if left empty" spellcheck="false">
+    </details>
+    <button class="primary start" id="start" type="submit">Start task</button>
+    <p class="hint" id="unattended"></p>
+  </form>
+  <div class="tasks" id="tasks"></div>
+</main>
+<aside id="drawer" aria-hidden="true">
+  <div class="head"><div class="grow" id="drawer-head"></div><button id="drawer-close" title="Close (Esc)">Close</button></div>
+  <div class="body" id="drawer-body"></div>
+  <div class="foot" id="drawer-foot"></div>
+</aside>
+<div id="toasts"></div>
+<script nonce="__PACT_NONCE__">
+"use strict";
+const TOKEN = "__PACT_TOKEN__";
+const LIVE = ["starting", "queued", "running"];
+const LABEL = { starting: "setting up", queued: "waiting in line", running: "running", done: "done", blocked: "blocked", failed: "failed", finished: "finished, no report", idle: "not run", error: "could not start" };
+const GROUPS = [
+  ["Needs you", ["error", "blocked", "failed"]],
+  ["Working", ["running", "starting", "queued"]],
+  ["Ready to review", ["done", "finished"]],
+  ["Not run", ["idle"]],
+];
+const $ = (id) => document.getElementById(id);
+let state = null, open = null, detail = null, detailFor = "", busy = new Set(), timer = 0, formSig = "", lastTasks = "";
+const openFiles = new Map();
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+const store = {
+  get(k) { try { return localStorage.getItem("pact." + k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("pact." + k, v); } catch {} },
+};
+const keyOf = (t) => t.repo + "\n" + t.id;
+const firstLine = (s) => (s || "").split("\n").map((l) => l.trim()).find(Boolean) || "";
+function elapsed(s) {
+  if (s == null) return "";
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+function gb(mb) { return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB"; }
+
+function toast(message, bad, url) {
+  const el = h("div", { class: "toast" + (bad ? " bad" : "") }, h("span", null, message, url ? [" ", h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, url)] : null),
+    h("button", { title: "Dismiss", onclick: () => el.remove() }, "\u00d7"));
+  $("toasts").append(el);
+  if (!bad && !url) setTimeout(() => el.remove(), 6000);
+}
+
+async function api(path, body) {
+  const opts = { headers: { "X-Pact-Token": TOKEN } };
+  if (body !== undefined) { opts.method = "POST"; opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  let res;
+  try { res = await fetch(path, opts); } catch { $("offline").classList.add("on"); throw new Error("pact ui is not answering"); }
+  $("offline").classList.remove("on");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "request failed (" + res.status + ")");
+  return data;
+}
+
+function renderMachine() {
+  const m = state.memory;
+  const text = { admit: "Room to start another agent", slot: "All agent slots busy; new tasks wait in line", memory: "Memory is low; new tasks wait in line" }[state.admission];
+  const why = "Up to " + state.max_concurrent + " agents run at once. A new one starts only while at least " + gb(m.min_free_mem_mb) +
+    " of memory would stay free after setting aside " + gb(m.per_lane_reserve_mb) + " for each agent already running. Change with pact ui --max-concurrent, --min-free-mem-mb, --per-lane-reserve-mb.";
+  $("machine").replaceChildren(
+    h("span", { class: "chip", title: why }, h("span", { class: "dot " + (state.admission === "admit" ? "ok" : "wait") }), text),
+    h("span", { class: "chip", title: why }, h("b", null, state.running + " of " + state.max_concurrent), "running"),
+    h("span", { class: "chip", title: why }, h("b", null, gb(m.available_mb)), "memory free"));
+  $("version").textContent = "v" + state.version;
+}
+
+function fillSelect(select, options, wanted) {
+  select.replaceChildren(...options.map((o) => h("option", { value: o.value, disabled: o.disabled }, o.label)));
+  const usable = options.filter((o) => !o.disabled);
+  const pick = usable.find((o) => o.value === wanted) || usable[0];
+  if (pick) select.value = pick.value;
+}
+function currentRepo() { return state.repos.find((r) => r.path === $("repo").value); }
+
+function renderModels() {
+  const repo = currentRepo(), agent = $("agent").value;
+  const options = [{ value: "", label: repo && repo.default_model ? "Repository default (" + repo.default_model + ")" : "Agent's own default" }];
+  for (const [tier, models] of Object.entries((repo && repo.tiers) || {})) {
+    if (models[agent]) options.push({ value: "tier:" + tier, label: tier + " tier (" + models[agent] + ")" });
+  }
+  options.push({ value: "other", label: "Another model..." });
+  fillSelect($("model"), options, $("model").value || store.get("model"));
+  $("model-other-wrap").hidden = $("model").value !== "other";
+}
+function renderUnattended() {
+  const agent = state.agents.find((a) => a.name === $("agent").value);
+  const how = state.safety ? "the --safety setting \"" + state.safety + "\"" : agent && agent.unattended;
+  $("unattended").textContent = how ? "The agent runs without asking for permission, using: " + how + "." : "";
+  const repo = currentRepo();
+  $("repo-hint").textContent = repo ? (repo.error ? repo.error : "Finished work lands onto " + (repo.branch ? "branch " + repo.branch : "the checked-out branch") + " of " + repo.path) : "";
+}
+function renderForm() {
+  const sig = JSON.stringify([state.repos, state.agents, state.safety]);
+  if (sig === formSig) return;
+  formSig = sig;
+  const none = state.repos.length === 0;
+  fillSelect($("repo"), none ? [{ value: "", label: "No repository yet", disabled: true }] : state.repos.map((r) => ({ value: r.path, label: r.name })), $("repo").value || store.get("repo"));
+  if (none) $("repo-add").hidden = false;
+  const repo = currentRepo();
+  const known = state.agents.some((a) => a.installed != null);
+  fillSelect($("agent"), state.agents.map((a) => ({ value: a.name, label: a.name + (a.installed === false ? " (not installed)" : ""), disabled: a.installed === false })),
+    $("agent").value && known ? $("agent").value : store.get("agent") || (repo && repo.default_agent));
+  renderModels();
+  renderUnattended();
+  $("start").disabled = none;
+}
+
+function landable(t) { return t.has_workspace && !t.shared_tree && !LIVE.includes(t.status); }
+async function act(t, what) {
+  const key = keyOf(t);
+  if (busy.has(key)) return;
+  if (what === "discard" && t.has_workspace) {
+    const losing = LIVE.includes(t.status) ? "This stops the agent and deletes" : "This deletes";
+    if (!confirm(losing + " the branch " + (t.branch || "pact/" + t.id) + " and everything the agent wrote for \"" + t.id + "\". It cannot be undone.")) return;
+  }
+  busy.add(key); render();
+  try {
+    if (what === "discard") {
+      await api("/api/discard", { repo: t.repo, id: t.id });
+      toast(t.has_workspace ? "Discarded " + t.id + "." : "Dismissed " + t.id + ".");
+    } else {
+      const out = await api("/api/land", { repo: t.repo, id: t.id, pr: what === "pr" });
+      const commits = out.commits + " commit" + (out.commits === 1 ? "" : "s");
+      if (out.kind === "pull_request") toast("Opened a pull request for " + t.id + " (" + commits + ") into " + out.target_branch + ":", false, out.pr_url || undefined);
+      else if (out.kind === "nothing_to_land") toast(t.id + " had no changes, so nothing was landed. Its workspace was removed.");
+      else toast("Landed " + t.id + " onto " + out.target_branch + " (" + commits + ", " + (out.kind === "fast_forward" ? "fast-forward" : "merge commit") + ").");
+    }
+    if (open && open.key === key) closeDrawer();
+  } catch (err) { toast(err.message, true); }
+  busy.delete(key);
+  refresh();
+}
+function actions(t) {
+  const off = busy.has(keyOf(t));
+  const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
+  const out = [];
+  if (landable(t)) {
+    out.push(h("button", { class: t.status === "done" || t.status === "finished" ? "primary" : null, disabled: off, title: "Commit the work and merge it into the checked-out branch", onclick: stop(() => act(t, "land")) }, "Land"));
+    out.push(h("button", { disabled: off, title: "Push the branch and open a pull request with the GitHub CLI", onclick: stop(() => act(t, "pr")) }, "Open PR"));
+  }
+  out.push(h("button", { class: "danger", disabled: off, onclick: stop(() => act(t, "discard")) }, !t.has_workspace ? "Dismiss" : LIVE.includes(t.status) ? "Stop and discard" : "Discard"));
+  return out;
+}
+function headline(t) {
+  if (t.status === "error" || LIVE.includes(t.status)) return t.detail.replace(/^queued: /, "") || (t.status === "running" ? "The agent is working." : "");
+  const r = t.report;
+  if (r && (t.status === "blocked" || t.status === "failed") && r.notes) return r.notes;
+  if (r && r.changed) return "Changed: " + r.changed;
+  return firstLine(t.summary);
+}
+function repoName(path) { const r = state.repos.find((x) => x.path === path); return r ? r.name : path; }
+function taskCard(t) {
+  const who = [repoName(t.repo), t.agent ? t.agent + (t.model ? " / " + t.model : "") : null, elapsed(t.seconds)].filter(Boolean).join(" \u00b7 ");
+  return h("div", { class: "task card" + (open && open.key === keyOf(t) ? " selected" : ""), tabindex: "0", role: "button",
+    onclick: () => openTask(t), onkeydown: (e) => { if (e.key === "Enter" && e.target === e.currentTarget) openTask(t); } },
+    h("div", { class: "top" }, h("span", { class: "pill " + t.status }, LABEL[t.status] || t.status), h("span", { class: "name" }, t.id), h("span", { class: "meta" }, who)),
+    h("div", { class: "actions" }, actions(t)),
+    h("div", { class: "line" }, headline(t)),
+    h("div", { class: "line muted" }, firstLine(t.prompt)));
+}
+function renderTasks() {
+  const sig = JSON.stringify([state.tasks, [...busy], open && open.key, state.repos.length]);
+  if (sig === lastTasks) return;
+  lastTasks = sig;
+  const box = $("tasks");
+  if (state.repos.length === 0) {
+    box.replaceChildren(h("div", { class: "empty card" }, h("strong", null, "Add a repository to begin"),
+      "Paste the folder of a git repository into the form. pact runs each task in its own copy of that repository, on its own branch, so many agents can work at once."));
+    return;
+  }
+  if (state.tasks.length === 0) {
+    box.replaceChildren(h("div", { class: "empty card" }, h("strong", null, "No tasks yet"),
+      "Describe a change in the form and press Start task. Start as many as you like; pact runs as many at once as this computer has room for and lines up the rest."));
+    return;
+  }
+  const sections = [];
+  for (const [title, statuses] of GROUPS) {
+    const rows = state.tasks.filter((t) => statuses.includes(t.status))
+      .sort((a, b) => statuses.indexOf(a.status) - statuses.indexOf(b.status) || (b.created_at || 1e12) - (a.created_at || 1e12));
+    if (rows.length) sections.push(h("section", null, h("h2", null, title, h("span", { class: "count" }, String(rows.length))), rows.map(taskCard)));
+  }
+  box.replaceChildren(...sections);
+}
+
+function parsePatch(patch) {
+  const files = [];
+  let file = null;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      const m = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+      file = { path: m ? m[2] : line.slice(11), note: "", lines: [], add: 0, del: 0, body: false };
+      files.push(file);
+    } else if (!file) {
+      continue;
+    } else if (!file.body && !line.startsWith("@@")) {
+      if (line.startsWith("new file")) file.note = "new file";
+      else if (line.startsWith("deleted file")) file.note = "deleted";
+      else if (line.startsWith("rename from ")) file.note = "renamed from " + line.slice(12);
+      else if (line.startsWith("Binary files")) file.note = "binary file";
+    } else {
+      file.body = true;
+      if (line.startsWith("+")) file.add++; else if (line.startsWith("-")) file.del++;
+      file.lines.push(line);
+    }
+  }
+  return files;
+}
+function fileView(file, autoOpen) {
+  const body = h("div", { class: "diff" });
+  const fill = () => {
+    if (body.childElementCount || !file.lines.length) return;
+    body.append(...file.lines.map((l) => h("div", { class: l.startsWith("@@") ? "h" : l.startsWith("+") ? "a" : l.startsWith("-") ? "d" : l.startsWith("\\") ? "m" : null }, l || " ")));
+  };
+  const wasOpen = openFiles.has(file.path) ? openFiles.get(file.path) : autoOpen;
+  const el = h("details", { class: "file", open: wasOpen },
+    h("summary", null, h("span", { class: "path" }, file.path), file.note ? h("span", { class: "meta" }, file.note) : null,
+      h("span", { class: "plus" }, "+" + file.add), h("span", { class: "minus" }, "\u2212" + file.del)), body);
+  if (wasOpen) fill();
+  el.addEventListener("toggle", () => { openFiles.set(file.path, el.open); if (el.open) fill(); });
+  return el;
+}
+
+function closeDrawer() { open = null; detail = null; detailFor = ""; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); render(); }
+function showDrawer() { $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false"); }
+function openTask(t) { open = { kind: "task", key: keyOf(t) }; detail = null; detailFor = ""; openFiles.clear(); showDrawer(); render(); loadDetail(); }
+async function loadDetail() {
+  if (!open || open.kind !== "task") return;
+  const t = state.tasks.find((x) => keyOf(x) === open.key);
+  if (!t || !t.has_workspace) return;
+  const key = open.key;
+  try {
+    const d = await api("/api/task?repo=" + encodeURIComponent(t.repo) + "&id=" + encodeURIComponent(t.id));
+    if (open && open.key === key) { detail = d; detailFor = key; renderDrawer(); }
+  } catch (err) { if (open && open.key === key) { detail = { log: [], patch: "", patch_error: err.message }; detailFor = key; renderDrawer(); } }
+}
+let drawnSig = "";
+function renderDrawer() {
+  if (!open) return;
+  if (open.kind === "history") return;
+  const t = state.tasks.find((x) => keyOf(x) === open.key);
+  if (!t) { closeDrawer(); return; }
+  const sig = JSON.stringify([t, detailFor === open.key ? detail : null, busy.has(open.key)]);
+  if (sig === drawnSig) return;
+  drawnSig = sig;
+  const repo = state.repos.find((r) => r.path === t.repo);
+  $("drawer-head").replaceChildren(h("h2", null, t.id),
+    h("div", { class: "meta" }, h("span", { class: "pill " + t.status }, LABEL[t.status] || t.status), " ",
+      [repoName(t.repo), t.agent ? t.agent + (t.model ? " / " + t.model : "") : null, elapsed(t.seconds), t.branch ? "branch " + t.branch : null].filter(Boolean).join(" \u00b7 ")));
+  const body = [];
+  if (t.detail && (t.status === "error" || t.status === "queued")) body.push(h("div", { class: "notice" + (t.status === "error" ? " bad" : "") }, t.detail.replace(/^queued: /, "Waiting: ")));
+  if (t.shared_tree) body.push(h("div", { class: "notice" }, "This task shares one working copy with other tasks from a pact run, so it lands with its whole batch (pact merge-all), not on its own."));
+  body.push(h("h3", null, "Task"), h("p", { class: "prose clamp" }, t.prompt));
+  const r = t.report;
+  if (r) {
+    const rows = [["Changed", r.changed], ["Verified", r.verified], ["Not verified", r.not_verified], ["Notes", r.notes]].filter(([, v]) => v);
+    body.push(h("h3", null, "The agent's report"), h("dl", { class: "report" }, rows.map(([k, v]) => [h("dt", null, k), h("dd", null, v)])));
+  }
+  const said = r ? (t.summary || "").split(/^STATUS:/m)[0].trim() : t.summary;
+  if (said && !LIVE.includes(t.status)) body.push(h("h3", null, "The agent's last message"), h("p", { class: "prose clamp" }, said));
+  const d = detailFor === open.key ? detail : null;
+  if (d && d.log.length) {
+    const log = h("pre", { class: "log" }, d.log.join("\n"));
+    body.push(h("h3", null, "Live output"), log);
+    setTimeout(() => { log.scrollTop = log.scrollHeight; });
+  }
+  if (t.has_workspace) {
+    body.push(h("h3", null, LIVE.includes(t.status) ? "Changes so far" : "Changes"));
+    if (!d) body.push(h("p", { class: "meta" }, "Loading..."));
+    else if (d.patch_error) body.push(h("div", { class: "notice bad" }, d.patch_error));
+    else {
+      const files = parsePatch(d.patch);
+      if (!files.length) body.push(h("p", { class: "meta" }, LIVE.includes(t.status) ? "Nothing changed yet." : "The agent changed no files."));
+      const total = files.reduce((n, f) => n + f.lines.length, 0);
+      if (files.length) body.push(h("p", { class: "meta" }, files.length + " file" + (files.length === 1 ? "" : "s") + " changed, ", h("span", { class: "plus" }, "+" + files.reduce((n, f) => n + f.add, 0)), " ",
+        h("span", { class: "minus" }, "\u2212" + files.reduce((n, f) => n + f.del, 0)), ", compared with where the task started."));
+      if (d.truncated) body.push(h("div", { class: "notice" }, "The diff is too large to show in full; the end is cut off. See all of it with: git diff in the task's folder."));
+      body.push(files.map((f) => fileView(f, total <= 1500 && f.lines.length <= 400)));
+    }
+  }
+  const scroller = $("drawer-body"), at = scroller.scrollTop;
+  scroller.replaceChildren(...body.flat());
+  scroller.scrollTop = at;
+  const foot = actions(t);
+  if (repo && repo.branch && landable(t)) foot.push(h("span", { class: "meta" }, "Land merges into " + repo.branch + "."));
+  $("drawer-foot").replaceChildren(...foot);
+}
+async function openHistory() {
+  const repo = currentRepo();
+  if (!repo) return;
+  open = { kind: "history", key: "" };
+  showDrawer(); render();
+  $("drawer-head").replaceChildren(h("h2", null, "Activity in " + repo.name), h("div", { class: "meta" }, "What pact has done in this repository, newest first."));
+  $("drawer-foot").replaceChildren(h("button", { class: "danger", onclick: async () => {
+    if (!confirm("Remove " + repo.name + " from this page? Nothing on disk is touched.")) return;
+    try { await api("/api/repos/remove", { path: repo.path }); closeDrawer(); refresh(); } catch (err) { toast(err.message, true); }
+  } }, "Remove this repository from the page"));
+  $("drawer-body").replaceChildren(h("p", { class: "meta" }, "Loading..."));
+  try {
+    const ops = await api("/api/history?path=" + encodeURIComponent(repo.path));
+    if (!open || open.kind !== "history") return;
+    ops.sort((a, b) => b.id - a.id);
+    $("drawer-body").replaceChildren(ops.length ? h("table", { class: "history" }, ops.map((op) => h("tr", null,
+      h("td", null, new Date(op.created_at * 1000).toLocaleString()), h("td", null, h("b", null, op.op_type), op.workspace_id ? " " + op.workspace_id : ""),
+      h("td", { class: "meta" }, Object.entries(op.detail || {}).filter(([, v]) => v != null && typeof v !== "object").map(([k, v]) => k + ": " + v).join(", ")))))
+      : h("p", { class: "meta" }, "Nothing recorded yet."));
+  } catch (err) { $("drawer-body").replaceChildren(h("div", { class: "notice bad" }, err.message)); }
+}
+
+function render() {
+  if (!state) return;
+  renderMachine(); renderForm(); renderTasks(); renderDrawer();
+}
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    const before = open && state ? state.tasks.find((x) => keyOf(x) === open.key) : null;
+    state = await api("/api/state");
+    render();
+    const now = open ? state.tasks.find((x) => keyOf(x) === open.key) : null;
+    if (now && (LIVE.includes(now.status) || !before || before.status !== now.status || detailFor !== open.key)) loadDetail();
+  } catch {}
+  const live = state && state.tasks.some((t) => LIVE.includes(t.status));
+  if (!document.hidden) timer = setTimeout(refresh, live ? 2000 : 6000);
+}
+
+$("compose").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const choice = $("model").value, body = { repo: $("repo").value, agent: $("agent").value, prompt: $("prompt").value, name: $("name").value };
+  if (choice.startsWith("tier:")) body.tier = choice.slice(5);
+  else if (choice === "other") body.model = $("model-other").value;
+  $("start").disabled = true;
+  try {
+    const made = await api("/api/tasks", body);
+    $("prompt").value = ""; $("name").value = "";
+    store.set("repo", body.repo); store.set("agent", body.agent); store.set("model", choice === "other" ? "" : choice);
+    toast("Started " + made.id + ".");
+  } catch (err) { toast(err.message, true); }
+  $("start").disabled = false;
+  refresh();
+});
+$("prompt").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("compose").requestSubmit(); });
+$("repo").addEventListener("change", () => { renderModels(); renderUnattended(); });
+$("agent").addEventListener("change", () => { renderModels(); renderUnattended(); });
+$("model").addEventListener("change", () => { $("model-other-wrap").hidden = $("model").value !== "other"; });
+$("repo-toggle").addEventListener("click", () => { $("repo-add").hidden = !$("repo-add").hidden; if (!$("repo-add").hidden) $("repo-path").focus(); });
+async function addRepo() {
+  try {
+    const added = await api("/api/repos", { path: $("repo-path").value });
+    $("repo-path").value = ""; $("repo-add").hidden = true;
+    store.set("repo", added.path);
+    await refresh();
+    $("repo").value = added.path; renderModels(); renderUnattended();
+  } catch (err) { toast(err.message, true); }
+}
+$("repo-add-go").addEventListener("click", addRepo);
+$("repo-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addRepo(); } });
+$("drawer-close").addEventListener("click", closeDrawer);
+$("activity").addEventListener("click", openHistory);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && open) closeDrawer(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+refresh();
+</script>
+</body>
+</html>
