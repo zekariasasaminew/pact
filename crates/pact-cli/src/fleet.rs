@@ -301,7 +301,8 @@ fn print_table(outcomes: &[FleetOutcome], rows: &[(PathBuf, String)]) {
     if outcomes.iter().any(|o| o.workspace.is_some()) {
         println!(
             "each task's changes are uncommitted in its own workspace: review with `pact --repo <REPO> diff <TASK>`, \
-             commit with `pact --repo <REPO> commit-all`"
+             land with `pact --repo <REPO> land <TASK>` (add --pr for a pull request), \
+             drop with `pact --repo <REPO> discard <TASK>`"
         );
     }
 }

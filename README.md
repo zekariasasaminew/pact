@@ -148,6 +148,8 @@ pact spawn --agent claude "Add input validation to the signup form"
 pact spawn-many --task claude:"Add a GET /orders endpoint" --task copilot:"Add a GET /preferences endpoint"
 pact spawn-many --agent copilot --shared-tree --task "Write tests for lib/" --task "Write tests for app/api/"
 pact fleet tasks.toml               # unrelated tasks, any repositories, a branch each (docs/usage.md)
+pact land <id>                      # commit one workspace and merge it into your branch (--pr opens a pull request)
+pact discard <id>                   # throw one workspace away
 pact list
 pact diff <id>
 pact coord-status

@@ -5,7 +5,9 @@ use std::process::Command;
 mod acp_runtime;
 mod admission;
 pub mod fleet;
+mod land;
 pub mod run;
+pub use land::{DiscardOutcome, EntryState, WorkspaceEntry};
 pub use acp_runtime::{effective_runtime, LaneRuntime};
 pub use admission::{available_memory_mb, decide, lanes_that_fit, suggested_units, Admission, AdmissionDecision, AdmissionPolicy, MAX_AUTO_UNITS, MIN_AUTO_UNITS};
 
@@ -17,8 +19,8 @@ use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 pub use pact_vcs::{
-    agent_process_alive, ArbiterResolver, ConflictedWorkspace, MergedWorkspace, MergeReport, ResolveOutcome,
-    SkippedWorkspace,
+    agent_process_alive, ArbiterResolver, ConflictedWorkspace, LandKind, LandOutcome, MergedWorkspace, MergeReport,
+    ResolveOutcome, SkippedWorkspace,
 };
 
 /// A `resolve_conflict` attempt's result -- see DESIGN.md ("pact-coord >
