@@ -157,8 +157,7 @@ pub fn run_fleet(
     options: &SpawnOptions<'_>,
     on_event: impl Fn(usize, &AgentEvent) + Sync,
 ) -> Vec<FleetOutcome> {
-    let supervisor = Supervisor::new();
-    let admission = Admission::new(options.admission);
+    let FleetRunner { supervisor, admission } = FleetRunner::new(options.admission);
 
     let mut orchestrators: BTreeMap<PathBuf, Result<Orchestrator, String>> = BTreeMap::new();
     for task in &tasks {
@@ -196,6 +195,38 @@ pub fn run_fleet(
             })
             .collect()
     })
+}
+
+/// The `Supervisor` and `Admission` a fleet shares, for a caller that
+/// starts tasks one at a time over a long life (`pact ui`) instead of
+/// handing `run_fleet` a fixed list. Make one per process: a second
+/// `Supervisor` cannot install a Ctrl-C handler.
+pub struct FleetRunner {
+    supervisor: Supervisor,
+    admission: Admission,
+}
+
+impl FleetRunner {
+    pub fn new(policy: crate::AdmissionPolicy) -> Self {
+        Self { supervisor: Supervisor::new(), admission: Admission::new(policy) }
+    }
+
+    pub fn policy(&self) -> &crate::AdmissionPolicy {
+        self.admission.policy()
+    }
+
+    /// Runs one task to its end on the calling thread, waiting for
+    /// admission first. `options.admission` is ignored in favour of the
+    /// runner's own policy.
+    pub fn run_one(
+        &self,
+        task: &FleetTask,
+        options: &SpawnOptions<'_>,
+        on_event: impl Fn(&AgentEvent) + Sync,
+    ) -> FleetOutcome {
+        let orchestrator = Orchestrator::open(task.repo.clone()).map_err(|err| format!("{err:#}"));
+        run_task(0, task, &orchestrator, options, &self.supervisor, &self.admission, &|_, event| on_event(event))
+    }
 }
 
 fn error_outcome(index: usize, task: &FleetTask, summary: String) -> FleetOutcome {
