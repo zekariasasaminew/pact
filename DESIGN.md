@@ -1661,6 +1661,29 @@ to be passed from the page down to the launch.
 During the short window before the workspace exists, discard is
 refused with a request to try again.
 
+**Replying (#395).** A task that ended blocked has a question in its
+report, and before this the only way to answer was to discard it and
+start again with the answer in the prompt, losing the agent's work.
+The Reply box runs the same agent and model again in the same
+workspace, on the same branch, with a prompt made by
+`fleet::reply_prompt`: the original task, the agent's last message
+(its final 6000 characters, where the report is), and the reply. It is
+a new agent session, not a resumed one: resuming is spelled
+differently by every agent CLI and not offered by all of them, while a
+fresh session that is told what happened works for all five, and the
+files already changed carry most of the context. The cost is that the
+agent rereads what it needs, and that a second reply carries only the
+latest message, not the first reply. The launch half of
+`spawn_with_supervisor` became `run_process_lane` so that
+`rerun_with_supervisor` (through `FleetRunner::rerun_one`) launches in
+an existing workspace by the same code as a new task: same admission
+line, log file, run record and report parsing. Dependency prep and
+prepare commands are not repeated. The run record is replaced by the
+new run's, so the card shows the latest result. Reply is offered on
+any task that has ended, since "now also do this" on a finished task
+is the same operation. It is refused for a shared-tree lane, whose
+tree belongs to its batch.
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched
