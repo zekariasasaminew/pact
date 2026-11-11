@@ -1658,6 +1658,24 @@ page at once. Its thread is woken and leaves the admission line
 without taking a slot or writing a run record (#394): the waiter's
 cancel check is that its workspace directory is gone, so no flag has
 to be passed from the page down to the launch.
+
+**A client that is not the page (#402).** An editor extension (#397)
+starts `pact ui` as a child process and calls the same API. It needs
+the token, which until now existed only inside the served HTML.
+`--json` prints `{"url", "token"}` as the single stdout line. It is a
+flag and not the default because a terminal's scrollback and a CI log
+are places a token should not land unasked; it weakens nothing, since
+any program running as the user could already fetch the page and read
+the token there. `/api/task` also returns `base` and `workspace`: an
+editor's diff view takes two files, not a patch, and with these it
+reads the old side from `git show <base>:<file>` and the new side from
+the worktree. Returning the commit rather than every file's old and new
+contents keeps the reply small and leaves binary and large files to
+git. `base` is the same merge base `workspace_patch` diffs against, so
+the two views cannot disagree. The greeting is written with `writeln!`
+and its error ignored: a client that reads the first line and closes
+the pipe must not take the server down, which `println!` would do by
+panicking.
 During the short window before the workspace exists, discard is
 refused with a request to try again.
 

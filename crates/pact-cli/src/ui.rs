@@ -3,6 +3,7 @@
 //! the command line. See DESIGN.md ("`pact ui`").
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -39,6 +40,12 @@ pub struct UiArgs {
     /// Print the address without opening it in the default browser.
     #[arg(long)]
     no_open: bool,
+
+    /// Print one JSON line holding the address and the API token, for a
+    /// program that drives the API (an editor extension), in place of the
+    /// lines meant for a person.
+    #[arg(long)]
+    json: bool,
 
     /// Same safety/approval override as `spawn --safety`, applied to every
     /// task started from the page. Falls back to each repository's
@@ -548,11 +555,19 @@ fn task_detail(app: &App, task: &TaskRef) -> Result<serde_json::Value> {
         .map(|live| live.log.iter().cloned().collect())
         .unwrap_or_default();
     let orchestrator = Orchestrator::open(repo)?;
-    let (patch, truncated, patch_error) = match orchestrator.patch(&task.id, MAX_PATCH_BYTES) {
-        Ok(patch) => (patch.patch, patch.truncated, None),
-        Err(err) => (String::new(), false, Some(format!("{err:#}"))),
+    let workspace = orchestrator.get_workspace(&task.id).ok().map(|workspace| workspace.path);
+    let (base, patch, truncated, patch_error) = match orchestrator.patch(&task.id, MAX_PATCH_BYTES) {
+        Ok(patch) => (Some(patch.base), patch.patch, patch.truncated, None),
+        Err(err) => (None, String::new(), false, Some(format!("{err:#}"))),
     };
-    Ok(json!({ "log": log, "patch": patch, "truncated": truncated, "patch_error": patch_error }))
+    Ok(json!({
+        "log": log,
+        "workspace": workspace,
+        "base": base,
+        "patch": patch,
+        "truncated": truncated,
+        "patch_error": patch_error,
+    }))
 }
 
 fn land(app: &App, task: &TaskRef) -> Result<serde_json::Value> {
@@ -789,8 +804,16 @@ pub fn run(args: UiArgs, repo_flag: Option<&Path>) -> Result<()> {
         });
 
         let url = format!("http://127.0.0.1:{port}/");
-        println!("pact ui: {url}");
-        println!("Agents started from the page run unattended. Press Ctrl-C to stop pact ui and every agent it started.");
+        let greeting = if args.json {
+            json!({ "url": url, "token": app.token }).to_string()
+        } else {
+            format!(
+                "pact ui: {url}\nAgents started from the page run unattended. Press Ctrl-C to stop pact ui and every agent it started."
+            )
+        };
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{greeting}").and_then(|()| stdout.flush());
+        drop(stdout);
         if !args.no_open {
             open_in_browser(&url);
         }

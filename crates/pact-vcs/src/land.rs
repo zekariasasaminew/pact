@@ -159,6 +159,9 @@ impl WorkspaceManager {
 /// pane (issue #390).
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspacePatch {
+    /// The commit `patch` is against: the merge base of the workspace's
+    /// branch and the checked-out branch.
+    pub base: String,
     pub patch: String,
     /// Whether `patch` was cut at the byte cap.
     pub truncated: bool,
@@ -214,7 +217,7 @@ impl WorkspaceManager {
             }
             patch.truncate(patch[..cut].rfind('\n').map_or(cut, |newline| newline + 1));
         }
-        Ok(WorkspacePatch { patch, truncated })
+        Ok(WorkspacePatch { base, patch, truncated })
     }
 }
 
