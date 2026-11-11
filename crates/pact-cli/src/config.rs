@@ -100,6 +100,15 @@ impl PactConfig {
         &self.defaults.prepare
     }
 
+    /// `[tiers]` as written: tier name, then agent name to model id.
+    pub fn tiers(&self) -> &BTreeMap<String, BTreeMap<String, String>> {
+        &self.tiers
+    }
+
+    pub fn default_model(&self) -> Option<&str> {
+        self.defaults.model.as_deref()
+    }
+
     /// The model for one lane of `agent` (issue #387): `--model`, then
     /// `--tier` looked up in `[tiers]`, then `defaults.model`, then `None`
     /// for the CLI's own default. A tier that is unknown or has no entry

@@ -158,6 +158,12 @@ impl Orchestrator {
         Ok(DiscardOutcome { id: id.to_string(), branch: workspace.branch, uncommitted_files, commits })
     }
 
+    /// The workspace's whole change as one unified diff, cut to
+    /// `max_bytes`.
+    pub fn patch(&self, id: &str, max_bytes: usize) -> Result<pact_vcs::WorkspacePatch> {
+        self.workspaces.workspace_patch(id, max_bytes)
+    }
+
     /// Every active workspace with its run state, for `pact list --json`
     /// and the GUI.
     pub fn entries(&self) -> Result<Vec<WorkspaceEntry>> {

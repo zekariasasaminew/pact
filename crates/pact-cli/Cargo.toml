@@ -22,7 +22,8 @@ pact-coord.workspace = true
 pact-deps.workspace = true
 pact-vcs.workspace = true
 pact-acp.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

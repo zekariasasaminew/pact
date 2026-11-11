@@ -11,6 +11,7 @@ use pact_core::{
 mod config;
 mod demo;
 mod fleet;
+mod ui;
 use config::PactConfig;
 
 /// CLI spelling of `pact_vcs::GateMode` for `merge-all --gate` (issue
@@ -824,6 +825,12 @@ enum Command {
     /// reports `STATUS: done`. Exits 1 when any task is not done. Works
     /// from outside a git repository when every task names its `repo`.
     Fleet(fleet::FleetArgs),
+    /// Serve a local web page for starting tasks in any repository,
+    /// watching them run, reading each one's diff and report, and landing
+    /// or discarding the result. Listens on 127.0.0.1 only and opens the
+    /// page in the default browser. Works from outside a git repository;
+    /// repositories are added on the page and remembered.
+    Ui(ui::UiArgs),
 }
 
 fn main() -> Result<()> {
@@ -852,6 +859,10 @@ fn main() -> Result<()> {
 
     if let Command::Fleet(args) = cli.command {
         return fleet::run(args, cli.repo.as_deref(), verbose);
+    }
+
+    if let Command::Ui(args) = cli.command {
+        return ui::run(args, cli.repo.as_deref());
     }
 
     // Absolutized once, here, before anything derives a path from it
@@ -1608,6 +1619,7 @@ fn main() -> Result<()> {
         Command::Init { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Demo => unreachable!("handled above, before the orchestrator opens"),
         Command::Fleet(_) => unreachable!("handled above, before the orchestrator opens"),
+        Command::Ui(_) => unreachable!("handled above, before the orchestrator opens"),
     }
 
     Ok(())

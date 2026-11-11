@@ -1556,6 +1556,109 @@ each workspace with its run record. `state` is derived, not stored:
 from the run record's exit status, else `idle`. The GUI (#390) reads
 the same function, so the CLI and the GUI cannot disagree.
 
+### `pact ui` (issue #390)
+
+A page in the browser over the fleet engine: write a task, pick a
+repository and an agent, watch it, read the diff, then land or discard
+it. It exists because the fleet workflow is start, wait, review,
+decide, repeated for many tasks, and a terminal shows one of those at a
+time.
+
+**One process, one HTML file.** `pact ui` is an axum server on a
+current-thread tokio runtime inside the `pact` binary, and the page is
+`ui.html`, compiled in with `include_str!`: no JavaScript framework, no
+build step, no second install, nothing fetched from the network. The
+server measured 23 MB of memory idle, which matters because the point
+of pact is to leave the machine's memory to the agents. A desktop shell
+(Tauri, Electron) would add a toolchain and a hundred megabytes to show
+the same page. axum rather than a hand-written HTTP loop because header
+parsing and JSON bodies are where a hand-written server grows security
+bugs; it is built with `default-features = false` and only `http1`,
+`tokio`, `json` and `query`. Every handler runs its git and file work
+in `spawn_blocking`, and each task runs on its own OS thread through
+`FleetRunner::run_one`, the same code path as `pact fleet`.
+
+**`FleetRunner`.** `run_fleet` takes a fixed list and returns when all
+of it has ended. The page starts tasks one at a time for as long as it
+is open, so the `Supervisor` and `Admission` that `run_fleet` built
+internally are now a `FleetRunner` value that both use. One per
+process, since a second `Supervisor` cannot install a Ctrl-C handler.
+Admission is therefore global to the page: `--max-concurrent` and the
+memory floor hold across every repository, which is the property that
+keeps the laptop usable.
+
+**Security model.** The page can start an unattended agent in any
+repository on the machine, so the server must answer only the page it
+served. Three checks, all in the `guard` middleware:
+
+- It binds `127.0.0.1` only. There is no flag to bind anything else.
+- The `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`.
+  This stops DNS rebinding, where a hostile site points its own domain
+  at 127.0.0.1 so that the browser treats the local server as part of
+  that site.
+- Every `/api/` request must carry `X-Pact-Token`, 244 random bits
+  (two version 4 UUIDs) made at startup and written into the served page. Another site
+  cannot read the page (no CORS headers are sent), so it cannot learn
+  the token, and a custom header cannot be sent cross-origin without a
+  preflight the server never approves. The comparison is constant-time.
+
+The page itself is served with a Content-Security-Policy of
+`default-src 'none'` plus a per-process script nonce, `connect-src
+'self'`, and `frame-ancestors 'none'`, and it builds every element with
+`createElement` and text nodes, never `innerHTML`, because it shows
+agent output and diffs, which are untrusted text. The token is not a
+defence against other programs running as the same user: they can
+already run `pact` themselves.
+
+**Repositories are an allow list.** Every request names a repository,
+and the server acts only on paths the user added (or the directory
+`pact ui` was started in). The list is saved to `ui-repos.json` in the
+platform's local data directory so it survives a restart;
+`PACT_UI_STATE_DIR` moves it, which the test uses.
+
+**Where state lives.** Nothing new is stored. A task that has ended is
+drawn from its workspace and run record through `Orchestrator::entries`,
+so tasks started by `pact fleet` or `pact spawn` show up too, and tasks
+started from the page survive a restart of `pact ui`. Only three things
+live in the server's memory: tasks that are still setting up, waiting
+or running (with the last 300 lines of their output), and a task that
+could not start at all, which has no workspace to hold its error.
+Stopping `pact ui` stops the agents it started, as Ctrl-C does for
+`pact fleet`.
+
+**Polling, not a push channel.** The page asks `/api/state` every 2
+seconds while a task is live and every 6 otherwise, and stops while the
+tab is hidden. Server-sent events or a WebSocket would deliver output a
+second sooner at the cost of connection state on both sides, reconnect
+logic, and one more axum feature. Tasks run for minutes; a 2 second
+delay is invisible, and a hidden tab costing nothing is worth more.
+
+**The diff is built in a throwaway index.** The review pane must show
+what landing would bring: committed, uncommitted and untracked files
+together. `git diff` omits untracked files, and `git add -A` in the
+workspace would change the index under a running agent. So
+`workspace_patch` (`pact-vcs/src/land.rs`) copies the worktree's index
+to a temporary file, stages everything into the copy through
+`GIT_INDEX_FILE`, diffs the copy against the merge base with the
+user's branch, and deletes it. The real index is never written. The
+patch is cut at 400 KB with a notice, since the page is for reading a
+change, not for transporting it.
+
+**Names.** A task's name is its workspace id and its branch, so the
+page turns whatever is typed into lower-case letters, digits and
+hyphens, and when no name is given makes one from the first four words
+of the task plus four random hex digits. A name already in use in that
+repository is refused rather than suffixed, so two tasks are never
+confused.
+
+**Discarding.** A running task is discarded by `teardown --force`,
+which stops the agent. A task still waiting for admission has a
+workspace but no process; its workspace is removed and it leaves the
+page at once, and when its turn comes the launch fails on the missing
+directory and is dropped (#394 tracks cancelling the wait itself).
+During the short window before the workspace exists, discard is
+refused with a request to try again.
+
 ### Admission control (issue #285)
 
 Until #285, `spawn_many` started one OS thread per task and launched

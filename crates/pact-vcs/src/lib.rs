@@ -2,7 +2,7 @@ mod land;
 mod lock;
 mod semantic_resolvers;
 
-pub use land::{LandKind, LandOutcome};
+pub use land::{LandKind, LandOutcome, WorkspacePatch};
 pub use lock::{agent_process_alive, PidLock};
 pub use semantic_resolvers::ConflictStages;
 

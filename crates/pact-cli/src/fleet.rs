@@ -87,7 +87,7 @@ struct TaskSpec {
     prompt_file: Option<PathBuf>,
 }
 
-fn git_toplevel(path: &Path) -> Result<PathBuf> {
+pub(crate) fn git_toplevel(path: &Path) -> Result<PathBuf> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(path)
