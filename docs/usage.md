@@ -152,6 +152,7 @@ handle each on its own, exiting 1 if any of them failed.
 ```sh
 pact ui                             # open the page; the current repository is added
 pact ui --no-open --port 0          # print the address only, on any free port
+pact ui --no-open --json --port 0   # for a program: one JSON line with the address and the token
 pact --repo ../api ui --max-concurrent 2 --min-free-mem-mb 2000
 ```
 
@@ -193,6 +194,15 @@ computer on the network cannot start an agent. Tasks started with
 `pact fleet` or `pact spawn` appear on the page too, and finished tasks
 are still there after a restart. Stopping `pact ui` (Ctrl-C) stops the
 agents it started; their workspaces stay, so nothing written is lost.
+
+A program can use the same server the page does (an editor extension,
+a script). `--json` replaces the printed lines with one JSON object,
+`{"url": "...", "token": "..."}`; send the token as the `X-Pact-Token`
+header on every `/api/` request. `GET /api/task?repo=<path>&id=<task>`
+returns the diff as text and also `base`, the commit the diff is
+against, and `workspace`, the folder holding the task's files, so a
+diff viewer can open the old file with `git show <base>:<file>` and the
+new one from disk.
 
 ### Running agents in parallel by hand
 

@@ -109,7 +109,7 @@ impl Server {
         let sep = if cfg!(windows) { ";" } else { ":" };
         let path = format!("{}{sep}{}", shim.display(), std::env::var("PATH").unwrap_or_default());
         let mut child = Command::new(env!("CARGO_BIN_EXE_pact"))
-            .args(["ui", "--no-open", "--port", "0", "--stagger-ms", "0", "--min-free-mem-mb", "0"])
+            .args(["ui", "--no-open", "--json", "--port", "0", "--stagger-ms", "0", "--min-free-mem-mb", "0"])
             .current_dir(cwd)
             .env("PATH", path)
             .env("PACT_UI_STATE_DIR", state)
@@ -122,10 +122,11 @@ impl Server {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         stdout.read_line(&mut first).unwrap();
         let mut server = Self { child, _stdout: stdout, host: String::new(), token: String::new() };
-        server.host = first
-            .trim()
-            .strip_prefix("pact ui: http://")
-            .unwrap_or_else(|| panic!("unexpected first line: {first}"))
+        let greeting: Value = serde_json::from_str(&first).unwrap_or_else(|err| panic!("{err}: unexpected first line: {first}"));
+        server.host = greeting["url"]
+            .as_str()
+            .and_then(|url| url.strip_prefix("http://"))
+            .unwrap_or_else(|| panic!("no address in the first line: {first}"))
             .trim_end_matches('/')
             .to_string();
 
@@ -140,6 +141,7 @@ impl Server {
             .map(|(token, _)| token.to_string())
             .expect("the page carries its token");
         assert_eq!(server.token.len(), 64, "{}", server.token);
+        assert_eq!(greeting["token"], server.token.as_str(), "--json prints the token the page carries");
         server
     }
 
@@ -226,6 +228,9 @@ fn ui_refuses_strangers_then_starts_reviews_and_lands_a_task() {
     assert!(patch.contains("diff --git a/notes/new.txt b/notes/new.txt") && patch.contains("new file mode"), "the untracked file: {patch}");
     assert!(patch.contains("+NEW"), "{patch}");
     let workspace = pact_vcs::WorkspaceManager::state_dir_for(&repo).unwrap().join("workspaces").join("alpha-task");
+    assert_eq!(detail["base"], run_git(&repo, &["rev-parse", "HEAD"]).as_str(), "the commit the patch is against: {detail}");
+    let reported = PathBuf::from(detail["workspace"].as_str().unwrap());
+    assert_eq!(std::fs::canonicalize(reported).unwrap(), std::fs::canonicalize(&workspace).unwrap(), "{detail}");
     assert!(run_git(&workspace, &["status", "--porcelain"]).contains("?? notes/"), "building the patch staged nothing");
 
     let landed = server.post("/api/land", &json!({ "repo": repo_key, "id": "alpha-task", "pr": false }));
