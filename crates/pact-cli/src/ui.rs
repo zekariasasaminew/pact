@@ -101,6 +101,9 @@ struct LiveTask {
     log: VecDeque<String>,
     started: Instant,
     discarded: bool,
+    /// A reply to a task that already ran (issue #395): its workspace
+    /// and run record hold whatever goes wrong, so nothing is kept here.
+    reply: bool,
 }
 
 struct App {
@@ -237,7 +240,7 @@ impl App {
             Some(_) => String::new(),
             None => "pact hit an internal error while running this task".to_string(),
         };
-        if error.is_empty() || live[index].discarded {
+        if error.is_empty() || live[index].discarded || live[index].reply {
             live.remove(index);
         } else {
             live[index].phase = Phase::Error;
@@ -444,10 +447,18 @@ fn start_task(app: &Arc<App>, request: NewTask) -> Result<serde_json::Value> {
             log: VecDeque::new(),
             started: Instant::now(),
             discarded: false,
+            reply: false,
         });
     }
 
     let task = FleetTask { name: id.clone(), repo, agent, model, prompt: request.prompt };
+    launch(app, task, config, deps, false);
+    Ok(json!({ "id": id }))
+}
+
+/// Runs `task` on a thread of its own and reports into its `LiveTask`.
+/// `existing_workspace` reruns the agent where the task already lives.
+fn launch(app: &Arc<App>, task: FleetTask, config: PactConfig, deps: pact_core::DepsMode, existing_workspace: bool) {
     let app = Arc::clone(app);
     std::thread::spawn(move || {
         let safety = app.safety.clone().or_else(|| config.default_safety().map(str::to_string));
@@ -458,11 +469,66 @@ fn start_task(app: &Arc<App>, request: NewTask) -> Result<serde_json::Value> {
             prepare: config.default_prepare(),
             ..SpawnOptions::default()
         };
+        let on_event = |event: &AgentEvent| app.record(&task.repo, &task.name, event);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            app.runner.run_one(&task, &options, |event| app.record(&task.repo, &task.name, event))
+            if existing_workspace {
+                app.runner.rerun_one(&task, &options, on_event)
+            } else {
+                app.runner.run_one(&task, &options, on_event)
+            }
         }));
         app.finish(&task.repo, &task.name, outcome.ok());
     });
+}
+
+#[derive(Deserialize)]
+struct ReplyRequest {
+    repo: String,
+    id: String,
+    answer: String,
+}
+
+/// Runs the task's own agent again in its workspace with the original
+/// task, the agent's last message and `answer` (issue #395).
+fn reply(app: &Arc<App>, request: ReplyRequest) -> Result<serde_json::Value> {
+    let repo = app.known_repo(&request.repo)?;
+    let id = request.id;
+    if request.answer.trim().is_empty() {
+        bail!("write your reply to the agent first");
+    }
+    let orchestrator = Orchestrator::open(repo.clone())?;
+    let workspace = orchestrator.get_workspace(&id)?;
+    if workspace.shared_batch.is_some() {
+        bail!("task {id} shares its working copy with a pact run batch and cannot be replied to on its own");
+    }
+    let run = orchestrator
+        .run_metadata(&id)
+        .with_context(|| format!("task {id} has no recorded run to reply to"))?;
+    let agent = AgentKind::parse(&run.agent).with_context(|| format!("task {id} was run by an unknown agent '{}'", run.agent))?;
+    let config = PactConfig::load(&repo)?;
+    {
+        let mut live = lock(&app.live);
+        let running = workspace.agent_pid.is_some_and(pact_core::agent_process_alive);
+        if running || live.iter().any(|task| task.repo == repo && task.id == id) {
+            bail!("task {id} has not finished yet; wait for it before replying");
+        }
+        live.push(LiveTask {
+            repo: repo.clone(),
+            id: id.clone(),
+            agent: crate::agent_label(agent),
+            model: run.model.clone(),
+            prompt: workspace.task.clone(),
+            phase: Phase::Starting,
+            detail: String::new(),
+            log: VecDeque::new(),
+            started: Instant::now(),
+            discarded: false,
+            reply: true,
+        });
+    }
+    let prompt = pact_core::fleet::reply_prompt(&workspace.task, &run.summary, &request.answer);
+    let task = FleetTask { name: id.clone(), repo, agent, model: run.model, prompt };
+    launch(app, task, config, pact_core::DepsMode::None, true);
     Ok(json!({ "id": id }))
 }
 
@@ -613,6 +679,10 @@ fn router(app: Arc<App>) -> Router {
         .route(
             "/api/tasks",
             post(|State(app): State<Arc<App>>, Json(body): Json<NewTask>| blocking(app, body, start_task)),
+        )
+        .route(
+            "/api/reply",
+            post(|State(app): State<Arc<App>>, Json(body): Json<ReplyRequest>| blocking(app, body, reply)),
         )
         .route(
             "/api/task",
