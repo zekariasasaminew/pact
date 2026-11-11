@@ -1149,7 +1149,16 @@ impl Orchestrator {
         // the slot is taken only for the expensive part, and released as
         // soon as the process is gone so the next queued task launches
         // immediately (issue #285).
-        let slot = admission.map(|a| a.acquire(|why| on_event(&AgentEvent::Phase(why.to_string()))));
+        let slot = match admission {
+            Some(admission) => {
+                let waited = admission.acquire_unless(|why| on_event(&AgentEvent::Phase(why.to_string())), || !workspace.path.exists());
+                match waited {
+                    Some(slot) => Some(slot),
+                    None => bail!("workspace {} was removed while it waited in line", workspace.id),
+                }
+            }
+            None => None,
+        };
         let started_at = unix_now();
         on_event(&AgentEvent::Phase("running agent".to_string()));
         let run_result = pact_agents::run_and_stream(
@@ -1257,7 +1266,19 @@ impl Orchestrator {
         let marker = self.workspaces.cancel_marker_path(&workspace.id);
         let _ = std::fs::remove_file(&marker);
 
-        let slot = admission.map(|a| a.acquire(|why| on_event(&AgentEvent::Phase(why.to_string()))));
+        let slot = match admission {
+            Some(admission) => {
+                let waited = admission.acquire_unless(|why| on_event(&AgentEvent::Phase(why.to_string())), || !workspace.path.exists());
+                match waited {
+                    Some(slot) => Some(slot),
+                    None => {
+                        acp.coord.remove_lane(&workspace.id);
+                        bail!("workspace {} was removed while it waited in line", workspace.id)
+                    }
+                }
+            }
+            None => None,
+        };
         let started_at = unix_now();
         on_event(&AgentEvent::Phase("running agent (ACP session in the shared process)".to_string()));
 

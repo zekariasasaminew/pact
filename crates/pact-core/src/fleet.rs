@@ -215,6 +215,12 @@ impl FleetRunner {
         self.admission.policy()
     }
 
+    /// Call after removing the workspace of a task that may still be
+    /// waiting for admission, so it leaves the line now.
+    pub fn recheck_waiters(&self) {
+        self.admission.recheck();
+    }
+
     /// Runs one task to its end on the calling thread, waiting for
     /// admission first. `options.admission` is ignored in favour of the
     /// runner's own policy.
