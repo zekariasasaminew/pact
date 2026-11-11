@@ -1099,6 +1099,57 @@ impl Orchestrator {
             );
         }
 
+        self.run_process_lane(supervisor, agent, workspace, task, options, admission, on_event)
+    }
+
+    /// Runs `agent` again as its own process in the existing workspace
+    /// `id`, on the same branch with whatever the earlier run left there
+    /// (issue #395). `task` is the whole new prompt. Refused for a
+    /// shared-tree lane and while an agent is still running there.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rerun_with_supervisor(
+        &self,
+        supervisor: &Supervisor,
+        agent: AgentKind,
+        id: &str,
+        task: &str,
+        options: &SpawnOptions<'_>,
+        admission: Option<&Admission>,
+        on_event: impl FnMut(&AgentEvent),
+    ) -> Result<(Workspace, RunOutcome)> {
+        let workspace = self.workspaces.get_workspace(id)?;
+        if workspace.shared_batch.is_some() {
+            bail!("workspace {id} is a lane of a shared-tree batch and cannot be run again on its own");
+        }
+        if let Some(pid) = workspace.agent_pid.filter(|pid| agent_process_alive(*pid)) {
+            bail!("workspace {id}'s agent is still running (pid {pid})");
+        }
+        let contract_task;
+        let task = if options.report_contract {
+            contract_task = fleet::with_report_contract(task);
+            contract_task.as_str()
+        } else {
+            task
+        };
+        self.run_process_lane(supervisor, agent, workspace, task, options, admission, on_event)
+    }
+
+    /// The process runtime's run phase: launch the agent CLI in
+    /// `workspace` with `task` as the finished prompt, wait for it, and
+    /// write the run record.
+    #[allow(clippy::too_many_arguments)]
+    fn run_process_lane(
+        &self,
+        supervisor: &Supervisor,
+        agent: AgentKind,
+        workspace: Workspace,
+        task: &str,
+        options: &SpawnOptions<'_>,
+        admission: Option<&Admission>,
+        mut on_event: impl FnMut(&AgentEvent),
+    ) -> Result<(Workspace, RunOutcome)> {
+        let adapter = pact_agents::adapter(agent);
+        let coord_name = adapter.coord_server_name();
         let coord = match self.coord_config(&workspace, coord_name, options.coord_override) {
             Ok(c) => Some(c),
             Err(err) => {

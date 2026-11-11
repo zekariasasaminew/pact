@@ -55,6 +55,27 @@ pub fn with_report_contract(prompt: &str) -> String {
     format!("{}\n\n{REPORT_CONTRACT}", prompt.trim_end())
 }
 
+/// How much of the previous final message a reply prompt carries. The
+/// report is at its end, so the tail is kept.
+const REPLY_PREVIOUS_MAX_CHARS: usize = 6000;
+
+/// The prompt for running an agent again in the workspace of a task it
+/// stopped on (issue #395): the original task, what the agent said last,
+/// and the user's answer.
+pub fn reply_prompt(original: &str, previous: &str, answer: &str) -> String {
+    let previous = previous.trim();
+    let skip = previous.chars().count().saturating_sub(REPLY_PREVIOUS_MAX_CHARS);
+    let previous: String = previous.chars().skip(skip).collect();
+    format!(
+        "You worked on the task below earlier, in this same directory, and stopped. \
+         Everything you changed is still here. Continue from it; do not start over.\n\n\
+         The task:\n{}\n\nYour final message last time:\n{}\n\nThe user's reply:\n{}",
+        original.trim(),
+        if previous.is_empty() { "(none recorded)" } else { &previous },
+        answer.trim()
+    )
+}
+
 /// Strips the markdown a model tends to wrap a field label in (`- `,
 /// `**STATUS:**`) and returns the label upper-cased with its value.
 fn report_field(line: &str) -> Option<(String, String)> {
@@ -175,7 +196,7 @@ pub fn run_fleet(
                 let admission = &admission;
                 let on_event = &on_event;
                 let orchestrator = &orchestrators[&task.repo];
-                scope.spawn(move || run_task(index, task, orchestrator, options, supervisor, admission, on_event))
+                scope.spawn(move || run_task(index, task, false, orchestrator, options, supervisor, admission, on_event))
             })
             .collect();
 
@@ -231,7 +252,20 @@ impl FleetRunner {
         on_event: impl Fn(&AgentEvent) + Sync,
     ) -> FleetOutcome {
         let orchestrator = Orchestrator::open(task.repo.clone()).map_err(|err| format!("{err:#}"));
-        run_task(0, task, &orchestrator, options, &self.supervisor, &self.admission, &|_, event| on_event(event))
+        run_task(0, task, false, &orchestrator, options, &self.supervisor, &self.admission, &|_, event| on_event(event))
+    }
+
+    /// `run_one` in the workspace `task.name` already has, instead of a
+    /// new one (issue #395). `task.prompt` is the whole new prompt; see
+    /// `reply_prompt`.
+    pub fn rerun_one(
+        &self,
+        task: &FleetTask,
+        options: &SpawnOptions<'_>,
+        on_event: impl Fn(&AgentEvent) + Sync,
+    ) -> FleetOutcome {
+        let orchestrator = Orchestrator::open(task.repo.clone()).map_err(|err| format!("{err:#}"));
+        run_task(0, task, true, &orchestrator, options, &self.supervisor, &self.admission, &|_, event| on_event(event))
     }
 }
 
@@ -247,9 +281,11 @@ fn error_outcome(index: usize, task: &FleetTask, summary: String) -> FleetOutcom
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_task(
     index: usize,
     task: &FleetTask,
+    existing_workspace: bool,
     orchestrator: &Result<Orchestrator, String>,
     options: &SpawnOptions<'_>,
     supervisor: &Supervisor,
@@ -267,17 +303,23 @@ fn run_task(
         report_contract: true,
         ..*options
     };
-    let result = orchestrator.spawn_with_supervisor(
-        supervisor,
-        task.agent,
-        &task.prompt,
-        Some(&task.name),
-        &lane_options,
-        Some(admission),
-        None,
-        None,
-        |event| on_event(index, event),
-    );
+    let result = if existing_workspace {
+        orchestrator.rerun_with_supervisor(supervisor, task.agent, &task.name, &task.prompt, &lane_options, Some(admission), |event| {
+            on_event(index, event)
+        })
+    } else {
+        orchestrator.spawn_with_supervisor(
+            supervisor,
+            task.agent,
+            &task.prompt,
+            Some(&task.name),
+            &lane_options,
+            Some(admission),
+            None,
+            None,
+            |event| on_event(index, event),
+        )
+    };
     match result {
         Ok((workspace, run)) => {
             let report = parse_worker_report(&run.summary);
@@ -344,6 +386,28 @@ mod tests {
         assert_eq!(parse_worker_report("I changed the file and it works."), None);
         assert_eq!(parse_worker_report("STATUS: probably fine"), None);
         assert_eq!(parse_worker_report(REPORT_CONTRACT), None);
+    }
+
+    #[test]
+    fn reply_prompt_carries_the_task_the_last_message_and_the_answer() {
+        let prompt = reply_prompt("Add a cache.
+", "STATUS: blocked
+NOTES: Redis or in memory?", " In memory. ");
+        assert!(prompt.contains("The task:
+Add a cache.
+
+Your final message last time:
+STATUS: blocked"), "{prompt}");
+        assert!(prompt.ends_with("The user's reply:
+In memory."), "{prompt}");
+
+        let long = format!("{}END", "x".repeat(REPLY_PREVIOUS_MAX_CHARS * 2));
+        let prompt = reply_prompt("t", &long, "a");
+        assert!(prompt.contains("END
+
+The user's reply:"), "the tail of a long message is kept");
+        assert!(prompt.len() < REPLY_PREVIOUS_MAX_CHARS + 500);
+        assert!(reply_prompt("t", "", "a").contains("(none recorded)"));
     }
 
     #[test]
