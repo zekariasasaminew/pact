@@ -502,7 +502,13 @@ enum Command {
         tier: Option<String>,
     },
     /// List active agent workspaces
-    List,
+    List {
+        /// Print one JSON array instead: each workspace with its run state
+        /// (running, finished, failed, idle), dirty flag, commits not yet
+        /// landed, agent, model and worker report.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-screen repo-wide view: detected agent CLIs, an aggregate
     /// coordination snapshot (active leases/pending messages), open
     /// persisted conflicts, and every active workspace's dirty/agent-
@@ -729,6 +735,30 @@ enum Command {
         /// --test-cmd is set.
         #[arg(long = "arbiter-safety")]
         arbiter_safety: Option<String>,
+    },
+    /// Land a workspace's work on the branch you have checked out: commit
+    /// it, fast-forward or merge its branch in, then remove the workspace
+    /// and its branch. A conflict aborts the merge and leaves the
+    /// workspace, committed, in place. Each id lands independently.
+    Land {
+        /// Workspaces to land (as shown by `list`).
+        #[arg(required = true)]
+        ids: Vec<String>,
+
+        /// Push the workspace's branch to `origin` and open a pull request
+        /// against the checked-out branch with `gh` instead of merging.
+        /// Removes the worktree and keeps the branch.
+        #[arg(long)]
+        pr: bool,
+    },
+    /// Throw a workspace away: stop its agent if one is running, then
+    /// remove the worktree and the branch, uncommitted and committed work
+    /// included. The same as `teardown <id> --force`, named for what it
+    /// is for.
+    Discard {
+        /// Workspaces to discard (as shown by `list`).
+        #[arg(required = true)]
+        ids: Vec<String>,
     },
     /// Tear down an agent workspace. Without an id, tears down every active
     /// workspace -- each one independently, so one that fails (e.g. dirty
@@ -1279,7 +1309,10 @@ fn main() -> Result<()> {
                 std::process::exit(if inconclusive { 3 } else { 1 });
             }
         }
-        Command::List => {
+        Command::List { json: true } => {
+            println!("{}", serde_json::to_string_pretty(&orchestrator.entries()?)?);
+        }
+        Command::List { json: false } => {
             let workspaces = orchestrator.list()?;
             if workspaces.is_empty() {
                 println!("no active workspaces");
@@ -1536,6 +1569,39 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::Land { ids, pr } => {
+            let mut any_failed = false;
+            for id in ids {
+                match orchestrator.land(&id, pr) {
+                    Ok(outcome) => println!("{}", land_line(&outcome)),
+                    Err(err) => {
+                        println!("{id}: not landed: {err:#}");
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
+            }
+        }
+        Command::Discard { ids } => {
+            let mut any_failed = false;
+            for id in ids {
+                match orchestrator.discard(&id) {
+                    Ok(outcome) => println!(
+                        "discarded workspace {id} and branch {} ({} uncommitted file(s), {} commit(s))",
+                        outcome.branch, outcome.uncommitted_files, outcome.commits
+                    ),
+                    Err(err) => {
+                        println!("{id}: not discarded: {err:#}");
+                        any_failed = true;
+                    }
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
+            }
+        }
         Command::McpServe { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Completions { .. } => unreachable!("handled above, before the orchestrator opens"),
         Command::Doctor { .. } => unreachable!("handled above, before the orchestrator opens"),
@@ -1545,6 +1611,28 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn land_line(outcome: &pact_core::LandOutcome) -> String {
+    let id = &outcome.id;
+    let target = &outcome.target_branch;
+    let commits = outcome.commits;
+    match outcome.kind {
+        pact_core::LandKind::FastForward => {
+            format!("landed {id} on {target}: fast-forwarded {commits} commit(s); workspace and branch removed")
+        }
+        pact_core::LandKind::Merge => {
+            format!("landed {id} on {target}: merged {commits} commit(s); workspace and branch removed")
+        }
+        pact_core::LandKind::NothingToLand => {
+            format!("{id} had no changes to land on {target}; workspace and branch removed")
+        }
+        pact_core::LandKind::PullRequest => format!(
+            "opened a pull request for {id} into {target}: {}; worktree removed, branch {} kept",
+            outcome.pr_url.as_deref().unwrap_or("(gh printed no link)"),
+            outcome.branch
+        ),
+    }
 }
 
 /// Prints a `merge-all` report -- the merge order/outcome for a real run,

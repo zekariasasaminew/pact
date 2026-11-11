@@ -1505,8 +1505,56 @@ workspace's recorded task stays the user's own prompt. The flag lives on
 `SpawnOptions` rather than in the fleet module so other commands can opt
 in later without a second code path.
 
-Not in this slice: committing or landing a task's branch (#389), a
-read-only task mode that skips the worktree, and the GUI (#390).
+Not in this slice: a read-only task mode that skips the worktree, and
+the GUI (#390). Landing a task's branch is the next section.
+
+### `pact land` and `pact discard` (issue #389)
+
+`merge-all` answers "combine these lanes into one result": it builds a
+`pact/merged-*` integration branch in a throwaway worktree and never
+touches the user's checkout. Fleet tasks are not one result. Each is
+reviewed alone and wanted on the user's branch, or as its own pull
+request, as soon as it is approved, so `land` works on one workspace
+and writes to the checked-out branch directly.
+
+**Merging in the user's checkout.** `land_workspace`
+(`pact-vcs/src/land.rs`) runs a plain `git merge --no-edit` in the
+repository root. That is the one place pact merges outside an
+integration worktree, and it is acceptable because git itself refuses
+to start when local changes would be overwritten, and a conflicted
+merge is aborted at once, which restores the checkout exactly. No
+Arbiter and no semantic auto-resolution: a conflict between one task
+and the user's own branch is a decision for the user, and the error
+names the three ways out. The workspace is committed before the merge
+is tried, so a failed landing leaves the work in a commit rather than
+in a dirty tree.
+
+**Fast-forward when possible.** No `--no-ff`: a task landed onto an
+unmoved branch reads as ordinary linear history, and the workspace's
+commit message already names the agent and task.
+
+**`--pr` lives in `pact-core`.** Pushing is git and sits in `pact-vcs`
+(`push_branch`); opening the pull request shells out to `gh`, which is
+not version control, and needs the run record for the body, so
+`Orchestrator::land_as_pull_request` owns it. `gh` rather than a GitHub
+API client because it already holds the user's credentials; pact stores
+none. The remote is `origin` and the base is the checked-out branch,
+with no flags for either until someone needs them. The order is push,
+open, then remove the worktree, so every failure leaves the workspace
+intact and the command safe to run again.
+
+**Refusals.** `land` refuses a workspace whose agent process is alive
+(committing a half-written tree would land it) and any member of a
+shared tree (its worktree holds other lanes' work). `discard` is
+`teardown --force` under the name the fleet workflow uses, plus a count
+of what was thrown away; it exists so the GUI's two buttons map to two
+commands.
+
+**`pact list --json`** serializes `Orchestrator::entries`, which joins
+each workspace with its run record. `state` is derived, not stored:
+`running` when the recorded pid is alive, else `finished` or `failed`
+from the run record's exit status, else `idle`. The GUI (#390) reads
+the same function, so the CLI and the GUI cannot disagree.
 
 ### Admission control (issue #285)
 

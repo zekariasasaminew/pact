@@ -108,6 +108,45 @@ report is kept in the task's run record (`meta/runs/<name>.json`). Each
 task's changes are left uncommitted in its workspace, like `spawn`:
 `pact --repo <repo> diff <name>` shows them.
 
+### One task at a time: `pact land`, `pact discard`
+
+```sh
+pact land <id>                      # commit, merge into the branch you have checked out, remove the workspace
+pact land <id> --pr                 # commit, push the branch, open a pull request with gh; the branch is kept
+pact discard <id>                   # throw the workspace and its branch away
+pact list --json                    # every workspace with its state, for scripts
+```
+
+`pact land` (issue #389) finishes one workspace without touching the
+others, which is what independent tasks want. It commits whatever the
+agent left uncommitted, then brings the workspace's branch into the
+branch checked out in the repository: a fast-forward when your branch
+has not moved since the task started, a merge commit otherwise. Then it
+removes the worktree and the `pact/<id>` branch. If the merge conflicts,
+it is aborted, your checkout is left as it was, and the workspace stays,
+now committed, so nothing is lost; merge it by hand, try `--pr`, or
+discard it. `land` refuses while the workspace's agent is still running,
+and it does not take a lane of a shared tree (`merge-all` lands those).
+
+With `--pr` nothing is merged locally. The branch is pushed to `origin`
+and `gh pr create` opens a pull request against your checked-out branch,
+titled with the first line of the task and carrying the task and the
+agent's report as its body. This needs the GitHub CLI, signed in. The
+worktree is removed and the branch is kept, since the pull request
+lives on it. If the pull request cannot be opened, the workspace is left
+in place.
+
+`pact discard` stops the agent if it is still running and removes the
+worktree and the branch, uncommitted and committed work included. It
+prints how much it threw away. Both commands take several ids and
+handle each on its own, exiting 1 if any of them failed.
+
+`pact list --json` prints one array with an object per workspace: `id`,
+`repo`, `branch`, `path`, `task`, `state` (`running`, `finished`,
+`failed`, or `idle` when no run is recorded), `dirty`, `commits_ahead`
+(commits not yet on your checked-out branch), `agent`, `model`,
+`seconds`, `summary` and the parsed `report`.
+
 ### Running agents in parallel by hand
 
 ```sh
