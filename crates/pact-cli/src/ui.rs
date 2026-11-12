@@ -496,7 +496,8 @@ struct ReplyRequest {
 }
 
 /// Runs the task's own agent again in its workspace with the original
-/// task, the agent's last message and `answer` (issue #395).
+/// task, the user's earlier replies, the agent's last message and
+/// `answer` (issues #395, #400).
 fn reply(app: &Arc<App>, request: ReplyRequest) -> Result<serde_json::Value> {
     let repo = app.known_repo(&request.repo)?;
     let id = request.id;
@@ -533,7 +534,8 @@ fn reply(app: &Arc<App>, request: ReplyRequest) -> Result<serde_json::Value> {
             reply: true,
         });
     }
-    let prompt = pact_core::fleet::reply_prompt(&workspace.task, &run.summary, &request.answer);
+    let earlier = orchestrator.record_reply(&id, &request.answer)?;
+    let prompt = pact_core::fleet::reply_prompt(&workspace.task, &earlier, &run.summary, &request.answer);
     let task = FleetTask { name: id.clone(), repo, agent, model: run.model, prompt };
     launch(app, task, config, pact_core::DepsMode::None, true);
     Ok(json!({ "id": id }))

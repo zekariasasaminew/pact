@@ -1480,6 +1480,21 @@ impl Orchestrator {
         serde_json::from_str(&contents).ok()
     }
 
+    /// Appends `answer` to the replies the user has given this workspace's
+    /// agent and returns the earlier ones, oldest first (issue #400).
+    pub fn record_reply(&self, id: &str, answer: &str) -> Result<Vec<String>> {
+        let path = self.workspaces.replies_path(id);
+        let earlier: Vec<String> =
+            std::fs::read_to_string(&path).ok().and_then(|contents| serde_json::from_str(&contents).ok()).unwrap_or_default();
+        let mut all = earlier.clone();
+        all.push(answer.trim().to_string());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_vec_pretty(&all)?).with_context(|| format!("writing {}", path.display()))?;
+        Ok(earlier)
+    }
+
     /// A workspace's committed (on-branch) and uncommitted (working-tree)
     /// changes -- see `pact_vcs::WorkspaceManager::workspace_diff`.
     pub fn diff(&self, id: &str) -> Result<WorkspaceDiff> {

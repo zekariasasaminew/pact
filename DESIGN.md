@@ -1704,8 +1704,13 @@ a new agent session, not a resumed one: resuming is spelled
 differently by every agent CLI and not offered by all of them, while a
 fresh session that is told what happened works for all five, and the
 files already changed carry most of the context. The cost is that the
-agent rereads what it needs, and that a second reply carries only the
-latest message, not the first reply. The launch half of
+agent rereads what it needs. Each reply is appended to
+`meta/replies/<id>.json` and every earlier one is listed in the next
+prompt (#400): the agent's own earlier messages are not kept, because
+the files hold what it did, but a decision the user gave only in words
+(which database to use) exists nowhere else. Unlike the run record,
+the file is removed with the workspace, so a later task of the same
+name does not inherit the thread. The launch half of
 `spawn_with_supervisor` became `run_process_lane` so that
 `rerun_with_supervisor` (through `FleetRunner::rerun_one`) launches in
 an existing workspace by the same code as a new task: same admission

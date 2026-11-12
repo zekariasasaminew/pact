@@ -416,6 +416,14 @@ impl WorkspaceManager {
         self.state_dir.join("meta").join("runs").join(format!("{id}.json"))
     }
 
+    /// Where pact-core keeps the replies a user gave a workspace's agent
+    /// (`meta/replies/<id>.json`, issue #400). Unlike the other sidecars
+    /// it is removed with the workspace, so a later workspace of the same
+    /// name does not inherit the thread.
+    pub fn replies_path(&self, id: &str) -> PathBuf {
+        self.state_dir.join("meta").join("replies").join(format!("{id}.json"))
+    }
+
     /// One-time migration for state directories written before issue
     /// #343, when the sidecars sat beside the workspace records as
     /// `<id>-deps.json` / `<id>-run.json` and `list_workspaces` told them
@@ -732,6 +740,7 @@ impl WorkspaceManager {
             // is gone.
             self.stop_agent(&workspace);
             let _ = std::fs::remove_file(self.meta_path(id));
+            let _ = std::fs::remove_file(self.replies_path(id));
             return Ok(());
         }
 
@@ -773,6 +782,7 @@ impl WorkspaceManager {
         }
 
         let _ = std::fs::remove_file(self.meta_path(id));
+        let _ = std::fs::remove_file(self.replies_path(id));
         Ok(())
     }
 

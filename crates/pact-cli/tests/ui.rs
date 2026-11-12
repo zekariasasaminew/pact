@@ -302,10 +302,30 @@ fn ui_reply_reruns_the_agent_in_the_same_workspace() {
     assert!(record.contains("Pick a database and wire it in."), "the rerun prompt carries the task: {record}");
     assert!(record.contains("fake-agent: done"), "and the agent's last message: {record}");
     assert!(record.contains("The user's reply:"), "{record}");
+    assert!(!record.contains("earlier stops"), "a first reply has no thread: {record}");
+
+    let again = server.post("/api/reply", &json!({ "repo": repo_key, "id": "ask", "answer": "Also add an index." }));
+    assert_eq!(again.status, 200, "{}", again.body);
+    let run_record = state_dir.join("meta").join("runs").join("ask.json");
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let record = loop {
+        let record = std::fs::read_to_string(&run_record).unwrap_or_default();
+        if record.contains("Also add an index.") {
+            break record;
+        }
+        assert!(Instant::now() < deadline, "the second reply never ran: {record}");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(record.contains("earlier stops") && record.contains("1. {"), "the second reply carries the first: {record}");
+    server.wait_for_status("ask", "done");
+    let replies = state_dir.join("meta").join("replies").join("ask.json");
+    let thread: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&replies).unwrap()).unwrap();
+    assert_eq!(thread.len(), 2, "{thread:?}");
 
     let landed = server.post("/api/land", &json!({ "repo": repo_key, "id": "ask", "pr": false }));
     assert_eq!(landed.status, 200, "{}", landed.body);
     assert!(repo.join("earlier.txt").exists() && repo.join("answer.txt").exists());
+    assert!(!replies.exists(), "the thread goes with the workspace");
 
     drop(server);
     for dir in [&repo, &state_dir, &shim, &outside] {
