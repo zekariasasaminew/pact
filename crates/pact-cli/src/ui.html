@@ -124,6 +124,7 @@ code { font-family: var(--mono); font-size: .92em; background: var(--sunken); pa
 <header>
   <h1>pact<span id="version"></span></h1>
   <div class="machine" id="machine"></div>
+  <button id="notify" hidden></button>
   <button id="activity" title="What pact has done in the selected repository">Activity</button>
 </header>
 <main>
@@ -169,6 +170,8 @@ const GROUPS = [
   ["Ready to review", ["done", "finished"]],
   ["Not run", ["idle"]],
 ];
+const NEEDS_A_LOOK = ["error", "blocked", "failed", "done", "finished"];
+const canNotify = typeof Notification !== "undefined";
 const $ = (id) => document.getElementById(id);
 let state = null, open = null, detail = null, detailFor = "", busy = new Set(), timer = 0, formSig = "", lastTasks = "";
 const openFiles = new Map();
@@ -216,6 +219,33 @@ async function api(path, body) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "request failed (" + res.status + ")");
   return data;
+}
+
+function notifyOn() { return canNotify && store.get("notify") === "on" && Notification.permission === "granted"; }
+function renderNotify() {
+  const on = notifyOn(), button = $("notify");
+  button.hidden = !canNotify;
+  button.textContent = on ? "Notifications on" : "Notify me";
+  button.title = on ? "Stop showing desktop notifications" : "Show a desktop notification when a task ends while this tab is in the background";
+}
+async function toggleNotify() {
+  if (notifyOn()) store.set("notify", "off");
+  else if (Notification.permission === "denied") toast("This browser blocks notifications from this page. Allow them in the site settings next to the address bar, then press Notify me again.", true);
+  else if ((await Notification.requestPermission()) === "granted") {
+    store.set("notify", "on");
+    toast(notifyOn() ? "You will get a desktop notification when a task ends while this tab is in the background." : "This browser would not save the choice, so notifications stay off.", !notifyOn());
+  }
+  renderNotify();
+}
+function announce(before) {
+  const waiting = state.tasks.filter((t) => NEEDS_A_LOOK.includes(t.status)).length;
+  document.title = (waiting ? "(" + waiting + ") " : "") + "pact";
+  if (!before || !document.hidden || !notifyOn()) return;
+  for (const t of state.tasks) {
+    if (LIVE.includes(t.status) || !LIVE.includes(before.get(keyOf(t)))) continue;
+    const note = new Notification(t.id + ": " + (LABEL[t.status] || t.status), { body: headline(t) || repoName(t.repo), tag: keyOf(t) });
+    note.onclick = () => { window.focus(); note.close(); openTask(t); };
+  }
 }
 
 function renderMachine() {
@@ -502,13 +532,16 @@ async function refresh() {
   clearTimeout(timer);
   try {
     const before = open && state ? state.tasks.find((x) => keyOf(x) === open.key) : null;
+    const statuses = state && new Map(state.tasks.map((t) => [keyOf(t), t.status]));
     state = await api("/api/state");
+    announce(statuses);
     render();
     const now = open ? state.tasks.find((x) => keyOf(x) === open.key) : null;
     if (now && (LIVE.includes(now.status) || !before || before.status !== now.status || detailFor !== open.key)) loadDetail();
   } catch {}
   const live = state && state.tasks.some((t) => LIVE.includes(t.status));
-  if (!document.hidden) timer = setTimeout(refresh, live ? 2000 : 6000);
+  const wait = document.hidden ? (live ? 15000 : 0) : live ? 2000 : 6000;
+  if (wait) timer = setTimeout(refresh, wait);
 }
 
 $("compose").addEventListener("submit", async (e) => {
@@ -544,6 +577,8 @@ $("repo-add-go").addEventListener("click", addRepo);
 $("repo-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addRepo(); } });
 $("drawer-close").addEventListener("click", closeDrawer);
 $("activity").addEventListener("click", openHistory);
+$("notify").addEventListener("click", toggleNotify);
+renderNotify();
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && open) closeDrawer(); });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 refresh();
