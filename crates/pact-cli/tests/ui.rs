@@ -321,6 +321,8 @@ fn ui_reply_reruns_the_agent_in_the_same_workspace() {
     let replies = state_dir.join("meta").join("replies").join("ask.json");
     let thread: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&replies).unwrap()).unwrap();
     assert_eq!(thread.len(), 2, "{thread:?}");
+    let detail = server.get(&format!("/api/task?repo={}&id=ask", query_escape(&repo_key)));
+    assert_eq!(detail.json()["replies"][1], "Also add an index.", "{}", detail.body);
 
     let landed = server.post("/api/land", &json!({ "repo": repo_key, "id": "ask", "pr": false }));
     assert_eq!(landed.status, 200, "{}", landed.body);

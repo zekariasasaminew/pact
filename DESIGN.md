@@ -1710,7 +1710,10 @@ prompt (#400): the agent's own earlier messages are not kept, because
 the files hold what it did, but a decision the user gave only in words
 (which database to use) exists nowhere else. Unlike the run record,
 the file is removed with the workspace, so a later task of the same
-name does not inherit the thread. The launch half of
+name does not inherit the thread. `/api/task` returns the list as
+`replies` and the drawer shows it under the task text (#407), since
+the card otherwise shows only the original task and nothing says what
+the agent was told afterwards. The launch half of
 `spawn_with_supervisor` became `run_process_lane` so that
 `rerun_with_supervisor` (through `FleetRunner::rerun_one`) launches in
 an existing workspace by the same code as a new task: same admission

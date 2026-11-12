@@ -91,6 +91,7 @@ details.more { margin-top: 12px; } details.more summary { cursor: pointer; font-
 #drawer h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 22px 0 8px; font-weight: 600; }
 .prose { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 .prose.clamp { max-height: 9em; overflow: auto; }
+.prose.told + .prose.told { margin-top: 8px; }
 dl.report { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; }
 dl.report dt { color: var(--muted); } dl.report dd { margin: 0; overflow-wrap: anywhere; }
 pre.log { background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: 12.5px/1.5 var(--mono); max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
@@ -467,6 +468,8 @@ function renderDrawer() {
   if (t.detail && (t.status === "error" || t.status === "queued")) body.push(h("div", { class: "notice" + (t.status === "error" ? " bad" : "") }, t.detail.replace(/^queued: /, "Waiting: ")));
   if (t.shared_tree) body.push(h("div", { class: "notice" }, "This task shares one working copy with other tasks from a pact run, so it lands with its whole batch (pact merge-all), not on its own."));
   body.push(h("h3", null, "Task"), h("p", { class: "prose clamp" }, t.prompt));
+  const d = detailFor === open.key ? detail : null;
+  if (d && d.replies.length) body.push(h("h3", null, d.replies.length > 1 ? "Your replies" : "Your reply"), ...d.replies.map((reply) => h("p", { class: "prose clamp told" }, reply)));
   const r = t.report;
   if (r) {
     const rows = [["Changed", r.changed], ["Verified", r.verified], ["Not verified", r.not_verified], ["Notes", r.notes]].filter(([, v]) => v);
@@ -474,7 +477,6 @@ function renderDrawer() {
   }
   const said = r ? (t.summary || "").split(/^STATUS:/m)[0].trim() : t.summary;
   if (said && !LIVE.includes(t.status)) body.push(h("h3", null, "The agent's last message"), h("p", { class: "prose clamp" }, said));
-  const d = detailFor === open.key ? detail : null;
   if (d && d.log.length) {
     const log = h("pre", { class: "log" }, d.log.join("\n"));
     body.push(h("h3", null, "Live output"), log);
