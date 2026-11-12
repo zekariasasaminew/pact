@@ -60,16 +60,25 @@ pub fn with_report_contract(prompt: &str) -> String {
 const REPLY_PREVIOUS_MAX_CHARS: usize = 6000;
 
 /// The prompt for running an agent again in the workspace of a task it
-/// stopped on (issue #395): the original task, what the agent said last,
-/// and the user's answer.
-pub fn reply_prompt(original: &str, previous: &str, answer: &str) -> String {
+/// stopped on (issue #395): the original task, the replies the user gave
+/// on earlier stops (`earlier`, oldest first, issue #400), what the agent
+/// said last, and the user's answer.
+pub fn reply_prompt(original: &str, earlier: &[String], previous: &str, answer: &str) -> String {
     let previous = previous.trim();
     let skip = previous.chars().count().saturating_sub(REPLY_PREVIOUS_MAX_CHARS);
     let previous: String = previous.chars().skip(skip).collect();
+    let mut thread = String::new();
+    if !earlier.is_empty() {
+        thread.push_str("What the user told you on your earlier stops, oldest first; it still applies:\n");
+        for (index, reply) in earlier.iter().enumerate() {
+            thread.push_str(&format!("{}. {}\n", index + 1, reply.trim()));
+        }
+        thread.push('\n');
+    }
     format!(
         "You worked on the task below earlier, in this same directory, and stopped. \
          Everything you changed is still here. Continue from it; do not start over.\n\n\
-         The task:\n{}\n\nYour final message last time:\n{}\n\nThe user's reply:\n{}",
+         The task:\n{}\n\n{thread}Your final message last time:\n{}\n\nThe user's reply:\n{}",
         original.trim(),
         if previous.is_empty() { "(none recorded)" } else { &previous },
         answer.trim()
@@ -391,7 +400,7 @@ mod tests {
     #[test]
     fn reply_prompt_carries_the_task_the_last_message_and_the_answer() {
         let prompt = reply_prompt("Add a cache.
-", "STATUS: blocked
+", &[], "STATUS: blocked
 NOTES: Redis or in memory?", " In memory. ");
         assert!(prompt.contains("The task:
 Add a cache.
@@ -402,12 +411,16 @@ STATUS: blocked"), "{prompt}");
 In memory."), "{prompt}");
 
         let long = format!("{}END", "x".repeat(REPLY_PREVIOUS_MAX_CHARS * 2));
-        let prompt = reply_prompt("t", &long, "a");
+        let prompt = reply_prompt("t", &[], &long, "a");
         assert!(prompt.contains("END
 
 The user's reply:"), "the tail of a long message is kept");
         assert!(prompt.len() < REPLY_PREVIOUS_MAX_CHARS + 500);
-        assert!(reply_prompt("t", "", "a").contains("(none recorded)"));
+        assert!(reply_prompt("t", &[], "", "a").contains("(none recorded)"));
+        assert!(!reply_prompt("t", &[], "", "a").contains("earlier stops"));
+
+        let prompt = reply_prompt("t", &["In memory.".to_string(), " No TTL. ".to_string()], "p", "a");
+        assert!(prompt.contains("it still applies:\n1. In memory.\n2. No TTL.\n\nYour final message last time:\np"), "{prompt}");
     }
 
     #[test]
