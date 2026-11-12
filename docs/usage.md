@@ -167,7 +167,10 @@ and `pact discard` do, without a task file:
 - **Watch.** Each task is a card: setting up, waiting in line, running,
   then done, blocked, or failed, from the agent's own report. Tasks
   that need you are listed first. The top bar shows how many agents are
-  running, how much memory is free, and why a task is waiting.
+  running, how much memory is free, and why a task is waiting. The tab
+  title counts the tasks waiting on you, such as `(3) pact`, and Notify
+  me turns on a desktop notification for each task that ends while the
+  tab is in the background.
 - **Review.** Click a card to read the task, the agent's report, its
   live output, and the whole change as a diff, file by file, including
   new files.

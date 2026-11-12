@@ -1627,11 +1627,25 @@ Stopping `pact ui` stops the agents it started, as Ctrl-C does for
 `pact fleet`.
 
 **Polling, not a push channel.** The page asks `/api/state` every 2
-seconds while a task is live and every 6 otherwise, and stops while the
-tab is hidden. Server-sent events or a WebSocket would deliver output a
-second sooner at the cost of connection state on both sides, reconnect
-logic, and one more axum feature. Tasks run for minutes; a 2 second
+seconds while a task is live and every 6 otherwise. A hidden tab asks
+every 15 seconds while a task is live and not at all otherwise (#404).
+Server-sent events or a WebSocket would deliver output a second sooner
+at the cost of connection state on both sides, reconnect logic, and one
+more axum feature. Tasks run for minutes; a 2 second
 delay is invisible, and a hidden tab costing nothing is worth more.
+
+**Telling the user a task ended (#404).** The page is for starting
+agents and leaving, so the hidden tab keeps the slow poll above, puts
+the number of tasks waiting on the user in the tab title, and, once the
+user presses Notify me, raises a desktop notification for each task
+that goes from live to ended while the tab is hidden. Notifications are
+opt in because a browser grants the permission only from a click, and
+the choice lives in `localStorage` next to the other form memory. The
+page compares task statuses between two polls, so the server keeps no
+record of what was announced; the cost is that a task which ends while
+`pact ui` or the tab is closed is not announced, only counted in the
+title on the next load. A visible tab raises nothing: the card moving
+to its new group is the signal.
 
 **The diff is built in a throwaway index.** The review pane must show
 what landing would bring: committed, uncommitted and untracked files
