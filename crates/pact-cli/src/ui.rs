@@ -564,6 +564,7 @@ fn task_detail(app: &App, task: &TaskRef) -> Result<serde_json::Value> {
     };
     Ok(json!({
         "log": log,
+        "replies": orchestrator.replies(&task.id),
         "workspace": workspace,
         "base": base,
         "patch": patch,

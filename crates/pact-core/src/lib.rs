@@ -1480,12 +1480,20 @@ impl Orchestrator {
         serde_json::from_str(&contents).ok()
     }
 
+    /// The replies the user has given this workspace's agent, oldest
+    /// first; empty when there are none (issue #400).
+    pub fn replies(&self, id: &str) -> Vec<String> {
+        std::fs::read_to_string(self.workspaces.replies_path(id))
+            .ok()
+            .and_then(|contents| serde_json::from_str(&contents).ok())
+            .unwrap_or_default()
+    }
+
     /// Appends `answer` to the replies the user has given this workspace's
     /// agent and returns the earlier ones, oldest first (issue #400).
     pub fn record_reply(&self, id: &str, answer: &str) -> Result<Vec<String>> {
         let path = self.workspaces.replies_path(id);
-        let earlier: Vec<String> =
-            std::fs::read_to_string(&path).ok().and_then(|contents| serde_json::from_str(&contents).ok()).unwrap_or_default();
+        let earlier = self.replies(id);
         let mut all = earlier.clone();
         all.push(answer.trim().to_string());
         if let Some(parent) = path.parent() {
