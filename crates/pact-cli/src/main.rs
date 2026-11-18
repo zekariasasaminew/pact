@@ -1332,7 +1332,7 @@ fn main() -> Result<()> {
                 // failure (1) and from clap's usage errors (2). The worst
                 // verdict across the commands decides, so one real failure
                 // beside an inconclusive check is still a failure.
-                let inconclusive = report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive);
+                let inconclusive = report.ownership.is_empty() && report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive);
                 std::process::exit(if inconclusive { 3 } else { 1 });
             }
         }
@@ -2809,7 +2809,14 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
             Err(err) => println!("unit #{}: FAILED before/during launch -- {err:#}", outcome.index),
         }
     }
+    for violation in &report.ownership {
+        println!("ownership: {violation}");
+    }
     for repair in &report.repairs {
+        let lane = match &repair.unit {
+            Some(unit) => format!("repair attempt {} ({unit})", repair.attempt),
+            None => format!("repair attempt {} (files no unit owns)", repair.attempt),
+        };
         match &repair.outcome.result {
             Ok((workspace, run)) => {
                 let duration = orchestrator
@@ -2817,14 +2824,13 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                     .map(|metadata| format!(" in {}s", metadata.ended_at.saturating_sub(metadata.started_at)))
                     .unwrap_or_default();
                 println!(
-                    "repair attempt {}: {}{duration}: {} ({})",
-                    repair.attempt,
+                    "{lane}: {}{duration}: {} ({})",
                     if run.success { "done" } else { "failed" },
                     run.summary,
                     if repair.committed { "committed" } else { "nothing committed" }
                 );
             }
-            Err(err) => println!("repair attempt {}: FAILED before/during launch -- {err:#}", repair.attempt),
+            Err(err) => println!("{lane}: FAILED before or during launch: {err:#}"),
         }
     }
     if let Some(batch) = &report.batch {
@@ -2873,6 +2879,11 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
         if let Some(batch) = &report.batch {
             println!("run: OK. Review with `pact diff {}`, land with `pact merge-all`, or push {}", batch.id, batch.branch);
         }
+    } else if !report.ownership.is_empty() {
+        println!(
+            "run: FAILED. {} file(s) were written by a lane that does not own them (listed above). Nothing was reverted; review the result with `pact diff <id>` before landing it",
+            report.ownership.len()
+        );
     } else if report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive) {
         println!(
             "run: INCONCLUSIVE. The lanes finished but a verification command fails on the base commit too, so it cannot judge them; \

@@ -33,8 +33,10 @@ pact run --agent copilot --plan saved-plan.json "Add Vitest tests for every file
 - `--verify` is repeatable and names the project-wide checks. pact runs each
   once on the untouched tree (baseline) and once on the combined result;
   workers check only their own files.
-- A regressed or failed check starts a repair lane in the same tree with
-  the failing output; `--repair-attempts` bounds it (default 1, 0 disables).
+- A regressed or failed check starts repair lanes in the same tree: each
+  failing file goes to the unit that owns it, the units' lanes run in
+  parallel, and failures in files no unit owns go to one extra lane.
+  `--repair-attempts` bounds the rounds (default 1, 0 disables).
 - Exit 0: every check passed or was fixed. Exit 1: a lane failed or a check
   still fails. Exit 3: inconclusive, a check already fails on the base commit.
 - `--max-units` defaults to what this machine can run at once;

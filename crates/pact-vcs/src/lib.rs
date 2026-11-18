@@ -2168,6 +2168,26 @@ pub fn changed_paths(dir: &Path) -> Result<Vec<String>> {
     Ok(String::from_utf8_lossy(&output.stdout).lines().filter_map(parse_porcelain_path).collect())
 }
 
+/// Every file in `dir`'s working tree that differs from commit `base`,
+/// committed on top of it or not, deletions included, plus every untracked
+/// file git does not ignore: one `/`-separated path per file, which is
+/// what `git add -A` and a commit on `base` would carry. Unlike
+/// `changed_paths`, an untracked directory is listed file by file
+/// (issue #409 compares these paths with the files each unit owns).
+pub fn changed_since(dir: &Path, base: &str) -> Result<Vec<String>> {
+    let mut files = std::collections::BTreeSet::new();
+    for args in [&["diff", "--name-only", "-z", base][..], &["ls-files", "--others", "--exclude-standard", "-z"][..]] {
+        let output = Command::new("git").args(args).current_dir(dir).output().with_context(|| format!("failed to spawn `git {}`", args.join(" ")))?;
+        if !output.status.success() {
+            bail!("`git {}` failed in {}: {}", args.join(" "), dir.display(), String::from_utf8_lossy(&output.stderr));
+        }
+        for path in String::from_utf8_lossy(&output.stdout).split('\0').filter(|p| !p.is_empty()) {
+            files.insert(path.replace('\\', "/"));
+        }
+    }
+    Ok(files.into_iter().collect())
+}
+
 fn short_id() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
 }
