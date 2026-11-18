@@ -49,6 +49,46 @@ pub struct ArbiterConfig {
 /// this, none of these fields survived past the terminal output and the
 /// raw JSONL agent log -- there was no queryable "what actually
 /// happened" record for a real spawn.
+/// A run's cost as the agent reported it (issue #300).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Usage {
+    pub premium_requests: f64,
+    /// `totalNanoAiu / 1e11`: one AI credit is 0.01 USD.
+    pub usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl Usage {
+    /// The cumulative usage in a Copilot CLI `session.usage_checkpoint`
+    /// event, `None` for any other line.
+    pub fn from_copilot_checkpoint(value: &serde_json::Value) -> Option<Usage> {
+        if value.get("type")?.as_str()? != "session.usage_checkpoint" {
+            return None;
+        }
+        let data = value.get("data")?;
+        let model = ["/lastActiveModel", "/promptCacheBreakState/lastActiveModel", "/modelCacheState/modelId"]
+            .iter()
+            .find_map(|pointer| data.pointer(pointer).and_then(|v| v.as_str()))
+            .map(str::to_string);
+        Some(Usage {
+            premium_requests: data.get("totalPremiumRequests").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            usd: data.get("totalNanoAiu").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1e11,
+            model,
+        })
+    }
+}
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} premium requests, {:.3} USD", self.premium_requests, self.usd)?;
+        if let Some(model) = &self.model {
+            write!(f, " ({model})")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunMetadata {
     pub workspace_id: String,
@@ -84,6 +124,11 @@ pub struct RunMetadata {
     /// own default and for records written before the field existed.
     #[serde(default)]
     pub model: Option<String>,
+    /// What the run cost, from the agent's own accounting (issue #300):
+    /// Copilot CLI's last `session.usage_checkpoint`. `None` for agents
+    /// that report nothing pact parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
     /// The model the agent reported running the lane on, which can differ
     /// from `model` when the agent silently swaps one (issue #374). Known
     /// for ACP lanes only; `None` when the agent did not say.
@@ -1249,6 +1294,7 @@ impl Orchestrator {
         };
         let started_at = unix_now();
         on_event(&AgentEvent::Phase("running agent".to_string()));
+        let mut last_usage: Option<Usage> = None;
         let run_result = pact_agents::run_and_stream(
             supervisor,
             &launch.program,
@@ -1261,6 +1307,11 @@ impl Orchestrator {
                 if let AgentEvent::CoordStatus { name, status } = event {
                     if name == coord_name {
                         coord_last_status = Some(status.clone());
+                    }
+                }
+                if let AgentEvent::Other(value) = event {
+                    if let Some(usage) = Usage::from_copilot_checkpoint(value) {
+                        last_usage = Some(usage);
                     }
                 }
                 on_event(event);
@@ -1305,6 +1356,7 @@ impl Orchestrator {
             },
             coord_status: coord_last_status,
             model: options.model.map(str::to_string),
+            usage: last_usage,
             effective_model: None,
             runtime: LaneRuntime::Process.as_str().to_string(),
             // Fails closed (assumes touched) on a `git status` error,
@@ -1517,6 +1569,7 @@ impl Orchestrator {
             coord_status,
             model: requested_model.map(str::to_string),
             effective_model: effective_model.clone(),
+            usage: None,
             runtime: LaneRuntime::Acp.as_str().to_string(),
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             report: reported(report_contract, &run_result),
@@ -3001,6 +3054,7 @@ mod tests {
             summary: "Created foo.rs".to_string(),
             coord_status: Some("connected".to_string()),
             model: None,
+            usage: None,
             effective_model: None,
             runtime: String::new(),
             files_touched: true,
@@ -3032,6 +3086,23 @@ mod tests {
     }
 
     #[test]
+    fn a_copilot_usage_checkpoint_reads_as_requests_dollars_and_model() {
+        // Trimmed from a real Copilot CLI 1.0.90 log (issue #300).
+        let checkpoint = serde_json::json!({
+            "type": "session.usage_checkpoint",
+            "data": {
+                "totalNanoAiu": 154679050000u64,
+                "totalPremiumRequests": 15,
+                "modelCacheState": { "modelId": "claude-opus-5" },
+                "promptCacheBreakState": { "lastActiveModel": "claude-opus-5", "pendingRewriteSources": [] }
+            }
+        });
+        let usage = Usage::from_copilot_checkpoint(&checkpoint).unwrap();
+        assert_eq!(usage.to_string(), "15 premium requests, 1.547 USD (claude-opus-5)");
+        assert!(Usage::from_copilot_checkpoint(&serde_json::json!({ "type": "assistant.message" })).is_none());
+    }
+
+    #[test]
     fn run_metadata_round_trips_with_no_coord_status() {
         // A run with no coordination config attached at all -- distinct
         // from a coord status that was reported but never settled.
@@ -3049,6 +3120,7 @@ mod tests {
             summary: "failed to run: spawn error".to_string(),
             coord_status: None,
             model: None,
+            usage: None,
             effective_model: None,
             runtime: String::new(),
             files_touched: false,

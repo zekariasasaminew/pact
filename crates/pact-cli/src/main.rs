@@ -1191,6 +1191,7 @@ fn main() -> Result<()> {
             });
 
             let report = SpawnManyReport::new(requested, results);
+            let mut batch_usage: Option<(f64, f64)> = None;
             for outcome in &report.outcomes {
                 match &outcome.result {
                     Ok((workspace, run)) => {
@@ -1209,6 +1210,11 @@ fn main() -> Result<()> {
                         // surfaced here before.
                         if let Some(meta) = orchestrator.run_metadata(&workspace.id) {
                             println!("  duration: {}s", meta.ended_at.saturating_sub(meta.started_at));
+                            if let Some(usage) = &meta.usage {
+                                println!("  usage: {usage}");
+                                let (requests, usd) = batch_usage.unwrap_or((0.0, 0.0));
+                                batch_usage = Some((requests + usage.premium_requests, usd + usage.usd));
+                            }
                         }
                         if let Some(reports) = orchestrator.dependency_prep_report(&workspace.id) {
                             println!("  dependencies: {}", dependency_summary_line(&reports));
@@ -1229,6 +1235,9 @@ fn main() -> Result<()> {
             // bool tracked alongside the loop above) makes it structurally
             // impossible to report 0 while requested != created.
             println!("{}", report.summary_line());
+            if let Some((requests, usd)) = batch_usage {
+                println!("batch usage: {requests} premium requests, {usd:.3} USD");
+            }
             let exit_code = report.exit_code();
             if exit_code != 0 {
                 std::process::exit(exit_code);
@@ -1994,6 +2003,9 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
             }
             println!("  command: {}", shell_command(&run.program, &run.args));
             println!("  {} in {duration}s: {}", if run.exit_success { "succeeded" } else { "failed" }, run.summary);
+            if let Some(usage) = &run.usage {
+                println!("  usage: {usage}");
+            }
             if run.exit_success && !run.files_touched {
                 println!(
                     "  note: reported success but touched zero files -- could be a legitimate \
@@ -3236,6 +3248,10 @@ fn agent_label(kind: AgentKind) -> &'static str {
 /// there before any filtering).
 const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
     "session.background_tasks_changed",
+    // Copilot CLI's cumulative cost record: a 3-5 KB blob of cache and
+    // prompt-segment hashes per checkpoint (issue #300). Its totals are
+    // kept in the run record's `usage` instead.
+    "session.usage_checkpoint",
     "tool.execution_partial_result",
     // Per-token deltas streamed while a tool call's arguments are being
     // generated -- confirmed the dominant source of remaining noise
