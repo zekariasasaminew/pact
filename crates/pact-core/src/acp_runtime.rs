@@ -159,6 +159,7 @@ impl AcpBatch {
                 cwd: Some(repo_root.to_path_buf()),
             })
             .map_err(|err| anyhow!("starting `{name} --acp`: {err}"))?;
+            pact_agents::register_pid(runtime.pid());
             let info = runtime.initialize_result();
             on_event(&AgentEvent::Phase(format!(
                 "{name} ACP server up in {:.1}s ({} {}, pid {})",
@@ -185,7 +186,9 @@ impl AcpBatch {
 
     pub(crate) fn shutdown(self) {
         for (_, runtime) in self.runtimes {
+            let pid = runtime.pid();
             runtime.shutdown();
+            pact_agents::forget_pid(pid);
         }
         self.coord.shutdown();
     }
