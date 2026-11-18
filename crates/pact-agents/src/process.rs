@@ -37,6 +37,61 @@ pub struct RunOutcome {
     pub summary: String,
 }
 
+/// How a `run_shell_logged` command ended.
+#[derive(Debug)]
+pub struct ShellRun {
+    /// `None` when the command was killed at its timeout.
+    pub status: Option<std::process::ExitStatus>,
+    pub timed_out: bool,
+}
+
+/// Runs `cmd` through the platform shell (`cmd /C`, `sh -c`) in `cwd`
+/// with stdin closed and `CI=true`, both output streams appended to one
+/// file at `log` in the order they were written, and kills the whole
+/// process tree once `timeout` passes. See DESIGN.md ("pact-core >
+/// Verification timeout", issue #410).
+pub fn run_shell_logged(cmd: &str, cwd: &Path, log: &Path, timeout: Duration) -> Result<ShellRun> {
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stdout = std::fs::File::create(log).with_context(|| format!("creating log file {}", log.display()))?;
+    let stderr = stdout.try_clone().with_context(|| format!("sharing log file {}", log.display()))?;
+    let mut command = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    command
+        .current_dir(cwd)
+        .env("CI", "true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    let mut group_builder = command.group();
+    #[cfg(windows)]
+    group_builder.kill_on_drop(true);
+    let mut child = group_builder.spawn().with_context(|| format!("failed to spawn `{cmd}`"))?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().with_context(|| format!("waiting for `{cmd}`"))? {
+            // Same sweep as `run_and_stream`: the shell is gone, anything it
+            // left behind in its group is not.
+            let _ = child.kill();
+            return Ok(ShellRun { status: Some(status), timed_out: false });
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(ShellRun { status: None, timed_out: true });
+        }
+        std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+    }
+}
+
 /// Builds the `Command` used to launch an agent CLI. On Windows, resolving
 /// straight to a real, directly-executable target (a native `.exe`, or the
 /// interpreter+script a `.cmd` shim ultimately execs -- see
