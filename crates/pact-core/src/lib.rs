@@ -7,6 +7,7 @@ mod admission;
 pub mod fleet;
 mod land;
 pub mod run;
+pub mod verify_output;
 pub use land::{DiscardOutcome, EntryState, WorkspaceEntry};
 pub use acp_runtime::{effective_runtime, LaneRuntime};
 pub use admission::{available_memory_mb, decide, lanes_that_fit, suggested_units, Admission, AdmissionDecision, AdmissionPolicy, MAX_AUTO_UNITS, MIN_AUTO_UNITS};
