@@ -3058,7 +3058,7 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
     }
     if report.succeeded() {
         if let Some(batch) = &report.batch {
-            println!("run: OK. Review with `pact diff {}`, land with `pact merge-all`, or push {}", batch.id, batch.branch);
+            println!("run: OK. Review with `pact diff {0}`, then land it on your branch with `pact land {0}` (add --pr for a pull request)", batch.id);
         }
     } else if !report.ownership.is_empty() {
         println!(

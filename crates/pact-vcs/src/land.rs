@@ -68,16 +68,17 @@ impl WorkspaceManager {
             .with_context(|| format!("unexpected `git rev-list --count` output for {branch}"))
     }
 
-    /// Commits a workspace, refusing a member of a shared tree, and counts
+    /// Commits a workspace, refusing a lane of a shared tree, and counts
     /// what its branch holds beyond the checked-out branch: the part
     /// `land_workspace` and a pull-request landing have in common. Nothing
-    /// is merged or removed yet, so `kind` is `NothingToLand`.
+    /// is merged or removed yet, so `kind` is `NothingToLand`. A shared-tree
+    /// batch lands as a whole, every lane's work in its one commit.
     pub fn prepare_landing(&self, id: &str) -> Result<LandOutcome> {
         let workspace = self.get_workspace(id)?;
-        if workspace.shared_batch.is_some() || !self.lanes_of(id)?.is_empty() {
+        if let Some(batch) = &workspace.shared_batch {
             bail!(
-                "workspace {id} is part of a shared tree, which holds several lanes' work in one worktree. \
-                 Land the whole batch with `pact merge-all` instead."
+                "workspace {id} is a lane of shared-tree batch {batch}, whose worktree holds every lane's work. \
+                 Land the whole batch with `pact land {batch}`."
             );
         }
         let target_branch = self.current_branch()?;
@@ -105,8 +106,17 @@ impl WorkspaceManager {
             self.merge_into_checkout(id, &outcome.branch, &outcome.target_branch)?;
             outcome.kind = if fast_forward { LandKind::FastForward } else { LandKind::Merge };
         }
-        self.remove_workspace(id, false, false)?;
+        self.remove_landed(id, false)?;
         Ok(outcome)
+    }
+
+    /// Removes a landed workspace, and first the lanes of a shared-tree
+    /// batch, since the batch's own teardown refuses while lanes remain.
+    pub fn remove_landed(&self, id: &str, keep_branch: bool) -> Result<()> {
+        for lane in self.lanes_of(id)? {
+            self.remove_workspace(&lane.id, false, false)?;
+        }
+        self.remove_workspace(id, keep_branch, false)
     }
 
     fn merge_into_checkout(&self, id: &str, branch: &str, target_branch: &str) -> Result<()> {

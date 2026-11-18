@@ -67,7 +67,8 @@ dependencies and those baselines are prepared while the planner works.
 Plans and briefs are
 persisted under the state dir (`meta/plans/`, `briefs/`), the planner's
 session under `logs/planner-*.jsonl`; the result is
-a branch to review with `pact diff`, land with `pact merge-all`, or push.
+a batch to review with `pact diff <batch>` and put on your branch with
+`pact land <batch>` (or `--pr` for a pull request).
 Measured on the benchmark (arm R2, issue #308): `pact run` on a 39-file
 test-writing task finished in 12.5 min against 15.8 for Copilot's own
 in-process sub-agents, 21% cheaper, with higher coverage, 26% less peak
@@ -145,8 +146,11 @@ has not moved since the task started, a merge commit otherwise. Then it
 removes the worktree and the `pact/<id>` branch. If the merge conflicts,
 it is aborted, your checkout is left as it was, and the workspace stays,
 now committed, so nothing is lost; merge it by hand, try `--pr`, or
-discard it. `land` refuses while the workspace's agent is still running,
-and it does not take a lane of a shared tree (`merge-all` lands those).
+discard it. `land` refuses while the workspace's agent is still running.
+A shared-tree batch, such as the result of `pact run`, lands as a whole:
+`pact land <batch>` lands every lane's work in its one commit and removes
+the lanes with it, and refuses while any lane's agent runs. A single lane
+is refused with the batch id to land instead (issue #440).
 
 With `--pr` nothing is merged locally. The branch is pushed to `origin`
 and `gh pr create` opens a pull request against your checked-out branch,
