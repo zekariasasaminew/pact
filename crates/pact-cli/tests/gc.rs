@@ -25,7 +25,13 @@ fn init_repo() -> PathBuf {
 }
 
 fn gc(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_pact")).args(["--repo", repo.to_str().unwrap(), "gc"]).args(args).output().unwrap();
+    let coord = repo.with_extension("coord");
+    let out = Command::new(env!("CARGO_BIN_EXE_pact"))
+        .args(["--repo", repo.to_str().unwrap(), "gc"])
+        .args(args)
+        .env("PACT_COORD_DIR", &coord)
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).to_string()
 }
@@ -59,6 +65,19 @@ fn gc_removes_what_no_workspace_uses_and_keeps_the_rest() {
     }
     assert!(live.path.exists(), "the live worktree is untouched");
 
+    // Issue #416: a coordination directory whose repository is gone goes too.
+    let coord = repo.with_extension("coord");
+    let orphan = coord.join("0123456789abcdef");
+    let owned = coord.join("fedcba9876543210");
+    for (dir, owner) in [(&orphan, repo.with_extension("deleted")), (&owned, repo.clone())] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(pact_coord::OWNER_FILE), owner.to_string_lossy().as_bytes()).unwrap();
+    }
+    let pruned = gc(&repo, &["--older-than", "0"]);
+    assert!(pruned.contains("which no longer exists") && !orphan.exists(), "{pruned}");
+    assert!(owned.exists(), "a coordination directory whose repository exists stays");
+
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&state);
+    let _ = std::fs::remove_dir_all(&coord);
 }
