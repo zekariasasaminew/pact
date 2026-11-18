@@ -5414,6 +5414,21 @@ half of #307 is implemented here; piping an over-long *single* brief to
 the agent over stdin (for one brief above the limit, which the benchmark
 did not hit) is left as follow-up.
 
+### Copilot usage checkpoints (issue #300)
+
+Copilot CLI emits `session.usage_checkpoint` events: 3 to 5 KB of cache
+state and prompt-segment hashes each, printed as `[other]` lines that
+drowned a `spawn-many` stream. They also carry the one thing a user
+comparing pact with a single session needs: cumulative
+`totalPremiumRequests` and `totalNanoAiu` (USD is `totalNanoAiu / 1e11`,
+one AI credit being 0.01 USD), with the model under
+`promptCacheBreakState.lastActiveModel` or `modelCacheState.modelId`
+(field paths read from real 1.0.90 logs). The type joins the suppressed
+list, and the process lane keeps the last checkpoint's totals as the
+run record's `usage`, which `inspect` and the `spawn-many` summary print,
+the latter with a batch total. ACP lanes report no such event, so their
+`usage` stays empty.
+
 ### Streamed event filtering (issue #38)
 
 The Copilot CLI adapter recognizes 4 event types and passes everything
