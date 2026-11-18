@@ -1381,6 +1381,20 @@ no timestamp of their own, and without one the log said what happened
 but not when, which sent the first timing analysis back to Copilot's
 own event file, the thing the log was meant to replace.
 
+A rejected plan used to go back to a new agent (issue #413): `ask_agent`
+started a fresh ACP process and session, or a fresh headless process,
+for every attempt, and `repair_prompt` carried only the previous plan
+and its problems. The retrying planner never saw the task, the rules or
+the test anchors, so it could shuffle the JSON but not re-split the
+work, and it re-read the repository from scratch at the cost of a whole
+planning turn. `converse` now holds one planner conversation for every
+attempt: under ACP one process and one session, so the short repair
+prompt lands in a conversation that already has everything; for the
+process runtime, where a turn remembers nothing, the retry is the whole
+first prompt followed by the repair. Resuming a process agent's own
+session would avoid resending the prompt, but each CLI resumes
+differently and the self-contained prompt is correct for all of them.
+
 The same timeline showed the shared tree, its dependency prep and the
 29 s baseline waiting behind planning for no reason (issue #353): none
 of them depend on the plan, and the batch workspace only used the plan
@@ -1469,6 +1483,23 @@ fake agent as both planner (a canned reply for prose prompts) and workers
 (JSON write tasks inside the rendered briefs), never a model; the live
 check against Copilot CLI produced a valid two-unit plan in one attempt
 and 36 s.
+
+#### Uncommitted changes (issue #411)
+
+The planner runs in the user's checkout and reads whatever is there;
+the lanes run in a worktree of `HEAD`. Uncommitted or untracked work was
+in one and not the other, so a plan could rest on files no worker could
+see, and the result branch was cut from a commit without what the user
+had been looking at. A verification that depended on such a file read
+as INCONCLUSIVE and pointed at generated files (#301), the wrong
+diagnosis. `run_task` now checks `git status` before anything else and
+refuses with the list of changed paths; `--allow-dirty` proceeds and
+the report repeats the list. Refusing is the default because the
+alternatives each surprise someone: copying the changes into the
+shared tree commits work the user had not chosen to commit, and
+planning inside the shared tree instead of the checkout would cost the
+overlap of tree preparation with planning (#353) while still leaving
+the result branch without the user's changes.
 
 #### Verification timeout (issue #410)
 

@@ -188,9 +188,19 @@ fn run_sends_a_bad_plan_back_and_gives_up_after_the_retries() {
         { "name": "b", "files": ["shared.txt"], "brief": write_task("shared.txt", "s", "b") }
     ]);
     let reply = write_reply(&shim, &plan_reply(overlapping, None));
+    let acp_log = shim.join("acp-methods.log");
 
-    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--plan-retries", "1", "Do things"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_pact"))
+        .args(["--repo", repo.to_str().unwrap(), "run", "--agent", "copilot", "--plan-retries", "1", "Do things"])
+        .env("PATH", path_with_shim_first(&shim))
+        .env("FAKE_ACP_REPLY_FILE", &reply)
+        .env("FAKE_ACP_LOG", &acp_log)
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "an unexecutable plan must fail the run:\n{}", stdout(&out));
+    let methods = std::fs::read_to_string(&acp_log).unwrap();
+    let count = |method: &str| methods.lines().filter(|l| *l == method).count();
+    assert_eq!((count("initialize"), count("session/new"), count("session/prompt")), (1, 1, 2), "both attempts share one process and one session (#413):\n{methods}");
     let text = format!("{}{}", stdout(&out), stderr(&out));
     assert!(text.contains("still cannot run after 2 attempt(s)"), "{text}");
     assert!(text.contains("\"shared.txt\" is owned by more than one unit (a, b)"), "{text}");
@@ -537,6 +547,31 @@ fn run_lists_the_files_a_failing_check_names() {
     let text = stdout(&out);
     assert!(text.contains("    failing files (2):\n      alpha.txt\n      src.ts\n    full output: "), "{text}");
     assert!(!text.contains("    noise"), "the tail is replaced by the file list:\n{text}");
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
+fn run_refuses_a_dirty_checkout_unless_allowed() {
+    // Issue #411: the planner reads the live checkout, the lanes start from
+    // HEAD; uncommitted work would be seen by one and not the other.
+    let repo = init_repo("dirty");
+    let shim = shim_dir();
+    std::fs::write(repo.join("local.txt"), "work in progress\n").unwrap();
+    std::fs::write(repo.join("README.md"), "# edited\n").unwrap();
+    let reply = write_reply(&shim, &plan_reply(good_units(), None));
+
+    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run", "Add two text files"]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("2 uncommitted change(s) in your checkout: ") && err.contains("local.txt") && err.contains("README.md"), "{err}");
+    assert!(err.contains("--allow-dirty"), "{err}");
+    assert!(!stdout(&out).contains("[planner] [phase] planning"), "the planner never ran:\n{}", stdout(&out));
+
+    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run", "--allow-dirty", "Add two text files"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("warning: --allow-dirty: the lanes start from HEAD, without 2 uncommitted change(s) in your checkout: "), "{}", stdout(&out));
+
     cleanup(&repo);
     cleanup(&shim);
 }
