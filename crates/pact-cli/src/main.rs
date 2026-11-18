@@ -1992,7 +1992,7 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
                 (Some(requested), None) => println!("  model: {requested} (requested; the agent did not report what it ran)"),
                 (None, None) => {}
             }
-            println!("  command: {} {}", run.program, run.args.join(" "));
+            println!("  command: {}", shell_command(&run.program, &run.args));
             println!("  {} in {duration}s: {}", if run.exit_success { "succeeded" } else { "failed" }, run.summary);
             if run.exit_success && !run.files_touched {
                 println!(
@@ -2787,6 +2787,30 @@ fn register_skill_with_copilot(repo_root: &Path) {
     }
 }
 
+/// `program args...` as the current platform's shell would need it typed
+/// (issue #303): an argument holding whitespace or a shell metacharacter
+/// is quoted, so the preview is the argv actually passed and can be
+/// pasted to reproduce the launch.
+fn shell_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program).chain(args.iter().map(String::as_str)).map(|arg| shell_quote(arg, cfg!(windows))).collect::<Vec<_>>().join(" ")
+}
+
+fn shell_quote(arg: &str, windows: bool) -> String {
+    if windows {
+        let special = |c: char| c.is_whitespace() || "\"&|<>^()%!".contains(c);
+        if !arg.is_empty() && !arg.chars().any(special) {
+            return arg.to_string();
+        }
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        let special = |c: char| c.is_whitespace() || "'\"\\$`;&|<>()*?[]#~{}!".contains(c);
+        if !arg.is_empty() && !arg.chars().any(special) {
+            return arg.to_string();
+        }
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 fn print_spawn_preview(preview: &pact_core::SpawnPreview, deps: pact_core::DepsMode) {
     println!("would create workspace {} ({})", preview.workspace_id, preview.branch);
     println!("  path: {}", preview.path.display());
@@ -2805,7 +2829,7 @@ fn print_spawn_preview(preview: &pact_core::SpawnPreview, deps: pact_core::DepsM
     for (key, value) in &preview.env {
         println!("  env: {key}={value}");
     }
-    println!("  command: {} {}", preview.program, preview.args.join(" "));
+    println!("  command: {}", shell_command(&preview.program, &preview.args));
 }
 
 /// `--deps`/`--no-deps`/`pact.toml`'s `defaults.deps` folded into one
@@ -3538,6 +3562,19 @@ mod tests {
     fn parse_task_spec_requires_a_prefix_when_no_default_is_set() {
         let err = parse_task_spec("fix the bug", None).unwrap_err();
         assert!(err.to_string().contains("must be in the form"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn preview_arguments_are_quoted_the_way_each_shell_reads_them() {
+        assert_eq!(shell_quote("--allow-all-tools", true), "--allow-all-tools");
+        assert_eq!(shell_quote("unit A", true), "\"unit A\"");
+        assert_eq!(shell_quote("say \"hi\"", true), "\"say \\\"hi\\\"\"");
+        assert_eq!(shell_quote("shell(npm install:*)", true), "\"shell(npm install:*)\"");
+        assert_eq!(shell_quote("", true), "\"\"");
+        assert_eq!(shell_quote("unit A", false), "'unit A'");
+        assert_eq!(shell_quote("it's", false), "'it'\\''s'");
+        assert_eq!(shell_quote("shell(npm:*)", false), "'shell(npm:*)'");
+        assert_eq!(shell_quote("@C:/x/y.json", false), "@C:/x/y.json");
     }
 
     #[test]
