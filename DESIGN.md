@@ -2774,6 +2774,23 @@ make every other live child unkillable on Ctrl-C. A failure to install the
 handler at all (e.g. an outer caller already installed one) is logged, not
 fatal -- the agent process(es) just won't be killed on Ctrl-C in that case.
 
+That "logged, not fatal" case turned out to be the normal one (issue
+#366). `ctrlc` allows one handler per process, and `pact run` creates
+several supervisors in one process (the planner's, one per
+`spawn_many_in`, one per repair round), so only the first supervisor's
+children were reachable; every lane's agent survived a Ctrl-C. The ACP
+runtime's shared agent process was never registered anywhere, and
+`std::process::exit(130)` runs no destructors, so its `kill_on_drop`
+never fired either. Now every `Supervisor` is a handle on one
+process-wide registry, created with the handler on first use, and the
+registry also holds bare pids (`register_pid`, used for each shared ACP
+process from start to shutdown) that the handler kills with their whole
+tree. The handler's body is `kill_everything`, tested directly in its
+own test binary since sending a real Ctrl-C to a test process would
+reach the test runner too. Slots are indices into the shared registry
+and are never reused, so a long `pact ui` session accumulates one empty
+slot per finished lane; that is a few bytes each.
+
 ### Orphaned grandchild cleanup, and a deeper pipe-inheritance root cause (issue #237)
 
 A real production `spawn-many` run found 7 `copilot` processes still
