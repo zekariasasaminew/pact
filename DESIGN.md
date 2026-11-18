@@ -5668,6 +5668,16 @@ passes, and `pact spawn --ag<TAB>` correctly completed to `--agent`.
 
 ### `pact doctor` (issue #18)
 
+Dead Copilot skill directories (issue #304). Before #294, every `cargo
+test` on a machine with Copilot installed registered a temporary
+repository's `SKILL.md`, and the entries outlived the directories in
+`settings.json`. `doctor` now reads `$COPILOT_HOME/settings.json` (else
+`~/.copilot/settings.json`), lists `skillDirectories` that no longer
+exist (also in `--json`), and removes exactly those with
+`--fix-skill-dirs`, rewriting the file with every other key kept; it
+stays read-only without the flag. `init --register-skill` now refuses a
+repository under the temp directory, the source of every such entry.
+
 Reuses `pact_deps::run_shimmed` (`pact-deps`'s existing `cmd /C`
 Windows-shim-resolution helper, re-exported for this rather than
 re-derived) to run each tool's real version-check invocation and reports

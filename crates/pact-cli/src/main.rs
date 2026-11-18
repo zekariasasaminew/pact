@@ -830,8 +830,9 @@ enum Command {
     /// Check whether your environment is actually ready for `pact`: is
     /// `git` new enough for `worktree`, which agent CLIs (claude, copilot,
     /// codex, gemini, agy) are installed, and which package-manager CLIs
-    /// `pact-deps` already knows how to prep. Read-only -- doesn't install
-    /// or fix anything. A missing agent CLI or package manager is
+    /// `pact-deps` already knows how to prep, and whether Copilot's
+    /// settings list skill directories that no longer exist. Read-only
+    /// unless --fix-skill-dirs is given. A missing agent CLI or package manager is
     /// informational, not a failure, since not everyone needs all of them;
     /// only a missing (or too-old) `git` makes this exit non-zero.
     Doctor {
@@ -839,6 +840,10 @@ enum Command {
         /// report -- for CI diagnostics and bug reports.
         #[arg(long)]
         json: bool,
+        /// Remove skillDirectories entries that no longer exist from
+        /// Copilot's settings.json.
+        #[arg(long)]
+        fix_skill_dirs: bool,
     },
     /// Run independent tasks from a TOML file, each in a workspace and
     /// branch of its own and each in its own repository if the file says
@@ -873,8 +878,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Command::Doctor { json } = cli.command {
-        return run_doctor(json);
+    if let Command::Doctor { json, fix_skill_dirs } = cli.command {
+        return run_doctor(json, fix_skill_dirs);
     }
 
     if let Command::Demo = cli.command {
@@ -2478,7 +2483,55 @@ fn doctor_group_json(checks: &[DoctorCheck]) -> serde_json::Value {
     )
 }
 
-fn run_doctor(json: bool) -> Result<()> {
+/// Copilot CLI's user settings: `$COPILOT_HOME/settings.json`, else
+/// `~/.copilot/settings.json`.
+fn copilot_settings_path() -> Option<PathBuf> {
+    let home = match std::env::var_os("COPILOT_HOME").filter(|v| !v.is_empty()) {
+        Some(home) => PathBuf::from(home),
+        None => dirs::home_dir()?.join(".copilot"),
+    };
+    Some(home.join("settings.json"))
+}
+
+/// `skillDirectories` entries in a Copilot settings file that no longer
+/// exist on disk (issue #304): left behind by pre-#294 test runs, which
+/// registered temporary repositories.
+fn dead_skill_dirs(settings: &serde_json::Value) -> Vec<String> {
+    settings
+        .get("skillDirectories")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .filter(|path| !Path::new(path).exists())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The doctor's skill-directory check: lists dead entries, and with `fix`
+/// removes them from the file.
+fn check_skill_dirs(fix: bool) -> Vec<String> {
+    let Some(path) = copilot_settings_path() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    let dead = dead_skill_dirs(&settings);
+    if fix && !dead.is_empty() {
+        if let Some(list) = settings.get_mut("skillDirectories").and_then(|v| v.as_array_mut()) {
+            list.retain(|v| !v.as_str().is_some_and(|p| dead.iter().any(|d| d == p)));
+        }
+        match serde_json::to_string_pretty(&settings) {
+            Ok(text) => {
+                if let Err(err) = std::fs::write(&path, text + "\n") {
+                    eprintln!("could not rewrite {}: {err}", path.display());
+                }
+            }
+            Err(err) => eprintln!("could not serialize {}: {err}", path.display()),
+        }
+    }
+    dead
+}
+
+fn run_doctor(json: bool, fix_skill_dirs: bool) -> Result<()> {
     let git_check = DoctorCheck { label: "git", program: "git", args: &["--version"] };
     let git_version = doctor_check_version(&git_check);
     // An unparseable-but-present version string is treated as "can't
@@ -2491,6 +2544,7 @@ fn run_doctor(json: bool) -> Result<()> {
         None => false,
     };
     let git_ok = git_version.is_some() && worktree_ok;
+    let dead_skills = check_skill_dirs(fix_skill_dirs);
 
     if json {
         let report = serde_json::json!({
@@ -2503,6 +2557,7 @@ fn run_doctor(json: bool) -> Result<()> {
             "arch": std::env::consts::ARCH,
             "agent_clis": doctor_group_json(AGENT_CHECKS),
             "package_managers": doctor_group_json(PACKAGE_MANAGER_CHECKS),
+            "copilot_dead_skill_directories": dead_skills,
         });
         println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("error serializing result: {e}")));
         if !git_ok {
@@ -2527,6 +2582,18 @@ fn run_doctor(json: bool) -> Result<()> {
     print_doctor_group("agent CLIs", AGENT_CHECKS);
     println!();
     print_doctor_group("package managers", PACKAGE_MANAGER_CHECKS);
+    if !dead_skills.is_empty() {
+        let settings = copilot_settings_path().map(|p| p.display().to_string()).unwrap_or_default();
+        println!();
+        if fix_skill_dirs {
+            println!("copilot skills: removed {} skillDirectories entr{} that no longer exist from {settings}:", dead_skills.len(), if dead_skills.len() == 1 { "y" } else { "ies" });
+        } else {
+            println!("copilot skills: {settings} lists skillDirectories that no longer exist (remove them, or run `pact doctor --fix-skill-dirs`):");
+        }
+        for dir in &dead_skills {
+            println!("  {dir}");
+        }
+    }
 
     if !git_ok {
         std::process::exit(1);
@@ -2685,6 +2752,17 @@ fn register_skill_with_detected_agents(repo_root: &Path, installed: &[&'static s
 }
 
 fn register_skill_with_copilot(repo_root: &Path) {
+    // Issue #304: a path under the temp directory is gone soon, and a
+    // registered dead path stays in Copilot's settings.json for good.
+    if let (Ok(repo), Ok(temp)) = (repo_root.canonicalize(), std::env::temp_dir().canonicalize()) {
+        if repo.starts_with(&temp) {
+            eprintln!(
+                "not registering SKILL.md with copilot: {} is under the temp directory, so the registration would outlive it",
+                repo_root.display()
+            );
+            return;
+        }
+    }
     // `copilot` ships as a `.cmd` shim on Windows -- `std::process::
     // Command` doesn't consult PATHEXT the way a real shell does, so a
     // direct spawn fails with "program not found" even though `copilot`
