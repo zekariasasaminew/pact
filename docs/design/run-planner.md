@@ -528,3 +528,23 @@ each workspace with its run record. `state` is derived, not stored:
 `running` when the recorded pid is alive, else `finished` or `failed`
 from the run record's exit status, else `idle`. The GUI (#390) reads
 the same function, so the CLI and the GUI cannot disagree.
+
+### Live check against real Copilot CLI (2026-11-18)
+
+Three `pact run`s on a scratch Python repo (two modules, two unittest
+files), `--agent copilot --model claude-haiku-5.5`, ACP runtime, Copilot
+CLI 1.0.106 and then 1.0.114 (it updated itself between runs).
+
+- Planned run: the planner made 2 units in 15 s on its first attempt,
+  the lanes finished in 9 and 11 s, one commit, verify passed.
+- Dirty checkout (#411): a `__pycache__` left by running the tests by
+  hand was refused with the list, as designed.
+- Repair (#372, #373): a `--plan` whose unit changed `add` to multiply
+  regressed `python -m unittest discover`; one repair lane went to the
+  owning unit, fixed `calc.py` in 14 s, and the re-verify passed.
+- Ownership (#409): real `edit` tool calls carry `locations` with the
+  absolute path inside the tree, which is what `edits_in_log` reads, so
+  cross-unit attribution works on real data. A cross-unit write itself
+  was not produced: told by its brief to also edit a file another unit
+  owned, Haiku declined and reported it as left undone, so the violation
+  report is still exercised by the fake agent only.

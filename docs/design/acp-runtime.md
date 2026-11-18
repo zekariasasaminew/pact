@@ -279,3 +279,19 @@ replays it after the turn, which is enough for two sessions prompted
 concurrently to both complete. The integration tests drive the blocking
 `AcpRuntime` from real threads, because that is the surface pact-core
 will use.
+
+### Model selection against real Copilot CLI (2026-11-18)
+
+`spawn-many --runtime acp --model no-such-model` against Copilot CLI
+1.0.106 failed before any lane started, listing the models Copilot's
+`model` config option offers; no prompt was sent. With
+`claude-haiku-5.5` every lane and the planner recorded it as both
+`model` and `effective_model`. Copilot lists `auto` twice in that
+option (a recommended entry and the full list), so `offered_models`
+keeps the first occurrence of each value.
+
+Usage under ACP: Copilot sends `usage_update` with only the context
+window (`used` and `size` tokens), and the `session/prompt` response
+carries only `stopReason`. There is no premium-request or cost figure on
+the ACP side, so an ACP lane's `usage` stays empty (#300); each model
+entry's `_meta.copilotUsage` multiplier is the closest hint.
