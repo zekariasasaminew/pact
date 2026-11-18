@@ -570,9 +570,6 @@ impl WorkspaceManager {
             bail!("workspace {} is itself a lane; lanes can only be added to a batch workspace", batch.id);
         }
         let id = workspace_id(task, name);
-        if self.meta_path(&id).exists() {
-            bail!("a workspace named '{id}' already exists -- lane names must be unique");
-        }
         let lane = Workspace {
             id: id.clone(),
             path: batch.path.clone(),
@@ -586,8 +583,16 @@ impl WorkspaceManager {
             shared_batch: Some(batch.id.clone()),
             acp_session: None,
         };
-        std::fs::write(self.meta_path(&id), serde_json::to_vec_pretty(&lane)?)
-            .context("writing lane metadata")?;
+        // `create_new` makes the uniqueness check and the write one step,
+        // so lanes created concurrently under one name cannot both pass.
+        let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(self.meta_path(&id)) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                bail!("a workspace named '{id}' already exists -- lane names must be unique")
+            }
+            Err(err) => return Err(err).context("creating lane metadata"),
+        };
+        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&lane)?).context("writing lane metadata")?;
         Ok(lane)
     }
 
@@ -2212,13 +2217,19 @@ const MAX_SLUG_LEN: usize = 32;
 /// given, unchanged.
 fn workspace_id(task: &str, name: Option<&str>) -> String {
     if let Some(name) = name {
-        return slugify(name);
+        return name_slug(name);
     }
     let suffix = short_id();
     match slugify(leading_phrase(task)) {
         slug if slug.is_empty() => suffix,
         slug => format!("{slug}-{suffix}"),
     }
+}
+
+/// The workspace id an explicit `--name` (or a `pact run` unit name)
+/// becomes, so callers can check names for collisions the way ids collide.
+pub fn name_slug(name: &str) -> String {
+    slugify(name)
 }
 
 /// The leading clause/sentence of `task` -- issue #271: a real task
