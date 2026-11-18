@@ -1466,6 +1466,23 @@ fake agent as both planner (a canned reply for prose prompts) and workers
 check against Copilot CLI produced a valid two-unit plan in one attempt
 and 36 s.
 
+#### Uncommitted changes (issue #411)
+
+The planner runs in the user's checkout and reads whatever is there;
+the lanes run in a worktree of `HEAD`. Uncommitted or untracked work was
+in one and not the other, so a plan could rest on files no worker could
+see, and the result branch was cut from a commit without what the user
+had been looking at. A verification that depended on such a file read
+as INCONCLUSIVE and pointed at generated files (#301), the wrong
+diagnosis. `run_task` now checks `git status` before anything else and
+refuses with the list of changed paths; `--allow-dirty` proceeds and
+the report repeats the list. Refusing is the default because the
+alternatives each surprise someone: copying the changes into the
+shared tree commits work the user had not chosen to commit, and
+planning inside the shared tree instead of the checkout would cost the
+overlap of tree preparation with planning (#353) while still leaving
+the result branch without the user's changes.
+
 #### Verification timeout (issue #410)
 
 Verification ran with `Command::output()`, which waits forever, and the
