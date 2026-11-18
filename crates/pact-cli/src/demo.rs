@@ -4,29 +4,31 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use pact_vcs::WorkspaceManager;
 
-/// A canned, zero-cost walkthrough of the core loop for a brand-new user:
-/// isolated worktrees, independent work landing in parallel, one clean
-/// merged branch at the end. Runs against a real, disposable temp repo
-/// using pact's real `WorkspaceManager`/`merge_all` -- everything except
-/// the agent CLI call itself is real, since that's the one step that
-/// costs money and needs a real installed/authenticated agent, neither of
-/// which a fresh install can assume. See DESIGN.md ("pact-cli > `pact demo`
-/// (issue #119)") for why simulating just that one step was the deliberate
-/// choice, not an oversight.
+/// A canned, zero-cost walkthrough of what `pact run` does, for a
+/// brand-new user (issue #417): a plan of units that own disjoint files,
+/// lanes writing into one shared tree, one commit, and a check run before
+/// and after so its verdict knows the baseline. Runs against a real,
+/// disposable temp repo with pact's real `WorkspaceManager`; only the
+/// planner and the agents are simulated, since those are the steps that
+/// cost money and need an installed, signed-in agent. See DESIGN.md
+/// ("pact-cli > `pact demo` (issue #119)") for why simulating just those
+/// steps was the deliberate choice.
 struct DemoTask {
-    task: &'static str,
+    unit: &'static str,
     file_name: &'static str,
     file_contents: &'static str,
 }
 
+const DEMO_TASK: &str = "Add a greeting helper and a calculator helper";
+
 const DEMO_TASKS: &[DemoTask] = &[
     DemoTask {
-        task: "Add a friendly greeting helper",
+        unit: "greeting",
         file_name: "greeting.py",
         file_contents: "def greet(name):\n    return f\"Hello, {name}!\"\n",
     },
     DemoTask {
-        task: "Add a simple calculator helper",
+        unit: "calculator",
         file_name: "calculator.py",
         file_contents: "def add(a, b):\n    return a + b\n",
     },
@@ -59,55 +61,58 @@ pub fn run() -> Result<()> {
 fn run_inner(repo_root: &Path) -> Result<()> {
     init_git_repo(repo_root)?;
 
+    println!("pact run \"{DEMO_TASK}\"");
     println!(
-        "Simulating {} agents working in parallel, each on its own file.",
-        DEMO_TASKS.len()
+        "(The planner and the agents are simulated: they are the steps that cost money and \
+         need a signed-in agent CLI. Everything else below is pact's real code on a real repo. \
+         See the end of this output for how to run the real thing.)"
     );
-    println!(
-        "(No real agent CLI or API call happens here -- that's the one step \
-         this demo fakes, since it's the one that costs money and needs a real \
-         installed/authenticated agent. See the end of this output for how to \
-         run the real thing.)"
-    );
+    println!();
+
+    println!("plan: {} units, each owning its own files", DEMO_TASKS.len());
+    for demo_task in DEMO_TASKS {
+        println!("  {}: {}", demo_task.unit, demo_task.file_name);
+    }
+    let both_exist = |dir: &Path| DEMO_TASKS.iter().all(|t| dir.join(t.file_name).exists());
+    println!("verify: both files exist");
     println!();
 
     let workspaces = WorkspaceManager::open(repo_root)?;
-    let mut created = Vec::new();
+    let batch = workspaces.create_shared_batch(DEMO_TASK, None)?;
+    println!("shared tree {} ({})", batch.id, batch.branch);
+    let baseline = both_exist(&batch.path);
+    println!("  baseline on the untouched tree: {}", if baseline { "passes" } else { "fails" });
     for demo_task in DEMO_TASKS {
-        let workspace = workspaces.create_workspace(demo_task.task, None)?;
-        std::fs::write(workspace.path.join(demo_task.file_name), demo_task.file_contents).with_context(|| {
-            format!("failed to write {} into workspace {}", demo_task.file_name, workspace.id)
-        })?;
-        println!("workspace {} ({})", workspace.id, workspace.branch);
-        println!("  task: {}", demo_task.task);
-        println!("  simulated agent output: wrote {}", demo_task.file_name);
-        created.push(workspace);
+        let lane = workspaces.create_lane(&batch, demo_task.unit, Some(demo_task.unit))?;
+        std::fs::write(lane.path.join(demo_task.file_name), demo_task.file_contents)
+            .with_context(|| format!("failed to write {} for unit {}", demo_task.file_name, demo_task.unit))?;
+        println!("  lane {}: simulated agent wrote {}", lane.id, demo_task.file_name);
     }
-
-    println!();
-    println!("pact list:");
-    for workspace in &created {
-        println!("  {}  {}  [dirty]", workspace.id, workspace.branch);
-    }
-
-    println!();
-    println!("running merge-all...");
-    let report = workspaces.merge_all(None, None, &[], None, None, None, pact_vcs::GateMode::Each, false)?;
-    crate::print_merge_report(&report);
+    let committed = workspaces.commit_all(&batch.id)?;
+    println!("  {}", if committed { "committed the shared tree once" } else { "nothing to commit" });
+    let after = both_exist(&batch.path);
+    let verdict = match (baseline, after) {
+        (false, true) => "passed (it failed on the base commit, so this run fixed it)",
+        (true, true) => "passed",
+        (true, false) => "FAILED (it passed on the base commit, so this run broke it)",
+        (false, false) => "INCONCLUSIVE (it already fails on the base commit)",
+    };
+    println!("  verify: {verdict}");
 
     println!();
     println!(
-        "That's the core loop: isolated worktrees so parallel work never \
-         collides, merged back automatically onto one clean branch."
+        "That's pact run: units that own disjoint files run as parallel lanes in one tree, \
+         with no merge step, and the result is checked against the base commit."
     );
     println!();
     println!("Try it for real, in your own repo:");
-    println!("  pact init");
-    println!("  pact spawn --agent claude \"<task>\"");
-    println!("  pact spawn-many --task claude:\"<task 1>\" --task claude:\"<task 2>\"");
-    println!("  pact merge-all");
+    println!("  pact doctor");
+    println!("  pact run --agent copilot --dry-run \"<task>\"     (plans and writes the briefs, runs nothing)");
+    println!("  pact run --agent copilot --verify \"npm test\" \"<task>\"");
+    println!("Unrelated tasks, possibly in other repos: pact fleet tasks.toml, or pact ui for a browser page.");
+    println!("Tasks that must edit the same files: pact spawn-many, then pact merge-all.");
     println!();
-    println!("See examples/tasks/ for task-text patterns, GETTING_STARTED.md for the full walkthrough.");
+    println!("GETTING_STARTED.md has the full walkthrough.");
 
     Ok(())
 }

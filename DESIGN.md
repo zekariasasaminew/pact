@@ -5243,6 +5243,24 @@ else -- the temp repo, the two `WorkspaceManager::create_workspace` calls
 means launching a real adapter/agent subprocess), the real `merge_all` --
 is real pact code on a real, disposable repo.
 
+Issue #417 changed what the demo shows. It used to call isolated
+worktrees plus `merge-all` "the core loop", which was the product before
+`pact run`; for disjoint work those worktrees and the merge were exactly
+the overhead `pact run` removed (53.6 min against 12.5 on the benchmark).
+The demo now walks through `pact run`'s shape with the same real
+primitives `pact run` uses: a plan of two units owning one file each,
+one shared tree (`create_shared_batch`), a lane per unit
+(`create_lane`) writing its file, one `commit_all`, and a check run on
+the untouched tree and again on the result, so the verdict reads
+"failed on the base commit, so this run fixed it". The planner joins the
+agents as the simulated steps. Driving the real `run_task` against the
+bundled fake ACP agent was considered and rejected: the fake ships as a
+test binary, not inside `pact`, and copying it onto PATH as `copilot`
+for a demo would be a surprise on a user's machine. The closing lines
+point at `pact doctor`, then `pact run --dry-run` (free), then the real
+run with `--verify`, and name `fleet`, `ui` and `spawn-many` plus
+`merge-all` for the cases they fit.
+
 The reasoning for faking only that one step: `pact demo` needs to work for
 a brand-new user who hasn't installed or authenticated any agent CLI yet,
 on any machine, with zero cost and zero chance of hanging on an auth
