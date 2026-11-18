@@ -42,7 +42,14 @@ on the untouched tree first, so a check that already fails on the base
 commit (generated files missing from a fresh worktree, say) reads as
 `INCONCLUSIVE` (exit 3), a check the run broke reads as a regression,
 and a check the run made pass reads as fixed; the worst verdict across
-the commands decides the exit code. The shared tree, its
+the commands decides the exit code. Each command runs with `CI=true` and
+stdin closed, so watch-by-default runners exit, and under
+`--verify-timeout` (`defaults.verify_timeout` in `pact.toml`, default
+`20m`): at the deadline its whole process tree is killed and it counts
+as timed out, a timed-out baseline as no baseline. Every command's full
+output, both streams interleaved, is kept under the state dir's
+`meta/verify/<run>/`, and a failing command's report line names its log.
+The shared tree, its
 dependencies and those baselines are prepared while the planner works.
 Plans and briefs are
 persisted under the state dir (`meta/plans/`, `briefs/`), the planner's

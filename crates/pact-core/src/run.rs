@@ -411,8 +411,13 @@ pub struct VerifyOutcome {
     pub output_tail: String,
     pub duration: Duration,
     /// Whether the same command passed on the untouched tree before any
-    /// lane ran. `None` when no baseline was taken.
+    /// lane ran. `None` when no baseline was taken, or the baseline
+    /// timed out.
     pub baseline_success: Option<bool>,
+    /// Killed at `--verify-timeout` (issue #410).
+    pub timed_out: bool,
+    /// The command's whole output, both streams in write order.
+    pub log: PathBuf,
 }
 
 /// How a verification result reads once the baseline is known.
@@ -510,7 +515,42 @@ pub struct RunOptions<'a> {
     pub plan_retries: usize,
     /// How many lanes may try to repair a real combined-verification failure.
     pub repair_attempts: usize,
+    /// How long one verification command may run before its process tree
+    /// is killed and the command counts as timed out (issue #410).
+    pub verify_timeout: Duration,
     pub spawn: SpawnOptions<'a>,
+}
+
+/// The CLI default for `RunOptions::verify_timeout`.
+pub const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Where one run's verification logs go and how long each command may take.
+struct VerifyContext {
+    dir: PathBuf,
+    timeout: Duration,
+}
+
+impl VerifyContext {
+    fn log_path(&self, index: usize, command: &str, phase: &str) -> PathBuf {
+        self.dir.join(format!("{}-{}-{phase}.log", index + 1, short_slug(command)))
+    }
+}
+
+/// `90s`, `20m`, `1h5m`: how a timeout reads in the report.
+pub fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    let mut text = String::new();
+    if h > 0 {
+        text.push_str(&format!("{h}h"));
+    }
+    if m > 0 {
+        text.push_str(&format!("{m}m"));
+    }
+    if s > 0 || text.is_empty() {
+        text.push_str(&format!("{s}s"));
+    }
+    text
 }
 
 const PLANNER_LABEL: usize = usize::MAX;
@@ -535,6 +575,11 @@ impl Orchestrator {
         let planning_started = std::time::Instant::now();
         let planner_events = |event: &AgentEvent| on_event(PLANNER_LABEL, &options.agent, event);
         let spawn_options = SpawnOptions { shared_tree: true, ..options.spawn };
+        let run_id = format!("{}-{}", unix_now(), &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let verify_context = VerifyContext {
+            dir: self.workspaces.state_dir().join("meta").join("verify").join(run_id),
+            timeout: options.verify_timeout,
+        };
         let (plan, planning, prepared) = match options.plan_path {
             Some(path) => {
                 let text = std::fs::read_to_string(path).with_context(|| format!("reading plan {}", path.display()))?;
@@ -554,7 +599,7 @@ impl Orchestrator {
             }
             None => {
                 let (planned, prepared) = std::thread::scope(|scope| {
-                    let prep = scope.spawn(|| self.prepare_run_tree(task, &spawn_options, options.verify, &planner_events));
+                    let prep = scope.spawn(|| self.prepare_run_tree(task, &spawn_options, options.verify, &verify_context, &planner_events));
                     let planned = self.plan_task(task, options, &mut |event| planner_events(event));
                     (planned, prep.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the thread preparing the shared tree panicked"))))
                 });
@@ -590,7 +635,7 @@ impl Orchestrator {
             // Recorded on the plan so the persisted file is the whole truth.
             plan.verify = options.verify.to_vec();
         }
-        self.run_plan(plan, planning, prepared, &spawn_options, options, on_event)
+        self.run_plan(plan, planning, prepared, &spawn_options, options, &verify_context, on_event)
     }
 
     /// The shared tree a run executes in, with its dependencies prepared
@@ -605,6 +650,7 @@ impl Orchestrator {
         task: &str,
         spawn_options: &SpawnOptions<'_>,
         verify: &[String],
+        verify_context: &VerifyContext,
         on_event: &(impl Fn(&AgentEvent) + Sync),
     ) -> Result<PreparedTree> {
         let summary = format!("pact run: {}", task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(80).collect::<String>());
@@ -613,22 +659,26 @@ impl Orchestrator {
         let batch = self
             .create_shared_batch_workspace_named(&summary, spawn_options, &mut forward)
             .context("creating the shared tree for the plan")?;
-        let baselines = if verify.is_empty() { None } else { Some(self.run_baselines(&batch, verify, on_event)?) };
+        let baselines = if verify.is_empty() { None } else { Some(self.run_baselines(&batch, verify, verify_context, on_event)?) };
         Ok(PreparedTree { batch, baselines })
     }
 
     /// One baseline per verification command, on the untouched tree.
-    fn run_baselines(&self, batch: &Workspace, commands: &[String], on_event: &impl Fn(&AgentEvent)) -> Result<Vec<VerifyOutcome>> {
+    fn run_baselines(&self, batch: &Workspace, commands: &[String], verify_context: &VerifyContext, on_event: &impl Fn(&AgentEvent)) -> Result<Vec<VerifyOutcome>> {
         commands
             .iter()
-            .map(|command| {
+            .enumerate()
+            .map(|(index, command)| {
                 on_event(&AgentEvent::Phase(format!("verification baseline on the untouched tree: {command}")));
-                let outcome = run_shell_captured(&batch.path, command)?;
-                on_event(&AgentEvent::Phase(format!(
-                    "baseline `{command}` {} in {:.1}s",
-                    if outcome.success { "passes" } else { "already FAILS before any lane runs" },
-                    outcome.duration.as_secs_f32()
-                )));
+                let outcome = run_shell_captured(&batch.path, command, &verify_context.log_path(index, command, "baseline"), verify_context.timeout)?;
+                let verdict = if outcome.timed_out {
+                    format!("TIMED OUT after {} (killed), so there is no baseline for it", format_duration(verify_context.timeout))
+                } else if outcome.success {
+                    "passes".to_string()
+                } else {
+                    "already FAILS before any lane runs".to_string()
+                };
+                on_event(&AgentEvent::Phase(format!("baseline `{command}` {verdict} in {:.1}s", outcome.duration.as_secs_f32())));
                 Ok(outcome)
             })
             .collect()
@@ -642,6 +692,7 @@ impl Orchestrator {
         Ok(plan_path)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_plan(
         &self,
         plan: Plan,
@@ -649,6 +700,7 @@ impl Orchestrator {
         prepared: Option<PreparedTree>,
         spawn_options: &SpawnOptions<'_>,
         options: &RunOptions<'_>,
+        verify_context: &VerifyContext,
         on_event: impl Fn(usize, &AgentKind, &AgentEvent) + Sync,
     ) -> Result<RunReport> {
         let stamp = unix_now();
@@ -705,7 +757,7 @@ impl Orchestrator {
         let baselines = match baselines {
             Some(outcomes) => outcomes,
             None if verify_commands.is_empty() => Vec::new(),
-            None => self.run_baselines(&batch, &verify_commands, &planner_events)?,
+            None => self.run_baselines(&batch, &verify_commands, verify_context, &planner_events)?,
         };
         let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), &on_event);
         let batch = self.workspaces.get_workspace(&batch.id).ok();
@@ -716,7 +768,7 @@ impl Orchestrator {
         if let Some(batch) = &batch {
             planner_events(&AgentEvent::Phase(format!("committing the shared tree {}", batch.id)));
             committed = Some(self.workspaces.commit_all(&batch.id).context("committing the batch")?);
-            verify = self.verify_run(batch, &verify_commands, &baselines, &planner_events)?;
+            verify = self.verify_run(batch, &verify_commands, &baselines, verify_context, "after", &planner_events)?;
 
             let touched_files = self.workspaces.workspace_changes(&batch.id).context("finding files touched by the run")?.files;
             for attempt in 1..=options.repair_attempts {
@@ -743,7 +795,7 @@ impl Orchestrator {
                     planner_events(&AgentEvent::Phase(format!("committing repair attempt {attempt}")));
                     let repair_committed = self.workspaces.commit_all(&batch.id).context("committing the repair")?;
                     committed = Some(committed.unwrap_or(false) || repair_committed);
-                    verify = self.verify_run(batch, &verify_commands, &baselines, &planner_events)?;
+                    verify = self.verify_run(batch, &verify_commands, &baselines, verify_context, &format!("repair-{attempt}"), &planner_events)?;
                     repair_committed
                 } else {
                     false
@@ -777,6 +829,8 @@ impl Orchestrator {
         batch: &Workspace,
         commands: &[String],
         baselines: &[VerifyOutcome],
+        verify_context: &VerifyContext,
+        phase: &str,
         on_event: &impl Fn(&AgentEvent),
     ) -> Result<Vec<VerifyOutcome>> {
         commands
@@ -784,10 +838,11 @@ impl Orchestrator {
             .enumerate()
             .map(|(index, command)| {
                 on_event(&AgentEvent::Phase(format!("verifying in the batch worktree: {command}")));
-                let mut outcome = run_shell_captured(&batch.path, command)?;
-                outcome.baseline_success = baselines.get(index).map(|baseline| baseline.success);
+                let mut outcome = run_shell_captured(&batch.path, command, &verify_context.log_path(index, command, phase), verify_context.timeout)?;
+                outcome.baseline_success = baselines.get(index).filter(|baseline| !baseline.timed_out).map(|baseline| baseline.success);
+                let timed_out = if outcome.timed_out { format!("TIMED OUT after {} (killed): ", format_duration(verify_context.timeout)) } else { String::new() };
                 on_event(&AgentEvent::Phase(format!(
-                    "verification `{command}` {} in {:.1}s",
+                    "verification `{command}` {timed_out}{} in {:.1}s",
                     outcome.verdict(),
                     outcome.duration.as_secs_f32()
                 )));
@@ -987,30 +1042,24 @@ fn short_slug(text: &str) -> String {
     }
 }
 
-/// `cmd /C` on Windows, `sh -c` elsewhere, with the tail of the combined
-/// output kept for the report.
-fn run_shell_captured(dir: &Path, cmd: &str) -> Result<VerifyOutcome> {
-    let mut command = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", cmd]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", cmd]);
-        c
-    };
+/// Runs one verification command under `timeout` with its whole output
+/// logged to `log`, keeping the last 40 lines for the report.
+fn run_shell_captured(dir: &Path, cmd: &str, log: &Path, timeout: Duration) -> Result<VerifyOutcome> {
     let start = std::time::Instant::now();
-    let output = command.current_dir(dir).output().with_context(|| format!("failed to spawn verification command '{cmd}'"))?;
-    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let run = pact_agents::run_shell_logged(cmd, dir, log, timeout).with_context(|| format!("failed to run verification command '{cmd}'"))?;
+    let duration = start.elapsed();
+    let combined = String::from_utf8_lossy(&std::fs::read(log).unwrap_or_default()).into_owned();
     let lines: Vec<&str> = combined.lines().collect();
     let tail = lines[lines.len().saturating_sub(40)..].join("\n");
     Ok(VerifyOutcome {
         command: cmd.to_string(),
-        success: output.status.success(),
-        exit_code: output.status.code(),
+        success: run.status.is_some_and(|status| status.success()),
+        exit_code: run.status.and_then(|status| status.code()),
         output_tail: tail,
-        duration: start.elapsed(),
+        duration,
         baseline_success: None,
+        timed_out: run.timed_out,
+        log: log.to_path_buf(),
     })
 }
 
@@ -1050,6 +1099,8 @@ mod tests {
             output_tail: String::new(),
             duration: Duration::ZERO,
             baseline_success: baseline,
+            timed_out: false,
+            log: PathBuf::new(),
         };
         let report = |verify: Vec<VerifyOutcome>| RunReport {
             plan: plan(vec![]),
@@ -1241,6 +1292,8 @@ mod tests {
             output_tail: String::new(),
             duration: Duration::ZERO,
             baseline_success: baseline,
+            timed_out: false,
+            log: PathBuf::new(),
         };
         assert_eq!(outcome(true, Some(true)).verdict(), Verdict::Passed);
         assert_eq!(outcome(true, None).verdict(), Verdict::Passed);

@@ -1452,6 +1452,35 @@ fake agent as both planner (a canned reply for prose prompts) and workers
 check against Copilot CLI produced a valid two-unit plan in one attempt
 and 36 s.
 
+#### Verification timeout (issue #410)
+
+Verification ran with `Command::output()`, which waits forever, and the
+planner is told to put the full suite in `verify`, so it picks `npm test`,
+which in many templates is `vitest` in watch mode. A hang there blocks
+the baseline before any lane starts, or lands after every lane has been
+paid for, with no report. Each command now runs under
+`--verify-timeout` (`defaults.verify_timeout`, 20 minutes by default:
+long enough for a real suite on a busy laptop, short enough that a hung
+run is noticed the same session). At the deadline pact kills the
+command's whole process tree through `command-group`, the same group
+kill the Supervisor uses for agents, because killing only the shell
+leaves the runner it started holding the tree. A timed-out baseline
+counts as no baseline, since a command that never finished says
+nothing about the base; a timed-out result is a failure whose report
+line says it timed out. A timed-out result still goes to the repair
+lane like any other failure: a test that hangs only after the run is
+the run's doing.
+
+Commands run with `CI=true` and stdin closed, which is what makes most
+watch-by-default runners exit by themselves; the timeout is the backstop
+for the rest. Output goes to a file rather than a pipe: both streams
+share one handle, so the log interleaves them in write order, and a file
+cannot be held open by a grandchild the way a pipe can (#253), so the
+wait never depends on who still holds the output. Each run's logs live
+under `meta/verify/<run>/`, one per command and phase (`baseline`,
+`after`, `repair-<n>`), and a failing command's report line names its
+log.
+
 ### `pact fleet`: independent tasks (issue #388)
 
 `spawn-many` and `pact run` assume one repository and one result: the

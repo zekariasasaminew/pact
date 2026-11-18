@@ -25,7 +25,7 @@ pub use adapter::{
     SafetyProfile,
 };
 pub use event::AgentEvent;
-pub use process::{run_and_stream, RunOutcome};
+pub use process::{run_and_stream, run_shell_logged, RunOutcome, ShellRun};
 pub use supervisor::Supervisor;
 
 /// What to spawn directly for `program`, without a shell: on Windows an

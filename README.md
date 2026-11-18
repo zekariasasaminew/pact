@@ -196,6 +196,7 @@ prepare = ["npx next typegen"]
 | `min_free_mem_mb` | free memory required before another agent starts | 1500 |
 | `per_lane_reserve_mb` | memory held back for each running agent | 400 ACP, 1200 process |
 | `stagger_ms` | gap between agent launches | 2000 |
+| `verify_timeout` | longest one `run` verification command may take (`90s`, `20m`, `1h`) | `20m` |
 
 ## Safety
 
