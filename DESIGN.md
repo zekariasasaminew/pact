@@ -2650,6 +2650,26 @@ the same migration is not an error. The alternative, rejecting those
 names in `validate_workspace_name`, would have left `pact run` unable to
 use a planner's perfectly reasonable unit name.
 
+### Pruning the state directory: `pact gc` (issue #351)
+
+Nothing removed state once written: after about ten benchmark runs one
+state directory held 100 MB, three quarters of it lane and planner
+logs and a quarter ACP lean homes (each with Copilot's own session
+events and its own copy of installed plugins). `teardown` is right to
+leave a workspace's log and records, because `inspect` and the UI read
+them after the agent is gone, so pruning is a separate command. The
+rules come from who reads each item. A workspace's own state (its log,
+home, MCP config and sidecar records, matched by name) is read only
+while the workspace exists, so it goes once the workspace is gone and
+the item is older than `--older-than`. State shared by a run (planner
+and arbiter logs, ACP homes, briefs, verification logs, merge scratch)
+has no owner to outlive, so age alone decides. Age is the newest
+modification anywhere inside the item, so a home an ACP batch is still
+writing is never old. Plans are never pruned: they are the artefact a
+user edits and reruns with `--plan`. The default cutoff is a week,
+long enough to come back to yesterday's run. `--dry-run` lists every
+item with its size.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
@@ -3623,6 +3643,24 @@ keyed by a hash of the repo root, isn't a hard security boundary (an
 agent's Bash tool can still reach anywhere given an absolute or crafted
 path) but removes it from being stumbled into by accident via
 `../..`-style relative paths, which is the realistic risk.
+
+The cost of that placement was that nothing ever removed a directory
+(issue #416): on the owner's machine `%LOCALAPPDATA%\pact` held 6,622 of
+them and 372 MB, nearly all from test runs, since every temporary
+repository the suite creates gets its own hash and the tests' cleanup
+helpers removed the repository and its state directory but not this.
+Three changes. `PACT_COORD_DIR` overrides the root, and the repository's
+`.cargo/config.toml` sets it to `target/pact-coord` through cargo's
+`[env]` table, so every test process and every pact binary a test spawns
+inherits it without each test helper having to remember; an installed
+binary never reads that file. Each directory now records its repository
+in `repo.txt`, because the hash cannot be reversed. And `pact gc` removes
+directories whose recorded repository no longer exists, once nothing in
+them has changed for `--older-than` and they hold no unexpired lease. A
+directory with no `repo.txt` predates the record and is treated the same
+way: its repository, if it still exists, writes `repo.txt` the next time
+pact opens it, so only a week-idle repository could lose its history to
+this, and `--dry-run` shows the list first.
 
 ### WAL mode
 

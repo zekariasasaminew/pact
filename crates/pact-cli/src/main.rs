@@ -585,6 +585,18 @@ enum Command {
     /// "advisory, not enforced" philosophy leases themselves follow.
     /// Messages and history are untouched.
     ClearLeases,
+    /// Remove state no workspace uses any more: logs, agent homes and run
+    /// records of workspaces that are gone, plus planner logs, briefs and
+    /// verification logs, once older than --older-than. Plans are kept.
+    Gc {
+        /// Keep anything modified more recently than this: seconds, or
+        /// forms like 12h, 7d, 1d12h.
+        #[arg(long, default_value = "7d")]
+        older_than: String,
+        /// List what would be removed and its size, remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the coordination layer's operation log: every claim, release,
     /// broadcast, direct message, merge-all invocation, arbiter decision,
     /// and teardown recorded this session (and any prior session against
@@ -1471,6 +1483,35 @@ fn main() -> Result<()> {
             let status = orchestrator.coord_status()?;
             let active_workspace_ids: Vec<String> = orchestrator.list()?.into_iter().map(|w| w.id).collect();
             print_coord_status(&status, &active_workspace_ids);
+        }
+        Command::Gc { older_than, dry_run } => {
+            let older_than = config::parse_duration(&older_than).context("--older-than")?;
+            let items = orchestrator.gc(older_than, dry_run)?;
+            let mut total: u64 = items.iter().map(|item| item.bytes).sum();
+            for item in &items {
+                println!("{} ({})", item.path.display(), human_size(item.bytes));
+            }
+            let cutoff = std::time::SystemTime::now().checked_sub(older_than).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let coord_dirs = pact_coord::prunable_dirs(cutoff)?;
+            for dir in &coord_dirs {
+                let owner = match &dir.repo {
+                    Some(repo) => format!("coordination database of {}, which no longer exists", repo.display()),
+                    None => "coordination database of an unrecorded repository".to_string(),
+                };
+                println!("{} ({}, {owner})", dir.path.display(), human_size(dir.bytes));
+                total += dir.bytes;
+                if !dry_run {
+                    if let Err(err) = std::fs::remove_dir_all(&dir.path) {
+                        tracing::warn!("gc: could not remove {}: {err}", dir.path.display());
+                    }
+                }
+            }
+            println!(
+                "{} {} item(s), {}",
+                if dry_run { "would remove" } else { "removed" },
+                items.len() + coord_dirs.len(),
+                human_size(total)
+            );
         }
         Command::ClearLeases => {
             let removed = orchestrator.clear_leases()?;
@@ -2767,6 +2808,21 @@ fn print_runtime_preview(
         }
         _ => println!("runtime: {label} (one agent CLI process per lane)"),
     }
+}
+
+/// `512 B`, `3.4 KB`, `76.0 MB`, `1.2 GB`.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 /// `pact run`'s end-of-run listing (issue #305): the plan as decided, each
