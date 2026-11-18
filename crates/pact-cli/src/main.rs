@@ -1490,14 +1490,29 @@ fn main() -> Result<()> {
         Command::Gc { older_than, dry_run } => {
             let older_than = config::parse_duration(&older_than).context("--older-than")?;
             let items = orchestrator.gc(older_than, dry_run)?;
-            let total: u64 = items.iter().map(|item| item.bytes).sum();
+            let mut total: u64 = items.iter().map(|item| item.bytes).sum();
             for item in &items {
                 println!("{} ({})", item.path.display(), human_size(item.bytes));
+            }
+            let cutoff = std::time::SystemTime::now().checked_sub(older_than).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let coord_dirs = pact_coord::prunable_dirs(cutoff)?;
+            for dir in &coord_dirs {
+                let owner = match &dir.repo {
+                    Some(repo) => format!("coordination database of {}, which no longer exists", repo.display()),
+                    None => "coordination database of an unrecorded repository".to_string(),
+                };
+                println!("{} ({}, {owner})", dir.path.display(), human_size(dir.bytes));
+                total += dir.bytes;
+                if !dry_run {
+                    if let Err(err) = std::fs::remove_dir_all(&dir.path) {
+                        tracing::warn!("gc: could not remove {}: {err}", dir.path.display());
+                    }
+                }
             }
             println!(
                 "{} {} item(s), {}",
                 if dry_run { "would remove" } else { "removed" },
-                items.len(),
+                items.len() + coord_dirs.len(),
                 human_size(total)
             );
         }

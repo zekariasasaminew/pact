@@ -10,19 +10,90 @@ use sha2::{Digest, Sha256};
 /// lock file.
 pub const DEFAULT_LEASE_TTL_SECONDS: i64 = 15 * 60;
 
+/// Where every repository's coordination directory lives:
+/// `PACT_COORD_DIR` when set (the test suite points it inside `target/`,
+/// issue #416), else `<platform local data dir>/pact`.
+pub fn coord_root() -> Result<PathBuf> {
+    match std::env::var_os("PACT_COORD_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(dirs::data_local_dir().context("could not determine platform data directory")?.join("pact")),
+    }
+}
+
+/// The file in a coordination directory naming the repository it belongs
+/// to, since the directory name is a hash nobody can reverse (issue #416).
+pub const OWNER_FILE: &str = "repo.txt";
+
 /// Lives under the platform's local data directory, keyed by a hash of the
 /// repo root -- deliberately not under `.pact-<repo>/` with the
 /// per-workspace bookkeeping. See DESIGN.md ("pact-coord > Database
 /// placement").
 pub fn db_path(repo_root: &Path) -> Result<PathBuf> {
-    let base = dirs::data_local_dir().context("could not determine platform data directory")?;
     let mut hasher = Sha256::new();
     hasher.update(repo_root.to_string_lossy().as_bytes());
     let hash = format!("{:x}", hasher.finalize());
-    let dir = base.join("pact").join(&hash[..16]);
+    let dir = coord_root()?.join(&hash[..16]);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating coordination state directory {}", dir.display()))?;
+    let owner = dir.join(OWNER_FILE);
+    if !owner.exists() {
+        let _ = std::fs::write(&owner, repo_root.to_string_lossy().as_bytes());
+    }
     Ok(dir.join("state.db"))
+}
+
+/// A coordination directory `prunable_dirs` would remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunableDir {
+    pub path: PathBuf,
+    /// The repository it recorded, `None` for a directory created before
+    /// the owner file existed.
+    pub repo: Option<PathBuf>,
+    pub bytes: u64,
+}
+
+/// Coordination directories whose repository is gone (or was never
+/// recorded), that nothing has written to since `cutoff`, and that hold
+/// no unexpired lease (issue #416).
+pub fn prunable_dirs(cutoff: std::time::SystemTime) -> Result<Vec<PrunableDir>> {
+    let root = coord_root()?;
+    let Ok(entries) = std::fs::read_dir(&root) else { return Ok(Vec::new()) };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let mut found = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let repo = std::fs::read_to_string(path.join(OWNER_FILE)).ok().map(|text| PathBuf::from(text.trim()));
+        if repo.as_ref().is_some_and(|repo| repo.exists()) {
+            continue;
+        }
+        let mut bytes = 0;
+        let mut newest = std::time::SystemTime::UNIX_EPOCH;
+        for file in std::fs::read_dir(&path).into_iter().flatten().filter_map(Result::ok) {
+            if let Ok(meta) = file.metadata() {
+                bytes += meta.len();
+                if let Ok(modified) = meta.modified() {
+                    newest = newest.max(modified);
+                }
+            }
+        }
+        if newest >= cutoff {
+            continue;
+        }
+        let db = path.join("state.db");
+        let live_leases = db.exists()
+            && Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .and_then(|conn| conn.query_row("SELECT COUNT(*) FROM leases WHERE expires_at > ?1", [now], |row| row.get::<_, i64>(0)))
+                .map(|count| count > 0)
+                .unwrap_or(false);
+        if !live_leases {
+            found.push(PrunableDir { path, repo, bytes });
+        }
+    }
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(found)
 }
 
 pub fn open(repo_root: &Path) -> Result<Connection> {
@@ -178,5 +249,33 @@ mod tests {
         drop(migrated);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn a_directory_records_its_repo_and_is_prunable_only_once_the_repo_is_gone() {
+        // PACT_COORD_DIR is set for the whole suite by .cargo/config.toml,
+        // so this never touches the real data directory.
+        let repo_root = std::env::temp_dir().join(format!("pact-coord-owner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo_root).unwrap();
+        let conn = open(&repo_root).unwrap();
+        drop(conn);
+        let dir = db_path(&repo_root).unwrap().parent().unwrap().to_path_buf();
+        assert_eq!(std::fs::read_to_string(dir.join(OWNER_FILE)).unwrap(), repo_root.to_string_lossy());
+
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let ours = |found: &[PrunableDir]| found.iter().any(|d| d.path == dir);
+        assert!(!ours(&prunable_dirs(later).unwrap()), "the repository still exists");
+        std::fs::remove_dir_all(&repo_root).unwrap();
+        assert!(!ours(&prunable_dirs(std::time::SystemTime::UNIX_EPOCH).unwrap()), "too recent for the cutoff");
+        let found = prunable_dirs(later).unwrap();
+        assert!(ours(&found), "{found:?}");
+
+        let leased = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 + 600;
+        Connection::open(dir.join("state.db"))
+            .unwrap()
+            .execute("INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES ('a', 'b', 0, ?1)", [leased])
+            .unwrap();
+        assert!(!ours(&prunable_dirs(later).unwrap()), "an unexpired lease keeps the directory");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

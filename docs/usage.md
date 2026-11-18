@@ -953,7 +953,13 @@ The coordination database is the one exception -- deliberately *not* here
 ```
 
 e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
-`~/.local/share/pact/<hash>/state.db` on Linux.
+`~/.local/share/pact/<hash>/state.db` on Linux. `PACT_COORD_DIR`
+replaces `<platform-local-data-dir>/pact` when set (the test suite sets
+it through `.cargo/config.toml`). Each directory holds a `repo.txt`
+naming its repository, and `pact gc` also removes directories whose
+repository no longer exists (or was never recorded, for directories made
+before `repo.txt` existed) once they are older than `--older-than` and
+hold no unexpired lease.
 
 ## Privacy
 
