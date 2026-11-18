@@ -57,11 +57,13 @@ fn hash_file(path: &Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
+type UnitSnapshot = (usize, Vec<(String, Option<u64>)>);
+
 /// Each unit's owned files, hashed the moment its lane finished, in the
 /// order the lanes finished.
 #[derive(Default)]
 pub(crate) struct FinishSnapshots {
-    finished: Mutex<Vec<(usize, Vec<(String, Option<u64>)>)>>,
+    finished: Mutex<Vec<UnitSnapshot>>,
 }
 
 impl FinishSnapshots {
@@ -70,7 +72,7 @@ impl FinishSnapshots {
         self.finished.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((unit, snapshot));
     }
 
-    fn take(self) -> Vec<(usize, Vec<(String, Option<u64>)>)> {
+    fn take(self) -> Vec<UnitSnapshot> {
         self.finished.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
