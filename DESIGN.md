@@ -3644,6 +3644,24 @@ agent's Bash tool can still reach anywhere given an absolute or crafted
 path) but removes it from being stumbled into by accident via
 `../..`-style relative paths, which is the realistic risk.
 
+The cost of that placement was that nothing ever removed a directory
+(issue #416): on the owner's machine `%LOCALAPPDATA%\pact` held 6,622 of
+them and 372 MB, nearly all from test runs, since every temporary
+repository the suite creates gets its own hash and the tests' cleanup
+helpers removed the repository and its state directory but not this.
+Three changes. `PACT_COORD_DIR` overrides the root, and the repository's
+`.cargo/config.toml` sets it to `target/pact-coord` through cargo's
+`[env]` table, so every test process and every pact binary a test spawns
+inherits it without each test helper having to remember; an installed
+binary never reads that file. Each directory now records its repository
+in `repo.txt`, because the hash cannot be reversed. And `pact gc` removes
+directories whose recorded repository no longer exists, once nothing in
+them has changed for `--older-than` and they hold no unexpired lease. A
+directory with no `repo.txt` predates the record and is treated the same
+way: its repository, if it still exists, writes `repo.txt` the next time
+pact opens it, so only a week-idle repository could lose its history to
+this, and `--dry-run` shows the list first.
+
 ### WAL mode
 
 WAL is needed because the coordination database is opened concurrently by

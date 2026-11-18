@@ -17,6 +17,7 @@ mod operations;
 mod persisted_conflicts;
 mod server;
 
+pub use db::{coord_root, prunable_dirs, PrunableDir, OWNER_FILE};
 pub use handoffs::{HandoffDecision, HandoffRequest, HandoffRequestResult, HandoffStatus};
 pub use leases::{ActiveLease, Conflict, ClaimResult};
 pub use messages::Message;
