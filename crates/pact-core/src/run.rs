@@ -376,6 +376,9 @@ pub struct RunReport {
     pub committed: Option<bool>,
     pub repairs: Vec<RepairOutcome>,
     pub verify: Vec<VerifyOutcome>,
+    /// Uncommitted changes in the checkout that `--allow-dirty` left out
+    /// of the lanes' tree (issue #411).
+    pub dirty_paths: Vec<String>,
     /// Files the units' lanes wrote outside their own (issue #409); the
     /// run fails when there are any. Nothing is reverted.
     pub ownership: Vec<OwnershipViolation>,
@@ -642,6 +645,9 @@ pub struct RunOptions<'a> {
     /// How long one verification command may run before its process tree
     /// is killed and the command counts as timed out (issue #410).
     pub verify_timeout: Duration,
+    /// Run even though the checkout has uncommitted changes the lanes'
+    /// tree will not contain (issue #411).
+    pub allow_dirty: bool,
     pub spawn: SpawnOptions<'a>,
 }
 
@@ -698,6 +704,21 @@ impl Orchestrator {
     ) -> Result<RunReport> {
         let planning_started = std::time::Instant::now();
         let planner_events = |event: &AgentEvent| on_event(PLANNER_LABEL, &options.agent, event);
+        let dirty = pact_vcs::changed_paths(&self.repo_root).context("checking your checkout for uncommitted changes")?;
+        if !dirty.is_empty() {
+            if !options.allow_dirty {
+                bail!(
+                    "{} uncommitted change(s) in your checkout: {}. The lanes start from HEAD and would not see them, while the planner would. Commit or stash them first, or pass --allow-dirty to run from HEAD anyway",
+                    dirty.len(),
+                    list_paths(&dirty)
+                );
+            }
+            planner_events(&AgentEvent::Phase(format!(
+                "--allow-dirty: running from HEAD without {} uncommitted change(s) in your checkout: {}",
+                dirty.len(),
+                list_paths(&dirty)
+            )));
+        }
         let spawn_options = SpawnOptions { shared_tree: true, ..options.spawn };
         let run_id = format!("{}-{}", unix_now(), &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let verify_context = VerifyContext {
@@ -759,7 +780,9 @@ impl Orchestrator {
             // Recorded on the plan so the persisted file is the whole truth.
             plan.verify = options.verify.to_vec();
         }
-        self.run_plan(plan, planning, prepared, &spawn_options, options, &verify_context, on_event)
+        let mut report = self.run_plan(plan, planning, prepared, &spawn_options, options, &verify_context, on_event)?;
+        report.dirty_paths = dirty;
+        Ok(report)
     }
 
     /// The shared tree a run executes in, with its dependencies prepared
@@ -860,6 +883,7 @@ impl Orchestrator {
                 committed: None,
                 repairs: Vec::new(),
                 verify: Vec::new(),
+                dirty_paths: Vec::new(),
                 ownership: Vec::new(),
             });
         }
@@ -975,6 +999,7 @@ impl Orchestrator {
             committed,
             repairs,
             verify,
+            dirty_paths: Vec::new(),
             ownership,
         })
     }
@@ -1180,6 +1205,16 @@ fn append_log_line(path: &Path, line: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// The first ten of `paths`, then how many more.
+fn list_paths(paths: &[String]) -> String {
+    const SHOWN: usize = 10;
+    let mut text = paths.iter().take(SHOWN).map(String::as_str).collect::<Vec<_>>().join(", ");
+    if paths.len() > SHOWN {
+        text.push_str(&format!(" and {} more", paths.len() - SHOWN));
+    }
+    text
+}
+
 fn short_slug(text: &str) -> String {
     let slug: String = text
         .chars()
@@ -1274,6 +1309,7 @@ mod tests {
             committed: None,
             repairs: vec![],
             verify,
+            dirty_paths: Vec::new(),
             ownership: vec![],
         };
         assert_eq!(report(vec![]).worst_verdict(), None);
