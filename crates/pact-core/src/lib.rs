@@ -7,6 +7,7 @@ mod admission;
 pub mod fleet;
 pub mod gc;
 mod land;
+pub mod ownership;
 pub mod run;
 pub mod verify_output;
 pub use land::{DiscardOutcome, EntryState, WorkspaceEntry};

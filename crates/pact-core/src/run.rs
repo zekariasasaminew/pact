@@ -28,6 +28,7 @@ use pact_agents::{AgentEvent, AgentKind, LaunchRequest, Supervisor};
 use pact_vcs::Workspace;
 use serde::{Deserialize, Serialize};
 
+use crate::ownership::{check_ownership, edits_in_log, tree_hash, FinishSnapshots, OwnershipViolation};
 use crate::verify_output::{failing_files, FailingFile};
 use crate::{agent_kind_name, effective_runtime, unix_now, LaneRuntime, Orchestrator, SpawnManyOutcome, SpawnManyTask, SpawnOptions};
 
@@ -375,6 +376,12 @@ pub struct RunReport {
     pub committed: Option<bool>,
     pub repairs: Vec<RepairOutcome>,
     pub verify: Vec<VerifyOutcome>,
+    /// Uncommitted changes in the checkout that `--allow-dirty` left out
+    /// of the lanes' tree (issue #411).
+    pub dirty_paths: Vec<String>,
+    /// Files the units' lanes wrote outside their own (issue #409); the
+    /// run fails when there are any. Nothing is reverted.
+    pub ownership: Vec<OwnershipViolation>,
 }
 
 pub struct RepairOutcome {
@@ -398,7 +405,7 @@ impl RunReport {
             && self.outcomes.iter().all(|o| matches!(&o.result, Ok((_, run)) if run.success));
         // An inconclusive verification is not a success: the user has to
         // judge the result some other way, and the exit code says so.
-        lanes_ok && self.verify.iter().all(|v| v.success)
+        lanes_ok && self.ownership.is_empty() && self.verify.iter().all(|v| v.success)
     }
 
     /// The verdict that decides the exit code: the worst across the
@@ -638,6 +645,9 @@ pub struct RunOptions<'a> {
     /// How long one verification command may run before its process tree
     /// is killed and the command counts as timed out (issue #410).
     pub verify_timeout: Duration,
+    /// Run even though the checkout has uncommitted changes the lanes'
+    /// tree will not contain (issue #411).
+    pub allow_dirty: bool,
     pub spawn: SpawnOptions<'a>,
 }
 
@@ -694,6 +704,21 @@ impl Orchestrator {
     ) -> Result<RunReport> {
         let planning_started = std::time::Instant::now();
         let planner_events = |event: &AgentEvent| on_event(PLANNER_LABEL, &options.agent, event);
+        let dirty = pact_vcs::changed_paths(&self.repo_root).context("checking your checkout for uncommitted changes")?;
+        if !dirty.is_empty() {
+            if !options.allow_dirty {
+                bail!(
+                    "{} uncommitted change(s) in your checkout: {}. The lanes start from HEAD and would not see them, while the planner would. Commit or stash them first, or pass --allow-dirty to run from HEAD anyway",
+                    dirty.len(),
+                    list_paths(&dirty)
+                );
+            }
+            planner_events(&AgentEvent::Phase(format!(
+                "--allow-dirty: running from HEAD without {} uncommitted change(s) in your checkout: {}",
+                dirty.len(),
+                list_paths(&dirty)
+            )));
+        }
         let spawn_options = SpawnOptions { shared_tree: true, ..options.spawn };
         let run_id = format!("{}-{}", unix_now(), &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let verify_context = VerifyContext {
@@ -755,7 +780,9 @@ impl Orchestrator {
             // Recorded on the plan so the persisted file is the whole truth.
             plan.verify = options.verify.to_vec();
         }
-        self.run_plan(plan, planning, prepared, &spawn_options, options, &verify_context, on_event)
+        let mut report = self.run_plan(plan, planning, prepared, &spawn_options, options, &verify_context, on_event)?;
+        report.dirty_paths = dirty;
+        Ok(report)
     }
 
     /// The shared tree a run executes in, with its dependencies prepared
@@ -856,6 +883,8 @@ impl Orchestrator {
                 committed: None,
                 repairs: Vec::new(),
                 verify: Vec::new(),
+                dirty_paths: Vec::new(),
+                ownership: Vec::new(),
             });
         }
 
@@ -879,13 +908,31 @@ impl Orchestrator {
             None if verify_commands.is_empty() => Vec::new(),
             None => self.run_baselines(&batch, &verify_commands, verify_context, &planner_events)?,
         };
-        let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), &on_event);
+        let snapshots = FinishSnapshots::default();
+        let lane_events = |index: usize, agent: &AgentKind, event: &AgentEvent| {
+            if let (AgentEvent::Result { .. }, Some(unit)) = (event, plan.units.get(index)) {
+                snapshots.record(index, &unit.files, &batch.path);
+            }
+            on_event(index, agent, event)
+        };
+        let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), lane_events);
         let batch = self.workspaces.get_workspace(&batch.id).ok();
 
         let mut committed = None;
         let mut repairs = Vec::new();
         let mut verify = Vec::new();
+        let mut ownership = Vec::new();
         if let Some(batch) = &batch {
+            let changed = pact_vcs::changed_since(&batch.path, &batch.base_commit).context("listing the files the lanes changed")?;
+            let logs = self.workspaces.state_dir().join("logs");
+            let lane_edits: Vec<(usize, Vec<String>)> = outcomes
+                .iter()
+                .filter_map(|outcome| outcome.result.as_ref().ok().map(|(lane, _)| (outcome.index, edits_in_log(&logs.join(format!("{}.jsonl", lane.id)), &batch.path))))
+                .collect();
+            ownership = check_ownership(&plan, &changed, &lane_edits, snapshots, tree_hash(&batch.path));
+            for violation in &ownership {
+                planner_events(&AgentEvent::Phase(format!("ownership: {violation}")));
+            }
             planner_events(&AgentEvent::Phase(format!("committing the shared tree {}", batch.id)));
             committed = Some(self.workspaces.commit_all(&batch.id).context("committing the batch")?);
             verify = self.verify_run(batch, &verify_commands, &baselines, verify_context, "after", &planner_events)?;
@@ -952,6 +999,8 @@ impl Orchestrator {
             committed,
             repairs,
             verify,
+            dirty_paths: Vec::new(),
+            ownership,
         })
     }
 
@@ -1156,6 +1205,16 @@ fn append_log_line(path: &Path, line: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// The first ten of `paths`, then how many more.
+fn list_paths(paths: &[String]) -> String {
+    const SHOWN: usize = 10;
+    let mut text = paths.iter().take(SHOWN).map(String::as_str).collect::<Vec<_>>().join(", ");
+    if paths.len() > SHOWN {
+        text.push_str(&format!(" and {} more", paths.len() - SHOWN));
+    }
+    text
+}
+
 fn short_slug(text: &str) -> String {
     let slug: String = text
         .chars()
@@ -1250,6 +1309,8 @@ mod tests {
             committed: None,
             repairs: vec![],
             verify,
+            dirty_paths: Vec::new(),
+            ownership: vec![],
         };
         assert_eq!(report(vec![]).worst_verdict(), None);
         assert_eq!(report(vec![outcome(true, Some(true)), outcome(true, Some(false))]).worst_verdict(), Some(Verdict::Fixed));
