@@ -73,7 +73,7 @@ fn workspace_id_of(name: &str, suffix: &str) -> Option<String> {
 /// workspaces that still exist and the cutoff time.
 pub fn collect(state_dir: &Path, live: &[String], cutoff: SystemTime) -> Vec<GcItem> {
     let mut items = Vec::new();
-    let mut consider = |path: PathBuf, items: &mut Vec<GcItem>| {
+    let consider = |path: PathBuf, items: &mut Vec<GcItem>| {
         let (bytes, newest) = measure(&path);
         if newest < cutoff {
             items.push(GcItem { path, bytes });
