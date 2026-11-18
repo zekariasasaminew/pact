@@ -19,6 +19,10 @@
 //! `exit_mid_turn`, exit with status 3 after the first tool call; emit the
 //! summary as two `agent_message_chunk`s; answer with `stop`. Every method
 //! received is appended to the file named by `FAKE_ACP_LOG`, if set.
+//!
+//! Each session offers a `model` config option (`fake-default`,
+//! `fake-fast`, `fake-retired`) settable with `session/set_config_option`;
+//! an unknown value is a JSON-RPC error.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
@@ -28,10 +32,23 @@ use serde_json::{json, Value};
 struct Fake {
     out: std::io::Stdout,
     sessions: HashMap<String, String>,
+    models: HashMap<String, String>,
     next_session: usize,
     next_request: usize,
     backlog: VecDeque<Value>,
     log: Option<std::path::PathBuf>,
+}
+
+/// Models the fake offers. `fake-retired` is accepted when set but swapped
+/// for `fake-default` when the next turn starts, the way Copilot silently
+/// replaced a retired model (issue #374).
+const FAKE_MODELS: &[&str] = &["fake-default", "fake-fast", "fake-retired"];
+
+fn model_options(current: &str) -> Value {
+    json!([{
+        "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": current,
+        "options": FAKE_MODELS.iter().map(|m| json!({ "value": m, "name": m })).collect::<Vec<_>>(),
+    }])
 }
 
 impl Fake {
@@ -88,6 +105,7 @@ impl Fake {
                 self.next_session += 1;
                 let session_id = format!("sess-{}", self.next_session);
                 self.sessions.insert(session_id.clone(), cwd);
+                self.models.insert(session_id.clone(), "fake-default".to_string());
                 let mcp_names: Vec<Value> = params
                     .get("mcpServers")
                     .and_then(Value::as_array)
@@ -95,8 +113,18 @@ impl Fake {
                     .unwrap_or_default();
                 self.send(json!({
                     "jsonrpc": "2.0", "id": id,
-                    "result": { "sessionId": session_id, "configOptions": [], "_meta": { "mcpServers": mcp_names } },
+                    "result": { "sessionId": session_id, "configOptions": model_options("fake-default"), "_meta": { "mcpServers": mcp_names } },
                 }));
+            }
+            ("session/set_config_option", Some(id)) => {
+                let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+                let value = params.get("value").and_then(Value::as_str).unwrap_or("");
+                if params.get("configId").and_then(Value::as_str) != Some("model") || !FAKE_MODELS.contains(&value) || !self.models.contains_key(&session_id) {
+                    self.send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": format!("invalid config value {value:?}") } }));
+                } else {
+                    self.models.insert(session_id, value.to_string());
+                    self.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "configOptions": model_options(value) } }));
+                }
             }
             ("session/prompt", Some(id)) => self.prompt(id, params, lines),
             ("session/close", Some(id)) => {
@@ -140,6 +168,10 @@ impl Fake {
         };
 
         self.update(&session_id, json!({ "sessionUpdate": "usage_update", "used": 10, "size": 1000 }));
+        if self.models.get(&session_id).map(String::as_str) == Some("fake-retired") {
+            self.models.insert(session_id.clone(), "fake-default".to_string());
+            self.update(&session_id, json!({ "sessionUpdate": "config_option_update", "configOptions": model_options("fake-default") }));
+        }
 
         if let Some(ms) = task.get("sleep_ms").and_then(Value::as_u64) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -229,6 +261,7 @@ pub fn main() {
     let mut fake = Fake {
         out: std::io::stdout(),
         sessions: HashMap::new(),
+        models: HashMap::new(),
         next_session: 0,
         next_request: 0,
         backlog: VecDeque::new(),
