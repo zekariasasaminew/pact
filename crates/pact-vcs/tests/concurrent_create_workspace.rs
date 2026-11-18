@@ -82,6 +82,9 @@ fn n_concurrent_create_workspace_calls_produce_n_workspaces() {
         workspaces.len(),
         N,
         "expected exactly {N} workspaces on disk after {N} concurrent create_workspace calls, found {}",
+        workspaces.len()
+    );
+
     cleanup(&repo);
 }
 
