@@ -29,6 +29,7 @@ struct Defaults {
     per_lane_reserve_mb: Option<u64>,
     runtime: Option<String>,
     model: Option<String>,
+    verify_timeout: Option<String>,
     #[serde(default)]
     prepare: Vec<String>,
 }
@@ -109,6 +110,16 @@ impl PactConfig {
         self.defaults.model.as_deref()
     }
 
+    /// `defaults.verify_timeout`: `pact run`'s `--verify-timeout` when the
+    /// flag is omitted (issue #410).
+    pub fn default_verify_timeout(&self) -> Result<Option<std::time::Duration>> {
+        self.defaults
+            .verify_timeout
+            .as_deref()
+            .map(|text| parse_duration(text).with_context(|| format!("defaults.verify_timeout = {text:?}")))
+            .transpose()
+    }
+
     /// The model for one lane of `agent` (issue #387): `--model`, then
     /// `--tier` looked up in `[tiers]`, then `defaults.model`, then `None`
     /// for the CLI's own default. A tier that is unknown or has no entry
@@ -133,6 +144,36 @@ impl PactConfig {
         }
         Ok(self.defaults.model.clone())
     }
+}
+
+/// `90`, `90s`, `20m`, `1h`, `1h30m`: a whole number of seconds,
+/// minutes or hours, or a sum of them. A bare number is seconds.
+pub fn parse_duration(text: &str) -> Result<std::time::Duration> {
+    let text = text.trim();
+    if let Ok(secs) = text.parse::<u64>() {
+        return Ok(std::time::Duration::from_secs(secs));
+    }
+    let mut total = 0u64;
+    let mut digits = String::new();
+    for c in text.chars() {
+        match c {
+            '0'..='9' => digits.push(c),
+            'h' | 'm' | 's' if !digits.is_empty() => {
+                let n: u64 = digits.parse().context("number too large")?;
+                total += n * match c {
+                    'h' => 3600,
+                    'm' => 60,
+                    _ => 1,
+                };
+                digits.clear();
+            }
+            _ => bail!("{text:?} is not a duration; use a number of seconds or forms like 90s, 20m, 1h30m"),
+        }
+    }
+    if !digits.is_empty() || text.is_empty() {
+        bail!("{text:?} is not a duration; use a number of seconds or forms like 90s, 20m, 1h30m");
+    }
+    Ok(std::time::Duration::from_secs(total))
 }
 
 #[cfg(test)]
@@ -207,5 +248,17 @@ codex = \"gpt-5-mini\"
         std::fs::write(dir.join(PactConfig::FILE_NAME), "this is not [ valid toml").unwrap();
         assert!(PactConfig::load(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durations_read_as_seconds_or_unit_sums_and_reject_anything_else() {
+        let secs = |text: &str| parse_duration(text).map(|d| d.as_secs()).ok();
+        assert_eq!(secs("90"), Some(90));
+        assert_eq!(secs("90s"), Some(90));
+        assert_eq!(secs("20m"), Some(1200));
+        assert_eq!(secs("1h30m"), Some(5400));
+        for bad in ["", "m", "20 min", "1h30", "-5", "1.5h"] {
+            assert_eq!(secs(bad), None, "{bad:?} must be rejected");
+        }
     }
 }

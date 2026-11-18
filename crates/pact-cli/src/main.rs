@@ -462,6 +462,13 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         plan_retries: usize,
 
+        /// How long one verification command may run (baseline or result)
+        /// before its process tree is killed and it counts as timed out:
+        /// seconds, or forms like 90s, 20m, 1h30m. Falls back to
+        /// `pact.toml`'s `defaults.verify_timeout`, then 20m.
+        #[arg(long)]
+        verify_timeout: Option<String>,
+
         /// Same meaning as on spawn-many.
         #[arg(long)]
         safety: Option<String>,
@@ -1217,6 +1224,7 @@ fn main() -> Result<()> {
             dry_run,
             repair_attempts,
             plan_retries,
+            verify_timeout,
             safety,
             deps,
             no_deps,
@@ -1243,6 +1251,13 @@ fn main() -> Result<()> {
             };
             if task.is_empty() {
                 bail!("the task is empty");
+            }
+            let verify_timeout = match verify_timeout {
+                Some(text) => config::parse_duration(&text).context("--verify-timeout")?,
+                None => config.default_verify_timeout()?.unwrap_or(pact_core::run::DEFAULT_VERIFY_TIMEOUT),
+            };
+            if verify_timeout.is_zero() {
+                bail!("--verify-timeout must be more than zero");
             }
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;
@@ -1304,6 +1319,7 @@ fn main() -> Result<()> {
                 dry_run,
                 plan_retries,
                 repair_attempts,
+                verify_timeout,
                 spawn: spawn_options,
             };
             let report = orchestrator.run_task(&task, &run_options, |index, agent, event| {
@@ -2575,6 +2591,7 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # runtime = \"auto\"  # auto (acp when every agent in the batch supports it, else process), process, or acp\n\
          # prepare = [\"npx next typegen\"]  # shell commands run in every new workspace after dependency prep, for generated gitignored files\n\
          # model = \"sonnet\"  # --model for every agent when neither --model nor --tier is given\n\
+         # verify_timeout = \"20m\"  # run: longest one verification command may take before its process tree is killed\n\
          \n\
          # Named model tiers for --tier: agent name to model id.\n\
          # [tiers.chore]\n\
@@ -2826,8 +2843,9 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
         println!("verify: no command (pass --verify or set `verify` in the plan)");
     }
     for v in &report.verify {
+        let timed_out = if v.timed_out { "TIMED OUT (killed): " } else { "" };
         println!(
-            "verify `{}`: {} (exit {}, {:.1}s)",
+            "verify `{}`: {timed_out}{} (exit {}, {:.1}s)",
             v.command,
             v.verdict(),
             v.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
@@ -2837,6 +2855,7 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
             for line in v.output_tail.lines() {
                 println!("    {line}");
             }
+            println!("    full output: {}", v.log.display());
         }
     }
     if report.succeeded() {

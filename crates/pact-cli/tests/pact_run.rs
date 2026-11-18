@@ -401,6 +401,76 @@ fn run_reads_the_task_from_a_file_and_rejects_both_or_neither() {
 }
 
 #[test]
+fn run_kills_a_hanging_verification_and_reports_it_timed_out() {
+    // Issue #410: a command that never exits must not hang the run. Here it
+    // hangs only once alpha.txt exists, so the baseline passes and the
+    // result times out; then one that hangs on the base too leaves no
+    // baseline to compare against.
+    let repo = init_repo("verify-timeout");
+    let shim = shim_dir();
+    let plan = serde_json::json!({
+        "task": "hang",
+        "shared_context": "",
+        "units": [{ "name": "alpha", "files": ["alpha.txt"], "brief": write_task("alpha.txt", "A", "a") }],
+    });
+    let plan_path = shim.join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+    let hang_after = if cfg!(windows) { "if exist alpha.txt (ping -n 60 127.0.0.1 >nul) else (exit 0)" } else { "if [ -f alpha.txt ]; then sleep 60; fi" };
+    let run = |verify: &str| {
+        let started = std::time::Instant::now();
+        let out = pact(
+            &repo,
+            &shim,
+            None,
+            &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "--verify", verify, "--verify-timeout", "2s", "--repair-attempts", "0", "x"],
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(45), "the run waited out the command: {:?}", started.elapsed());
+        out
+    };
+
+    let out = run(hang_after);
+    assert_eq!(out.status.code(), Some(1), "{}\n{}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains(&format!("[planner] [phase] baseline `{hang_after}` passes")), "{text}");
+    assert!(text.contains(&format!("verify `{hang_after}`: TIMED OUT (killed): FAILED (it passed on the base commit")), "{text}");
+    assert!(text.contains("    full output: ") && text.contains("after.log"), "{text}");
+    assert!(text.contains("run: FAILED."), "{text}");
+
+    assert!(pact(&repo, &shim, None, &["teardown", "--force"]).status.success());
+    let hang_always = if cfg!(windows) { "ping -n 60 127.0.0.1 >nul" } else { "sleep 60" };
+    let out = run(hang_always);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let text = stdout(&out);
+    assert!(text.contains("TIMED OUT after 2s (killed), so there is no baseline for it"), "{text}");
+    assert!(text.contains(&format!("verify `{hang_always}`: TIMED OUT (killed): FAILED (exit ?")), "no baseline means a plain failure:\n{text}");
+
+    let logs = std::fs::read_dir(state_dir(&repo).join("meta").join("verify")).unwrap().count();
+    assert_eq!(logs, 2, "one verification log directory per run");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
+fn run_verifies_with_ci_set() {
+    let repo = init_repo("verify-ci");
+    let shim = shim_dir();
+    let plan = serde_json::json!({
+        "task": "ci",
+        "shared_context": "",
+        "units": [{ "name": "alpha", "files": ["alpha.txt"], "brief": write_task("alpha.txt", "A", "a") }],
+    });
+    let plan_path = shim.join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+    let needs_ci = if cfg!(windows) { "if \"%CI%\"==\"true\" (exit 0) else (exit 1)" } else { "[ \"$CI\" = true ]" };
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "--verify", needs_ci, "x"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains(&format!("verify `{needs_ci}`: passed")), "{}", stdout(&out));
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn run_refuses_a_plan_file_that_cannot_run() {
     let repo = init_repo("bad-file");
     let shim = shim_dir();
