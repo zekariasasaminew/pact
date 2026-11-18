@@ -4,11 +4,11 @@ use serde::Serialize;
 use crate::db;
 
 /// A real merge conflict `merge-all` skipped, persisted so it can be
-/// retried later without re-running the whole batch -- see DESIGN.md
-/// ("pact-coord > Persisted conflicts / `pact resolve` (issue #85)").
+/// retried later without re-running the whole batch -- see docs/design/coord.md
+/// ("Persisted conflicts / `pact resolve` (issue #85)").
 /// Deliberately named `PersistedConflict`, not `Conflict`: that name is
 /// already taken by `leases::Conflict` (a lease-overlap warning), a
-/// completely different concept -- see the DESIGN.md section for the
+/// completely different concept -- see the docs/design/coord.md section for the
 /// third, also-unrelated `Conflict` in this codebase
 /// (`pact_core::FileConflict`, issue #8's cross-workspace file-touch
 /// report).

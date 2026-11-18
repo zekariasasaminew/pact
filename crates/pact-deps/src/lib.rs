@@ -1,13 +1,13 @@
 //! The dependency broker (Phase 1). Detects a workspace's package
 //! manager(s) and makes sure dependencies are ready before the agent's
-//! first real command runs -- see DESIGN.md ("pact-deps") for the caching
+//! first real command runs -- see docs/design/deps.md for the caching
 //! strategy per ecosystem.
 //!
 //! npm relied on a custom lockfile-hash-keyed content store through issue
 //! #233; that store is gone now, in favor of npm's own global cache
 //! (`~/.npm` or wherever `npm config get cache` points), shared
 //! automatically across concurrent `npm ci` calls with no pact-side
-//! locking needed -- see DESIGN.md for why, and what was verified by hand
+//! locking needed -- see docs/design/deps.md for why, and what was verified by hand
 //! before deleting it.
 
 mod cmdutil;
@@ -25,8 +25,8 @@ use std::str::FromStr;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-/// How dependency prep gets a workspace its dependencies -- see DESIGN.md
-/// ("pact-deps > Link mode", issue #283). Measured on a 287-file Next.js
+/// How dependency prep gets a workspace its dependencies -- see docs/design/deps.md
+/// ("Link mode", issue #283). Measured on a 287-file Next.js
 /// repo (Windows 11, NTFS, warm npm cache): a per-workspace `npm ci` took
 /// 99 s and wrote 32,104 files; a junction to the repo root's existing
 /// `node_modules` took 0.12 s.
@@ -79,7 +79,7 @@ impl std::fmt::Display for DepsMode {
     }
 }
 
-/// One package manager's prep outcome -- see DESIGN.md ("pact-deps >
+/// One package manager's prep outcome -- see docs/design/deps.md ("
 /// structured prep reporting", issue #12). Before this, `prepare` returned
 /// bare `Result<()>` and every real failure was a `tracing::warn!` and
 /// nothing else -- callers (and users) had no way to know which managers

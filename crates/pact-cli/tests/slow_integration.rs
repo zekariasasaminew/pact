@@ -4,7 +4,7 @@
 //! fast. Marked `#[ignore]` -- run explicitly with `cargo test --ignored`
 //! or `cargo test -- --include-ignored`, not part of the default `cargo
 //! test --workspace` most contributors and CI run on every push. See
-//! DESIGN.md ("pact-cli > Slow integration tier (issue #240)") for why
+//! docs/design/ci-release.md ("Slow integration tier (issue #240)") for why
 //! this tier exists and what it's for.
 //!
 //! Issue #11 (renumbered #240)'s own critique, verified against this
@@ -121,7 +121,7 @@ fn state_dir_for(repo: &Path) -> PathBuf {
 /// dependencies correctly gets an environment diagnosis, not a false
 /// per-workspace "your code failed" -- since `merge_all`'s integration
 /// worktree still has no dependency prep performed on it, a still-open,
-/// deliberately deferred gap documented in DESIGN.md) -- all in one real
+/// deliberately deferred gap documented in docs/design/vcs.md) -- all in one real
 /// run.
 #[test]
 #[ignore = "slow: 5 concurrent workspaces + a real npm ci -- run explicitly with `cargo test --ignored`"]
@@ -172,7 +172,7 @@ fn five_concurrent_tasks_each_run_a_real_npm_ci_under_real_contention() {
 
     // issue #232, honest end-to-end check: `merge_all`'s integration
     // worktree never gets dependency prep performed on it (a known,
-    // deliberately deferred gap -- see DESIGN.md), so a gate that
+    // deliberately deferred gap -- see docs/design/vcs.md), so a gate that
     // genuinely needs node_modules can't pass there regardless of
     // which workspace merges. The correct, fixed behavior is a *single*
     // preflight abort with an environment diagnosis before any workspace

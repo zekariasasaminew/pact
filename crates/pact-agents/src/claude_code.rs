@@ -7,7 +7,7 @@ pub struct ClaudeCodeAdapter;
 
 /// Common safe operations covering every ecosystem `pact-deps` already
 /// knows how to prepare, plus every tool this adapter's own coordination
-/// MCP server exposes -- see DESIGN.md ("pact-agents > Claude Code safety
+/// MCP server exposes -- see docs/design/agents-adapters.md ("Claude Code safety
 /// default", issue #104) for why the `mcp__pact-coord__*` entry is
 /// required, not optional: without it, `claim_files`/`release_files`/
 /// `send_message`/`check_messages` are silently denied by Claude Code's
@@ -15,7 +15,7 @@ pub struct ClaudeCodeAdapter;
 const DEFAULT_ALLOWED_TOOLS: &str =
     "Read Write Edit Glob Grep Bash(git *) Bash(npm *) Bash(pnpm *) Bash(yarn *) Bash(cargo *) Bash(go *) Bash(pip *) Bash(uv *) Bash(mvn *) Bash(gradle *) mcp__pact-coord__*";
 
-/// The lean profile's allowlist -- see DESIGN.md ("pact-agents > Claude
+/// The lean profile's allowlist -- see docs/design/agents-adapters.md ("Claude
 /// lean profile", issue #288). Same as the default minus the blanket
 /// `Bash(npm *)`/`Bash(pnpm *)`/`Bash(yarn *)`, which permitted `npm
 /// install` into a linked, shared `node_modules` (issue #283) and full
@@ -34,12 +34,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
         "pact-coord"
     }
 
-    /// See DESIGN.md ("pact-agents > Claude Code safety default").
+    /// See docs/design/agents-adapters.md ("Claude Code safety default").
     fn default_safety_description(&self) -> &'static str {
         "--allowedTools (curated safe operations, no full permission bypass)"
     }
 
-    /// See DESIGN.md ("pact-agents > Claude Code safety default").
+    /// See docs/design/agents-adapters.md ("Claude Code safety default").
     fn build_command(
         &self,
         task: &str,
@@ -74,7 +74,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         ("claude".to_string(), args)
     }
 
-    /// The lean profile -- see DESIGN.md ("pact-agents > Claude lean
+    /// The lean profile -- see docs/design/agents-adapters.md ("Claude lean
     /// profile", issue #288). Measured on a trivial prompt (Claude Code
     /// 2.1.284, haiku): the user's 9 MCP servers made `init` take 14-19 s
     /// and the process 25 s; `--strict-mcp-config` brings that to 5-6 s
@@ -109,8 +109,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 }
 
-/// Schema modeled against real captured output -- see DESIGN.md
-/// ("pact-agents > Claude Code output schema").
+/// Schema modeled against real captured output -- see docs/design/agents-adapters.md
+/// ("Claude Code output schema").
 fn parse_line(line: &str) -> Vec<AgentEvent> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,

@@ -1,5 +1,5 @@
-//! Cross-platform integration test for issue #6 -- see DESIGN.md
-//! ("pact-agents > Process group kill").
+//! Cross-platform integration test for issue #6 -- see docs/design/agents-adapters.md
+//! ("Process group kill").
 use std::process::{Command, Stdio};
 use std::time::Duration;
 

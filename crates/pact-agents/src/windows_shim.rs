@@ -1,5 +1,5 @@
 //! Resolves a Windows agent CLI's real, directly-executable target,
-//! bypassing `cmd.exe` wherever possible -- see DESIGN.md ("pact-agents >
+//! bypassing `cmd.exe` wherever possible -- see docs/design/agents-adapters.md ("
 //! Windows multi-line prompt truncation", issue #210).
 //!
 //! `cmd.exe`'s own command-line reader treats a raw embedded newline as

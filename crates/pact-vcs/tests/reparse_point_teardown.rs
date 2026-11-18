@@ -3,7 +3,7 @@
 //! symlink) inside the worktree and deletes the *target's* contents. For a
 //! `node_modules` linked to the repo's own install, that would wipe the
 //! user's real dependencies on every teardown. Real repo, real `git
-//! worktree remove`, real junction -- see DESIGN.md ("pact-vcs > Reparse
+//! worktree remove`, real junction -- see docs/design/vcs.md ("Reparse
 //! points and worktree removal").
 use std::path::{Path, PathBuf};
 use std::process::Command;

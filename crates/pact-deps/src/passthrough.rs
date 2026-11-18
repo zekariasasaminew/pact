@@ -6,8 +6,8 @@ use crate::cmdutil;
 use crate::detect::PackageManager;
 
 /// Warms the package manager's own global cache for ecosystems that already
-/// have one, instead of building pact-specific sharing -- see DESIGN.md
-/// ("pact-deps > Passthrough caching strategy"). `Ok(true)`/`Ok(false)`
+/// have one, instead of building pact-specific sharing -- see docs/design/deps.md
+/// ("Passthrough caching strategy"). `Ok(true)`/`Ok(false)`
 /// reflects whether the command itself succeeded; `Err` means it couldn't
 /// even be spawned. Callers building a structured prep report (issue #12)
 /// need that distinction -- a swallowed `Ok(())` regardless of exit code,
@@ -17,7 +17,7 @@ pub fn run(manager: PackageManager, workspace_path: &Path) -> Result<bool> {
     let (program, args): (&str, &[&str]) = match manager {
         // Bun's global cache is used automatically (no --prefer-offline
         // equivalent to opt into); --frozen-lockfile mirrors npm ci's
-        // reproducibility guarantee instead -- see DESIGN.md ("pact-deps >
+        // reproducibility guarantee instead -- see docs/design/deps.md ("
         // Bun detector").
         PackageManager::Bun => ("bun", &["install", "--frozen-lockfile"]),
         PackageManager::Pnpm => ("pnpm", &["install", "--prefer-offline"]),
@@ -37,7 +37,7 @@ pub fn run(manager: PackageManager, workspace_path: &Path) -> Result<bool> {
     run_command(program, args, workspace_path)
 }
 
-/// No custom store for plain pip/venv -- see DESIGN.md ("pact-deps >
+/// No custom store for plain pip/venv -- see docs/design/deps.md ("
 /// Passthrough caching strategy").
 fn run_pip_plain(workspace_path: &Path) -> Result<bool> {
     if workspace_path.join("requirements.txt").exists() {

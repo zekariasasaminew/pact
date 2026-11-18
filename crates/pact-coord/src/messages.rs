@@ -31,7 +31,7 @@ pub fn send_message(
 
 /// Returns every message addressed to `agent_id` (directly, or broadcast),
 /// excluding the agent's own broadcasts, that arrived since this agent last
-/// checked, then advances its cursor -- see DESIGN.md ("pact-coord >
+/// checked, then advances its cursor -- see docs/design/coord.md ("
 /// Per-agent read cursors") for why it's a cursor per agent rather than a
 /// shared `read_at` column, and why the cursor advances over every
 /// recipient-matching row rather than just the ones actually returned.

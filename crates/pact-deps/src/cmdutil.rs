@@ -4,7 +4,7 @@ use std::process::{Command, Output};
 use anyhow::{Context, Result};
 
 /// Spawns `program` with `args` in `cwd`, routed through `cmd /C` on
-/// Windows -- see DESIGN.md ("pact-deps > Windows .cmd shim resolution").
+/// Windows -- see docs/design/deps.md ("Windows .cmd shim resolution").
 pub fn run(program: &str, args: &[&str], cwd: &Path) -> Result<Output> {
     build_command(program, args, cwd).output().with_context(|| format!("failed to spawn `{program} {}`", args.join(" ")))
 }
@@ -12,7 +12,7 @@ pub fn run(program: &str, args: &[&str], cwd: &Path) -> Result<Output> {
 /// Like [`run`], but for read-only *detection* probes (e.g. `pnpm
 /// --version` in `pact doctor`): runs in a neutral temp directory with
 /// Corepack's package.json auto-pin disabled, so a probe never mutates a
-/// project it happens to be run from -- see DESIGN.md ("pact-deps >
+/// project it happens to be run from -- see docs/design/deps.md ("
 /// Detection probes must not write to the project", issue #299). On
 /// Corepack-managed shims (`pnpm`, `yarn`) a bare `--version` call
 /// otherwise appends a `packageManager` field to the nearest package.json.

@@ -1,6 +1,6 @@
 //! `pact fleet` (issue #388): independent tasks, each in its own
 //! repository if needed, one workspace and branch per task, never merged
-//! together. See DESIGN.md ("pact-core > `pact fleet`").
+//! together. See docs/design/run-planner.md ("`pact fleet`").
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

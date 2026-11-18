@@ -29,6 +29,6 @@ Settings.
 
 Deliberately minimal: one read-only view, no auto-refresh, no filtering
 UI (use `pact history`'s own `--workspace`/`--type`/`--since` flags from
-a terminal for that). See pact's own `DESIGN.md` ("VS Code extension v1",
+a terminal for that). See pact's own `docs/design/coord.md` ("VS Code extension v1",
 issue #128) for what's genuinely verified vs. not yet for this extension
 specifically.

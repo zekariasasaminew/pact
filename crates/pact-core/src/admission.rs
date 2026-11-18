@@ -1,4 +1,4 @@
-//! Admission control for `spawn_many` -- see DESIGN.md ("pact-core >
+//! Admission control for `spawn_many` -- see docs/design/admission.md ("
 //! Admission control", issue #285). Bounds how many agents are in their
 //! "running" phase at once, refuses to launch into a machine that is
 //! already short of memory, and spaces launches out so a provider does

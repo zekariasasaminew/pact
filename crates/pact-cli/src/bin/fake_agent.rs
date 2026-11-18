@@ -1,5 +1,5 @@
 //! Stands in for a real agent CLI (`claude`/`copilot`/`codex`/`gemini`) in
-//! end-to-end tests -- see DESIGN.md ("pact-cli > fake-agent end-to-end
+//! end-to-end tests -- see docs/design/ci-release.md ("fake-agent end-to-end
 //! harness", issue #157). Never spawns anything itself and never touches
 //! the network; a real subprocess a test can shim onto `PATH` under a real
 //! adapter's program name, so `pact spawn`/`spawn-many`/`merge-all` run

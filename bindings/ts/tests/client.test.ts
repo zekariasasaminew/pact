@@ -2,7 +2,7 @@
 // (built from this repo) against a real throwaway git repo, no mocking
 // -- spawning it costs nothing and involves no LLM, so there's no reason
 // to stub it the way a real agent-CLI call would need to be. See
-// DESIGN.md ("pact-coord SDK bindings v1", issue #127).
+// docs/design/coord.md ("pact-coord SDK bindings v1", issue #127).
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";

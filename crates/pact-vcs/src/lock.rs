@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 
 /// A serialized, PID-aware file lock: if the previous holder's process has
 /// died without cleaning up, the lock is stolen (checked via PID liveness)
-/// rather than left stale forever. See DESIGN.md ("pact-vcs > PidLock
+/// rather than left stale forever. See docs/design/vcs.md ("PidLock
 /// origin") for why this exists and where else it's reused.
 pub struct PidLock {
     path: PathBuf,

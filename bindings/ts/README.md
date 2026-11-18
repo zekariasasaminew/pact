@@ -17,7 +17,7 @@ npm install "github:zekariasasaminew/pact#path:bindings/ts"
 Requires a `pact` binary on `PATH` (or an explicit path) -- this client
 spawns `pact mcp-serve` itself and speaks real MCP over stdio; it does
 not talk to any standing network server, because pact-coord doesn't run
-as one. See pact's own `DESIGN.md` ("pact-coord SDK bindings v1") for why.
+as one. See pact's own `docs/design/coord.md` ("pact-coord SDK bindings v1") for why.
 
 Tested against pact `v0.3.0`'s wire shape; if a future pact release
 changes `pact-coord`'s tool schemas, pin to a matching pact version.

@@ -1,4 +1,4 @@
-//! Pluggable semantic conflict resolvers -- see DESIGN.md ("pact-vcs >
+//! Pluggable semantic conflict resolvers -- see docs/design/vcs.md ("
 //! Semantic auto-resolution"). Extracted from two previously hardcoded
 //! resolution paths in `WorkspaceManager::try_auto_resolve` (issue #151):
 //! `PackageJsonResolver` (JSON-aware dependency-block merge) and
@@ -46,8 +46,8 @@ pub(crate) trait SemanticResolver {
     fn resolve(&self, stages: &ConflictStages) -> Result<Option<ResolvedFile>>;
 }
 
-/// JSON-aware merge of `package.json`'s dependency blocks -- see DESIGN.md
-/// ("pact-vcs > Semantic auto-resolution").
+/// JSON-aware merge of `package.json`'s dependency blocks -- see docs/design/vcs.md
+/// ("Semantic auto-resolution").
 pub(crate) struct PackageJsonResolver;
 
 impl SemanticResolver for PackageJsonResolver {
@@ -180,7 +180,7 @@ const PACKAGE_JSON_DEP_KEYS: &[&str] = &[
 /// details on every resolved file, matching JSON's own conventions --
 /// this only touches the specific table entries that actually changed,
 /// leaving every comment, unrelated key, and unrelated table byte-for-byte
-/// as "ours" had it. See DESIGN.md ("pact-vcs > TOML manifest structural
+/// as "ours" had it. See docs/design/vcs.md ("TOML manifest structural
 /// merge (issue #272)").
 pub(crate) struct TomlManifestResolver {
     pub(crate) file_name: &'static str,
@@ -363,7 +363,7 @@ fn toml_value_to_edit(value: &toml::Value) -> Option<toml_edit::Value> {
 }
 
 /// Plain line-union merge for a `--append-only`-matched file -- see
-/// DESIGN.md ("pact-vcs > Semantic auto-resolution"). Configured per call
+/// docs/design/vcs.md ("Semantic auto-resolution"). Configured per call
 /// with the glob patterns from `merge-all --append-only`, since (unlike
 /// `PackageJsonResolver`) which files this applies to isn't fixed -- it's
 /// whatever the caller named.
@@ -627,7 +627,7 @@ fn cargo_toml_resolver() -> TomlManifestResolver {
     }
 }
 
-/// Poetry's dependency tables only -- see DESIGN.md ("pact-vcs > TOML
+/// Poetry's dependency tables only -- see docs/design/vcs.md ("TOML
 /// manifest structural merge (issue #272)") for why PEP 621's
 /// `[project.dependencies]` (a flat array of version-spec strings, not a
 /// name-keyed table) is deliberately out of scope for this resolver: it

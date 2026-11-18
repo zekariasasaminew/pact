@@ -6,7 +6,7 @@ description: When a user has one large coding task, or several independent ones,
 # pact
 
 pact is a CLI: every action is a shell command. Full reference:
-`docs/usage.md`. Why things are the way they are: `DESIGN.md`.
+`docs/usage.md`. Why things are the way they are: `DESIGN.md`, an index of `docs/design/`.
 
 ## Pick the command
 

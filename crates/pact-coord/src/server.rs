@@ -323,7 +323,7 @@ pub async fn serve(conn: Connection, agent_id: String, workspace_root: PathBuf) 
 const PIPE_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Serves `server` over any newline-delimited JSON-RPC byte streams, with a
-/// handshake shim between the client and rmcp -- see DESIGN.md, pact-coord
+/// handshake shim between the client and rmcp -- see docs/design/coord.md, pact-coord
 /// section "Pre-initialize requests are answered, not fatal" (issue #291).
 /// Until the client's `initialize` request has been forwarded, any other
 /// request is answered here with JSON-RPC -32601 and never reaches rmcp,

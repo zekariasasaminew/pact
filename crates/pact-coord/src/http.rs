@@ -16,8 +16,8 @@
 //! existence, is an rmcp `StreamableHttpService` whose factory builds the
 //! same `CoordServer` the stdio path uses, with that lane's agent id and
 //! workspace root, so lane identity comes from the URL and nothing about
-//! the tool contract or the operation log changes. See DESIGN.md
-//! ("pact-coord > Streamable HTTP mode").
+//! the tool contract or the operation log changes. See docs/design/coord.md
+//! ("Streamable HTTP mode").
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

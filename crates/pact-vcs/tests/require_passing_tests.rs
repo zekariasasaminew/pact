@@ -1,5 +1,5 @@
 //! Integration coverage for issue #65: `merge_all`'s `require_passing_tests`
-//! gate. Real repo, real shell commands -- see DESIGN.md ("pact-vcs >
+//! gate. Real repo, real shell commands -- see docs/design/vcs.md ("
 //! Test-gated merge (issue #65)").
 use std::path::{Path, PathBuf};
 use std::process::Command;

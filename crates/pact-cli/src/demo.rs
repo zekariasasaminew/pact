@@ -10,8 +10,8 @@ use pact_vcs::WorkspaceManager;
 /// and after so its verdict knows the baseline. Runs against a real,
 /// disposable temp repo with pact's real `WorkspaceManager`; only the
 /// planner and the agents are simulated, since those are the steps that
-/// cost money and need an installed, signed-in agent. See DESIGN.md
-/// ("pact-cli > `pact demo` (issue #119)") for why simulating just those
+/// cost money and need an installed, signed-in agent. See docs/design/cli.md
+/// ("`pact demo` (issue #119)") for why simulating just those
 /// steps was the deliberate choice.
 struct DemoTask {
     unit: &'static str,

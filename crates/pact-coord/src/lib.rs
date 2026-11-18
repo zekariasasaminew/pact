@@ -140,8 +140,8 @@ pub fn message_count_involving(repo_root: &Path, agent_ids: &[String]) -> Result
     Ok(count as usize)
 }
 
-/// Records one significant coordination-layer event -- see DESIGN.md
-/// ("pact-coord > Operation log / `pact history` (issue #84)"). A plain
+/// Records one significant coordination-layer event -- see docs/design/coord.md
+/// ("Operation log / `pact history` (issue #84)"). A plain
 /// synchronous open, same as `leases_matching`/`message_count_involving`:
 /// `pact-core` calls this from the main `pact` process (`merge_all`,
 /// `arbiter_decision`, `teardown`), never inside an `mcp-serve`
@@ -165,8 +165,8 @@ pub fn history(repo_root: &Path, filter: &HistoryFilter) -> Result<Vec<Operation
     operations::query_operations(&conn, filter)
 }
 
-/// Persists a real merge conflict `merge-all` skipped -- see DESIGN.md
-/// ("pact-coord > Persisted conflicts / `pact resolve` (issue #85)").
+/// Persists a real merge conflict `merge-all` skipped -- see docs/design/coord.md
+/// ("Persisted conflicts / `pact resolve` (issue #85)").
 pub fn record_conflict(repo_root: &Path, workspace_id: &str, target_branch: &str, files: &[String]) -> Result<()> {
     let conn = db::open(repo_root)?;
     persisted_conflicts::record_conflict(&conn, workspace_id, target_branch, files)?;

@@ -8,7 +8,7 @@ use crate::event::AgentEvent;
 /// invocation, including the `--skip-trust` fix below -- but the JSON
 /// output schema `parse_line` assumes is still inferred, not confirmed:
 /// no `GEMINI_API_KEY`/OAuth credentials were available to get a real
-/// response past the auth check. See DESIGN.md ("pact-agents > Gemini
+/// response past the auth check. See docs/design/agents-adapters.md ("Gemini
 /// adapter", issue #9).
 pub struct GeminiAdapter;
 
@@ -17,13 +17,13 @@ impl AgentAdapter for GeminiAdapter {
         "pact-coord"
     }
 
-    /// See DESIGN.md ("pact-agents > Gemini adapter").
+    /// See docs/design/agents-adapters.md ("Gemini adapter").
     fn default_safety_description(&self) -> &'static str {
         "--approval-mode yolo --skip-trust (can run any shell command and edit any file with no \
          restriction)"
     }
 
-    /// See DESIGN.md ("pact-agents > Gemini adapter") for the MCP config
+    /// See docs/design/agents-adapters.md ("Gemini adapter") for the MCP config
     /// mechanism, which differs from every other adapter, and for the
     /// `--skip-trust` fix.
     fn build_command(
@@ -56,7 +56,7 @@ impl AgentAdapter for GeminiAdapter {
         ("gemini".to_string(), args)
     }
 
-    /// Inferred, not confirmed -- see DESIGN.md ("pact-agents > Gemini
+    /// Inferred, not confirmed -- see docs/design/agents-adapters.md ("Gemini
     /// adapter").
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         let value: Value = match serde_json::from_str(line) {

@@ -14,7 +14,7 @@ use crate::event::AgentEvent;
 /// adapter, not a patch to `gemini.rs`. Everything below is confirmed by
 /// a real, authenticated, tool-using headless run (a `write_to_file`
 /// call that actually created a file, `status: SUCCESS` on the `result`
-/// event) -- see DESIGN.md ("pact-agents > Antigravity adapter").
+/// event) -- see docs/design/agents-adapters.md ("Antigravity adapter").
 pub struct AgyAdapter;
 
 /// `agy`'s coordination-server registration is process-global and
@@ -29,7 +29,7 @@ pub struct AgyAdapter;
 /// second registration overwrites the first, and whichever `pact
 /// mcp-serve` a spawn's own `agy` subprocess ends up launching depends on
 /// timing, not on which workspace it's actually running in. Documented,
-/// not hidden -- see DESIGN.md for the full writeup and why this is a
+/// not hidden -- see docs/design/agents-adapters.md for the full writeup and why this is a
 /// real limitation of `agy`'s own current CLI, not a pact bug.
 const COORD_SERVER_NAME: &str = "pact-coord";
 
@@ -201,7 +201,7 @@ mod tests {
         // write_to_file tool wrote into its own internal scratch
         // directory instead of the process's actual cwd/workspace --
         // silently corrupting the whole per-workspace orchestration
-        // model if missed. See DESIGN.md for the real repro.
+        // model if missed. See docs/design/agents-adapters.md for the real repro.
         let (_, args) =
             AgyAdapter.build_command("do the thing", None, None, std::path::Path::new("/tmp/workspace"));
         let idx = args.iter().position(|a| a == "--add-dir").unwrap();

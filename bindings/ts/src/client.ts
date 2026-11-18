@@ -3,7 +3,7 @@
  * coordination server (file leases + inter-agent messaging).
  *
  * Spawns `pact mcp-serve` itself and speaks real MCP (via Anthropic's own
- * `@modelcontextprotocol/sdk`) over stdio -- pact's own DESIGN.md
+ * `@modelcontextprotocol/sdk`) over stdio -- pact's own docs/design/coord.md
  * ("pact-coord SDK bindings v1", issue #127) covers why this is the
  * right shape (there is no standing coordination server to connect to
  * instead) and why the response parsing below is asymmetric
@@ -56,8 +56,8 @@ export interface ActiveLease {
   expiresAt: number;
 }
 
-/** The status lifecycle for a handoff request -- see DESIGN.md
- * ("pact-coord > Typed handoff/negotiation protocol", issue #163) for
+/** The status lifecycle for a handoff request -- see docs/design/coord.md
+ * ("Typed handoff/negotiation protocol", issue #163) for
  * the full design. `narrowed` is terminal for this request: accept a
  * counter-offer by sending a fresh `requestHandoff` scoped to
  * `narrowedFiles`, not by any further change to this one. */

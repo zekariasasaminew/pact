@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 /// A normalized view over one line of an agent CLI's streamed output,
-/// shared across every adapter -- see DESIGN.md ("pact-agents > AgentEvent
+/// shared across every adapter -- see docs/design/agents-adapters.md ("AgentEvent
 /// normalization") for why `Other` is always surfaced, never dropped.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -10,7 +10,7 @@ pub enum AgentEvent {
     },
     /// One MCP server's connection status, e.g. `("pact-coord",
     /// "connected")` or `(..., "failed")`. A separate variant, not bundled
-    /// into `Init` -- see DESIGN.md ("pact-agents > AgentEvent
+    /// into `Init` -- see docs/design/agents-adapters.md ("AgentEvent
     /// normalization").
     CoordStatus {
         name: String,

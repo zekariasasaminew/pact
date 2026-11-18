@@ -1,6 +1,6 @@
 //! Manual, Windows-only verification harness (not run by CI). Run with
-//! `cargo run -p pact-agents --example group_kill_check`. See DESIGN.md
-//! ("pact-agents > Process group kill").
+//! `cargo run -p pact-agents --example group_kill_check`. See docs/design/agents-adapters.md
+//! ("Process group kill").
 use std::process::{Command, Stdio};
 use std::time::Duration;
 

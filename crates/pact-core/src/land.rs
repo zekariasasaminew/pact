@@ -1,5 +1,5 @@
 //! Per-task results (issue #389): `land`, `discard`, and the workspace
-//! entries behind `pact list --json`. See DESIGN.md ("`pact land` and
+//! entries behind `pact list --json`. See docs/design/run-planner.md ("`pact land` and
 //! `pact discard`").
 
 use std::path::PathBuf;

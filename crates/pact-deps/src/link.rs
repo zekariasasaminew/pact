@@ -1,6 +1,6 @@
 //! Link mode: share the repo root's already-installed `node_modules` with
 //! a workspace through a directory link instead of running a full install
-//! there -- see DESIGN.md ("pact-deps > Link mode", issue #283). A junction
+//! there -- see docs/design/deps.md ("Link mode", issue #283). A junction
 //! on Windows (no privilege needed, unlike a directory symlink), a plain
 //! symlink elsewhere.
 

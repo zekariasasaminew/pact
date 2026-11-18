@@ -6,7 +6,7 @@ Claude Code, Codex, Gemini CLI, Antigravity) on one repository in parallel.
 lanes in one shared tree (Copilot lanes as ACP sessions in one process),
 commits once and verifies against a baseline, with a repair lane on a
 regression. Read README.md, then docs/usage.md; the why of every decision
-is in DESIGN.md.
+is in the area files under docs/design/, indexed by DESIGN.md.
 
 ## Crates
 
@@ -30,5 +30,6 @@ are never negotiable:
   and `cargo clippy --workspace --all-targets` clean before every commit.
 - Never spawn a real agent CLI in a test; use the fakes.
 - No AI attribution trailers in commits. No em dashes anywhere.
-- No comments that restate code; the why goes in DESIGN.md.
+- No comments that restate code; the why goes at the end of the matching
+  area file under docs/design/.
 - Record every benchmark measurement on issue #308 or #305.

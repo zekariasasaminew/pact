@@ -26,7 +26,7 @@ pub const OWNER_FILE: &str = "repo.txt";
 
 /// Lives under the platform's local data directory, keyed by a hash of the
 /// repo root -- deliberately not under `.pact-<repo>/` with the
-/// per-workspace bookkeeping. See DESIGN.md ("pact-coord > Database
+/// per-workspace bookkeeping. See docs/design/coord.md ("Database
 /// placement").
 pub fn db_path(repo_root: &Path) -> Result<PathBuf> {
     let mut hasher = Sha256::new();
@@ -101,7 +101,7 @@ pub fn open(repo_root: &Path) -> Result<Connection> {
     let conn = Connection::open(&path)
         .with_context(|| format!("opening coordination database {}", path.display()))?;
 
-    // WAL + busy_timeout -- see DESIGN.md ("pact-coord > WAL mode").
+    // WAL + busy_timeout -- see docs/design/coord.md ("WAL mode").
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
 

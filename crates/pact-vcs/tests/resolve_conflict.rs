@@ -1,5 +1,5 @@
 //! Integration coverage for `WorkspaceManager::resolve_conflict` (issue
-//! #85) against a real, throwaway git repo -- see DESIGN.md ("pact-vcs >
+//! #85) against a real, throwaway git repo -- see docs/design/vcs.md ("
 //! Persisted conflicts (issue #85)"). Same fixture shape as
 //! `merge_all.rs`'s own real-conflict test: two workspaces edit the same
 //! line of a multi-line file so git's plain 3-way merge always conflicts,

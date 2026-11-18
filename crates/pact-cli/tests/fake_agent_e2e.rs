@@ -1,6 +1,6 @@
 //! End-to-end tests driving the real `pact` binary against a real git repo
-//! with a real (fake) agent subprocess on `PATH` -- see DESIGN.md
-//! ("pact-cli > fake-agent end-to-end harness", issue #157). Unlike this
+//! with a real (fake) agent subprocess on `PATH` -- see docs/design/ci-release.md
+//! ("fake-agent end-to-end harness", issue #157). Unlike this
 //! project's existing unit/integration tests, which stub out agent
 //! invocation entirely (e.g. `ArbiterResolver` closures) or never spawn a
 //! process at all, these exercise the actual `spawn -> stream stdout ->

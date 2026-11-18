@@ -1,6 +1,6 @@
 //! Integration coverage for `WorkspaceManager::neutralize_conflict` /
-//! `restore_conflict` against a real, throwaway git repo -- see DESIGN.md
-//! ("pact-core > Arbiter Write-fresh redesign", issue #106). These exist
+//! `restore_conflict` against a real, throwaway git repo -- see docs/design/core-orchestrator.md
+//! ("Arbiter Write-fresh redesign", issue #106). These exist
 //! specifically because a real agent (confirmed by hand) refuses to
 //! operate on a file git still reports as unmerged ("UU"), so Arbiter
 //! needs to be able to temporarily clear that status and put it back

@@ -1,6 +1,6 @@
 //! Landing one workspace on its own (issue #389): commit it, bring its
 //! branch into the repository's checked-out branch, remove the worktree.
-//! See DESIGN.md ("`pact land` and `pact discard`").
+//! See docs/design/run-planner.md ("`pact land` and `pact discard`").
 
 use std::process::Command;
 

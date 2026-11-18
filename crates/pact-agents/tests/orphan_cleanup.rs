@@ -1,5 +1,5 @@
 //! Issue #237. Two things confirmed by real, adversarial tests here, not
-//! just reasoned about -- see DESIGN.md ("pact-agents > Orphaned
+//! just reasoned about -- see docs/design/agents-adapters.md ("Orphaned
 //! grandchild cleanup, and a deeper pipe-inheritance root cause, issue
 //! #237") for the full writeup:
 //!
