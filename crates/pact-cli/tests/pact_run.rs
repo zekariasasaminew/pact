@@ -337,8 +337,8 @@ fn run_repairs_a_regressed_combined_check_in_the_same_tree() {
     );
     assert!(out.status.success(), "repair run failed:\nstdout: {}\nstderr: {}", stdout(&out), stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains("repair attempt 1/1 for failed combined verification"), "{text}");
-    assert!(text.contains("repair attempt 1: done") && text.contains("(committed)"), "{text}");
+    assert!(text.contains("repair attempt 1/1 for failed combined verification: 1 lane in parallel (alpha)"), "{text}");
+    assert!(text.contains("repair attempt 1 (alpha): done") && text.contains("(committed)"), "{text}");
     assert!(text.contains(&format!("verify `{verify}`: passed")), "{text}");
     assert!(text.contains("run: OK"), "{text}");
 
@@ -346,6 +346,51 @@ fn run_repairs_a_regressed_combined_check_in_the_same_tree() {
     let batch = manager.list_workspaces().unwrap().into_iter().find(|workspace| workspace.shared_batch.is_none()).expect("batch kept");
     assert_eq!(std::fs::read_to_string(batch.path.join("alpha.txt")).unwrap(), "good\n");
     assert_eq!(run_git(&batch.path, &["rev-list", "--count", &format!("{}..HEAD", batch.base_commit)]).trim(), "2");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
+fn run_repairs_each_unit_in_parallel_in_its_own_lane() {
+    // Issue #372: two units each break a check; each failure goes to the
+    // unit owning the file, both lanes run in one round, one commit.
+    let repo = init_repo("parallel-repair");
+    let shim = shim_dir();
+    for (file, fix) in [("alpha.txt", "alpha-fix.json"), ("beta.txt", "beta-fix.json")] {
+        std::fs::write(repo.join(file), "good\n").unwrap();
+        let task = serde_json::json!({ "writes": { file: "good\n" }, "summary": format!("repaired {file}") }).to_string();
+        std::fs::write(repo.join(fix), task).unwrap();
+    }
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "fixtures"]);
+    let plan = serde_json::json!({
+        "task": "break two files",
+        "shared_context": "",
+        "units": [
+            { "name": "alpha", "files": ["alpha.txt"], "brief": write_task("alpha.txt", "bad\n", "broke alpha") },
+            { "name": "beta", "files": ["beta.txt"], "brief": write_task("beta.txt", "bad\n", "broke beta") }
+        ],
+    });
+    let plan_path = shim.join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+    let check_alpha = repairable_check("alpha.txt", "good", "alpha-fix.json");
+    let check_beta = repairable_check("beta.txt", "good", "beta-fix.json");
+
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "--verify", &check_alpha, "--verify", &check_beta, "x"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("repair attempt 1/1 for failed combined verification: 2 lanes in parallel (alpha, beta)"), "{text}");
+    assert!(text.contains("repair attempt 1 (alpha): done") && text.contains("repair attempt 1 (beta): done"), "{text}");
+    assert_eq!(text.matches("[planner] [phase] committing repair attempt 1").count(), 1, "one commit for the round:\n{text}");
+    assert!(text.contains("run: OK"), "{text}");
+
+    let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
+    let ids: Vec<String> = manager.list_workspaces().unwrap().into_iter().map(|w| w.id).collect();
+    assert!(ids.contains(&"repair-1-alpha".to_string()) && ids.contains(&"repair-1-beta".to_string()), "{ids:?}");
+    let batch = manager.list_workspaces().unwrap().into_iter().find(|w| w.shared_batch.is_none()).unwrap();
+    assert_eq!(std::fs::read_to_string(batch.path.join("alpha.txt")).unwrap(), "good\n");
+    assert_eq!(std::fs::read_to_string(batch.path.join("beta.txt")).unwrap(), "good\n");
 
     cleanup(&repo);
     cleanup(&shim);

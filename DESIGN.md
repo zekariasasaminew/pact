@@ -1508,6 +1508,28 @@ The repair brief gives each failing file its excerpt and marks the ones
 the run never changed, since the repair may only edit touched files and
 has to fix those failures through them.
 
+#### Repair lanes per unit, in parallel (issue #372)
+
+#362's repair was one agent fixing every failure in turn. In R5 it ran
+31 minutes, longer than any lane, and the checks still failed. The plan
+already says which unit owns every file, and #373 says which files
+failed, so `route_repairs` sends each failing file to the unit that
+owns it. That unit's repair lane gets only its own files' excerpts and
+may edit only its own files, so the round's lanes are disjoint the same
+way the plan's units are, and they run together through `spawn_many_in`
+under the run's runtime and admission policy. A failing file no unit
+owns, a check whose output names no file, and a check that timed out go
+to one extra lane, which may edit the touched files no unit lane holds
+that round. Untouched files stay off limits for every lane: a test the
+run did not edit that now fails is evidence against the run, and letting
+the repair edit it would hide that. If the extra lane is left with
+nothing it may edit, its checks become context for every unit lane
+rather than a lane that cannot act. Each round commits once after its
+lanes finish and reruns every check; `--repair-attempts` still counts
+rounds, and a round in which no lane succeeded ends the loop. Lane names
+are `repair-<round>-<unit>` and `repair-<round>`, suffixed if they would
+collide with a unit's name.
+
 ### `pact fleet`: independent tasks (issue #388)
 
 `spawn-many` and `pact run` assume one repository and one result: the
