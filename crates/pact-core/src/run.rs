@@ -91,15 +91,21 @@ pub fn validate_plan(plan: &Plan, max_units: usize) -> Vec<String> {
     if plan.units.len() > max_units {
         problems.push(format!("the plan has {} units; at most {max_units} are allowed", plan.units.len()));
     }
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_slugs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut owners: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for unit in &plan.units {
         let name = unit.name.trim();
-        if !name.chars().any(|c| c.is_ascii_alphanumeric()) {
-            problems.push(format!("unit name {:?} must contain at least one ASCII letter or digit", unit.name));
-        }
-        if !seen_names.insert(name.to_ascii_lowercase()) {
-            problems.push(format!("unit name {name:?} is used more than once"));
+        if let Some(problem) = unit_name_problem(&unit.name) {
+            problems.push(problem);
+        } else {
+            let slug = pact_vcs::name_slug(name);
+            match seen_slugs.get(&slug) {
+                Some(first) if first == name => problems.push(format!("unit name {name:?} is used more than once")),
+                Some(first) => problems.push(format!("unit names {first:?} and {name:?} both become workspace {slug:?}; give them names that differ in letters or digits")),
+                None => {
+                    seen_slugs.insert(slug, name.to_string());
+                }
+            }
         }
         if unit.files.is_empty() {
             problems.push(format!("unit {name:?} owns no files"));
@@ -121,6 +127,26 @@ pub fn validate_plan(plan: &Plan, max_units: usize) -> Vec<String> {
         problems.push(format!("file {file:?} is owned by more than one unit ({}); give it to exactly one", units.join(", ")));
     }
     problems
+}
+
+/// The longest unit name a plan may use (issue #414).
+pub const MAX_UNIT_NAME_LEN: usize = 48;
+
+/// Why `name` cannot be a unit name, if it cannot: it becomes a workspace
+/// id and a file name, so it must be `[A-Za-z0-9][A-Za-z0-9._-]*` and
+/// short (issue #414).
+fn unit_name_problem(name: &str) -> Option<String> {
+    let mut chars = name.chars();
+    let well_formed = chars.next().is_some_and(|c| c.is_ascii_alphanumeric()) && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !well_formed {
+        return Some(format!(
+            "unit name {name:?} must start with an ASCII letter or digit and contain only letters, digits, '.', '_' and '-' (short-kebab-case)"
+        ));
+    }
+    if name.len() > MAX_UNIT_NAME_LEN {
+        return Some(format!("unit name {name:?} is {} characters; at most {MAX_UNIT_NAME_LEN} are allowed", name.len()));
+    }
+    None
 }
 
 /// Line counts of the files each unit owns that already exist, as a
@@ -304,6 +330,18 @@ pub fn repair_prompt(previous_json: &str, problems: &[String]) -> String {
          Fix every problem and reply again with one complete JSON plan in a ```json fenced block and nothing after it.",
         problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n")
     )
+}
+
+/// What a retry sends: the repair alone to a planner that still has the
+/// conversation, the whole first prompt before it to one that does not,
+/// so it still sees the task, the rules and the test anchors (issue #413).
+fn retry_prompt(first_prompt: &str, keeps_context: bool, previous_json: &str, problems: &[String]) -> String {
+    let repair = repair_prompt(previous_json, problems);
+    if keeps_context {
+        repair
+    } else {
+        format!("{first_prompt}\n\n{repair}")
+    }
 }
 
 /// One unit's self-contained worker brief. The shared-tree preamble
@@ -739,13 +777,13 @@ impl Orchestrator {
                 (plan, Planning { attempts: 0, log: None, elapsed: Duration::ZERO }, None)
             }
             None if options.dry_run => {
-                let (plan, attempts, log) = self.plan_task(task, options, &mut |event| planner_events(event))?;
+                let (plan, attempts, log) = self.plan_task(task, options, &planner_events)?;
                 (plan, Planning { attempts, log: Some(log), elapsed: planning_started.elapsed() }, None)
             }
             None => {
                 let (planned, prepared) = std::thread::scope(|scope| {
                     let prep = scope.spawn(|| self.prepare_run_tree(task, &spawn_options, options.verify, &verify_context, &planner_events));
-                    let planned = self.plan_task(task, options, &mut |event| planner_events(event));
+                    let planned = self.plan_task(task, options, &planner_events);
                     (planned, prep.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the thread preparing the shared tree panicked"))))
                 });
                 let elapsed = planning_started.elapsed();
@@ -862,7 +900,7 @@ impl Orchestrator {
         let mut tasks = Vec::new();
         for unit in &plan.units {
             let brief = render_brief(&plan, unit);
-            let path = briefs_dir.join(format!("{}.md", unit.name));
+            let path = briefs_dir.join(format!("{}.md", pact_vcs::name_slug(&unit.name)));
             std::fs::write(&path, &brief).with_context(|| format!("writing {}", path.display()))?;
             brief_paths.push(path);
             tasks.push(SpawnManyTask { agent: options.agent, task: brief, name: Some(unit.name.clone()), model: None });
@@ -1032,15 +1070,17 @@ impl Orchestrator {
     }
 
     /// Asks the planner for a plan, validates it, and sends violations
-    /// back up to `plan_retries` times. Refuses a planner that modified
-    /// the repository: planning is read-only by contract. Every attempt
+    /// back up to `plan_retries` times, in the same conversation when the
+    /// runtime keeps one and with the whole planner prompt again when it
+    /// does not (issue #413). Refuses a planner that modified the
+    /// repository: planning is read-only by contract. Every attempt
     /// appends to one `logs/planner-<stamp>.jsonl`, each attempt opened
     /// by a `{"pact": {"planner_attempt": n}}` line (issue #348).
     fn plan_task(
         &self,
         task: &str,
         options: &RunOptions<'_>,
-        on_event: &mut impl FnMut(&AgentEvent),
+        on_event: &impl Fn(&AgentEvent),
     ) -> Result<(Plan, usize, PathBuf)> {
         let before = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
         let anchors = discover_test_anchors(&self.repo_root, 6);
@@ -1048,132 +1088,147 @@ impl Orchestrator {
             on_event(&AgentEvent::Phase(format!("handing the planner {} existing test file(s) to imitate", anchors.len())));
         }
         let log_path = self.workspaces.state_dir().join("logs").join(format!("planner-{}.jsonl", unix_now()));
-        let mut prompt = planner_prompt(task, options.max_units, &anchors);
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            on_event(&AgentEvent::Phase(format!("planning (attempt {attempts})")));
-            append_log_line(&log_path, &serde_json::json!({ "t": crate::acp_runtime::unix_millis(), "pact": { "planner_attempt": attempts, "prompt_chars": prompt.len() } }))?;
-            let reply = self.ask_agent(options.agent, &self.repo_root, &prompt, &options.spawn, &log_path, on_event)?;
-            let after = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
-            let touched: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
-            if !touched.is_empty() {
-                bail!(
-                    "the planner modified the repository, which planning must never do: {}. Inspect with `git status` and revert before running again",
-                    touched.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ")
-                );
-            }
-            let plan = match parse_plan(&reply, task) {
-                Ok(plan) => plan,
-                Err(err) if attempts <= options.plan_retries => {
-                    on_event(&AgentEvent::Phase(format!("plan rejected: {err:#}")));
-                    prompt = repair_prompt(&extract_plan_json(&reply).unwrap_or_else(|| reply.clone()), &[format!("{err:#}")]);
-                    continue;
+        let first_prompt = planner_prompt(task, options.max_units, &anchors);
+        let (plan, attempts) = self.converse(options.agent, &self.repo_root, &options.spawn, &log_path, on_event, |ask, keeps_context| {
+            let mut prompt = first_prompt.clone();
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                on_event(&AgentEvent::Phase(format!("planning (attempt {attempts})")));
+                append_log_line(&log_path, &serde_json::json!({ "t": crate::acp_runtime::unix_millis(), "pact": { "planner_attempt": attempts, "prompt_chars": prompt.len() } }))?;
+                let reply = ask(&prompt)?;
+                let after = pact_vcs::changed_paths(&self.repo_root).unwrap_or_default();
+                let touched: Vec<&String> = after.iter().filter(|p| !before.contains(p)).collect();
+                if !touched.is_empty() {
+                    bail!(
+                        "the planner modified the repository, which planning must never do: {}. Inspect with `git status` and revert before running again",
+                        touched.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ")
+                    );
                 }
-                Err(err) => return Err(err.context(format!("the planner produced no usable plan in {attempts} attempt(s)"))),
-            };
-            let problems = validate_plan(&plan, options.max_units);
-            if problems.is_empty() {
-                return Ok((plan, attempts, log_path));
+                let plan = match parse_plan(&reply, task) {
+                    Ok(plan) => plan,
+                    Err(err) if attempts <= options.plan_retries => {
+                        on_event(&AgentEvent::Phase(format!("plan rejected: {err:#}")));
+                        prompt = retry_prompt(&first_prompt, keeps_context, &extract_plan_json(&reply).unwrap_or_else(|| reply.clone()), &[format!("{err:#}")]);
+                        continue;
+                    }
+                    Err(err) => return Err(err.context(format!("the planner produced no usable plan in {attempts} attempt(s)"))),
+                };
+                let problems = validate_plan(&plan, options.max_units);
+                if problems.is_empty() {
+                    return Ok((plan, attempts));
+                }
+                on_event(&AgentEvent::Phase(format!("plan rejected: {}", problems.join("; "))));
+                if attempts > options.plan_retries {
+                    bail!(
+                        "the planner's plan still cannot run after {attempts} attempt(s):\n{}",
+                        problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n")
+                    );
+                }
+                prompt = retry_prompt(&first_prompt, keeps_context, &serde_json::to_string_pretty(&plan)?, &problems);
             }
-            on_event(&AgentEvent::Phase(format!("plan rejected: {}", problems.join("; "))));
-            if attempts > options.plan_retries {
-                bail!(
-                    "the planner's plan still cannot run after {attempts} attempt(s):\n{}",
-                    problems.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n")
-                );
-            }
-            prompt = repair_prompt(&serde_json::to_string_pretty(&plan)?, &problems);
-        }
+        })?;
+        Ok((plan, attempts, log_path))
     }
 
-    /// Runs one agent turn in `cwd` with no workspace and returns the
-    /// assistant's text: the planner's call. Uses the ACP runtime when the
-    /// agent has one (one session in a throwaway process), else a
-    /// headless process run; either way the events stream to `on_event`
-    /// like a lane's would, and every raw update is appended to
+    /// Holds one planner conversation in `cwd` with no workspace and lets
+    /// `drive` ask it any number of turns, returning the assistant's text
+    /// for each. Under ACP every turn goes to one session in one throwaway
+    /// process, so a retry still has the task and everything the planner
+    /// read (issue #413); otherwise each turn is a fresh headless process
+    /// that remembers nothing. `drive` is told which. Events stream to
+    /// `on_event` like a lane's, and every raw update is appended to
     /// `log_path` in the same one-JSON-line shape as a lane's log.
-    pub fn ask_agent(
+    fn converse<T>(
         &self,
         agent: AgentKind,
         cwd: &Path,
-        prompt: &str,
         spawn: &SpawnOptions<'_>,
         log_path: &Path,
-        on_event: &mut impl FnMut(&AgentEvent),
-    ) -> Result<String> {
-        let mut text = String::new();
-        let mut forward = |event: &AgentEvent| {
+        on_event: &impl Fn(&AgentEvent),
+        drive: impl FnOnce(&mut dyn FnMut(&str) -> Result<String>, bool) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let collecting = |text: &mut String, event: &AgentEvent| {
             if let AgentEvent::AssistantText(t) = event {
                 text.push_str(t);
                 text.push('\n');
             }
             on_event(event);
         };
-        if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         match effective_runtime(spawn.runtime, &[agent]) {
             LaneRuntime::Acp => {
-                let batch = self.start_acp_batch(&[agent], spawn, &mut forward)?;
-                let runtime = batch.runtime(agent).ok_or_else(|| anyhow::anyhow!("no ACP process for {}", agent_kind_name(agent)))?;
-                let mut log = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_path)
-                    .with_context(|| format!("opening log file {}", log_path.display()))?;
-                let outcome = (|| -> Result<()> {
+                let batch = self.start_acp_batch(&[agent], spawn, &mut |event: &AgentEvent| on_event(event))?;
+                let outcome = (|| -> Result<T> {
+                    let runtime = batch.runtime(agent).ok_or_else(|| anyhow::anyhow!("no ACP process for {}", agent_kind_name(agent)))?;
+                    let mut log = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(log_path)
+                        .with_context(|| format!("opening log file {}", log_path.display()))?;
                     let mut session = runtime.new_session(cwd, Vec::new()).map_err(|err| anyhow::anyhow!("opening the planner session: {err}"))?;
-                    let mut coalescer = crate::acp_runtime::ChunkCoalescer::new();
-                    let stop = runtime
-                        .prompt(&mut session, prompt, |update| {
-                            let line = crate::acp_runtime::log_line(&update);
-                            let _ = writeln!(log, "{line}");
-                            coalescer.push(&update, &mut forward)
-                        })
-                        .map_err(|err| anyhow::anyhow!("planner turn: {err}"))?;
-                    coalescer.flush(&mut forward);
+                    let mut ask = |prompt: &str| -> Result<String> {
+                        let mut text = String::new();
+                        let mut forward = |event: &AgentEvent| collecting(&mut text, event);
+                        let mut coalescer = crate::acp_runtime::ChunkCoalescer::new();
+                        let stop = runtime
+                            .prompt(&mut session, prompt, |update| {
+                                let line = crate::acp_runtime::log_line(&update);
+                                let _ = writeln!(log, "{line}");
+                                coalescer.push(&update, &mut forward)
+                            })
+                            .map_err(|err| anyhow::anyhow!("planner turn: {err}"))?;
+                        coalescer.flush(&mut forward);
+                        if !stop.is_success() {
+                            bail!("the planner's turn ended with stop reason {}", stop.as_str());
+                        }
+                        Ok(text)
+                    };
+                    let result = drive(&mut ask, true);
                     let _ = runtime.close(&session);
-                    if !stop.is_success() {
-                        bail!("the planner's turn ended with stop reason {}", stop.as_str());
-                    }
-                    Ok(())
+                    result
                 })();
                 batch.shutdown();
-                outcome?;
+                outcome
             }
             _ => {
                 let adapter = pact_agents::adapter(agent);
-                let session_id = uuid::Uuid::new_v4().to_string();
-                let agent_home = self.workspaces.state_dir().join("homes").join(format!("planner-{session_id}"));
-                let launch = adapter.build_launch(&LaunchRequest {
-                    task: prompt,
-                    safety_override: pact_agents::resolve_safety_profile(agent, spawn.safety_override).as_deref(),
-                    coord: None,
-                    workspace_path: cwd,
-                    agent_home: &agent_home,
-                    session_id: &session_id,
-                    lean: spawn.lean,
-                    model: spawn.model,
-                });
-                let supervisor = Supervisor::new();
-                let run = pact_agents::run_and_stream(
-                    &supervisor,
-                    &launch.program,
-                    &launch.args,
-                    &launch.env,
-                    cwd,
-                    log_path,
-                    |line| adapter.parse_line(line),
-                    &mut forward,
-                    |_| {},
-                )?;
-                if !run.success {
-                    bail!("the planner run failed: {}", run.summary);
-                }
+                let mut ask = |prompt: &str| -> Result<String> {
+                    let mut text = String::new();
+                    let session_id = uuid::Uuid::new_v4().to_string();
+                    let agent_home = self.workspaces.state_dir().join("homes").join(format!("planner-{session_id}"));
+                    let launch = adapter.build_launch(&LaunchRequest {
+                        task: prompt,
+                        safety_override: pact_agents::resolve_safety_profile(agent, spawn.safety_override).as_deref(),
+                        coord: None,
+                        workspace_path: cwd,
+                        agent_home: &agent_home,
+                        session_id: &session_id,
+                        lean: spawn.lean,
+                        model: spawn.model,
+                    });
+                    let supervisor = Supervisor::new();
+                    let run = pact_agents::run_and_stream(
+                        &supervisor,
+                        &launch.program,
+                        &launch.args,
+                        &launch.env,
+                        cwd,
+                        log_path,
+                        |line| adapter.parse_line(line),
+                        |event: &AgentEvent| collecting(&mut text, event),
+                        |_| {},
+                    )?;
+                    if !run.success {
+                        bail!("the planner run failed: {}", run.summary);
+                    }
+                    Ok(text)
+                };
+                drive(&mut ask, false)
             }
         }
-        Ok(text)
     }
 }
 
@@ -1362,12 +1417,26 @@ mod tests {
         let problems = validate_plan(&p, 8);
         let joined = problems.join("\n");
         assert!(joined.contains("\"src/shared.ts\" is owned by more than one unit (a, A)"), "{joined}");
-        assert!(joined.contains("used more than once"), "{joined}");
+        assert!(joined.contains("unit names \"a\" and \"A\" both become workspace \"a\""), "{joined}");
         assert!(joined.contains("\"../outside.ts\" must be a repo-relative path"), "{joined}");
         assert!(joined.contains("\"C:/abs.ts\" must be a repo-relative path"), "{joined}");
-        assert!(joined.contains("must contain at least one ASCII letter or digit"), "{joined}");
+        assert!(joined.contains("\"---\" must start with an ASCII letter or digit"), "{joined}");
         assert!(joined.contains("owns no files"), "{joined}");
         assert!(joined.contains("has an empty brief"), "{joined}");
+    }
+
+    #[test]
+    fn unit_names_must_be_safe_identifiers_unique_by_workspace_id() {
+        let named = |names: &[&str]| validate_plan(&plan(names.iter().enumerate().map(|(i, n)| unit(n, &[&format!("f{i}.ts")])).collect()), 8).join("\n");
+        assert_eq!(named(&["alpha-one", "beta_2", "v1.2"]), "");
+        let slug_clash = named(&["Alpha.One", "alpha-one"]);
+        assert!(slug_clash.contains("both become workspace \"alpha-one\""), "{slug_clash}");
+        assert!(named(&["alpha", "alpha"]).contains("\"alpha\" is used more than once"));
+        for bad in ["..\\..\\..\\ESCAPED", "../x", "a/b", "Alpha One", ".hidden", "-x", ""] {
+            assert!(named(&[bad]).contains("must start with an ASCII letter or digit and contain only"), "{bad:?} must be rejected");
+        }
+        let long = "a".repeat(MAX_UNIT_NAME_LEN + 1);
+        assert!(named(&[long.as_str()]).contains("at most 48 are allowed"));
     }
 
     #[test]
@@ -1444,6 +1513,17 @@ mod tests {
         assert!(balance_warning(&[("a".into(), 100), ("b".into(), 90)]).is_none());
         assert!(balance_warning(&[("a".into(), 500), ("b".into(), 100)]).unwrap().contains("\"a\" owns 500"));
         assert!(balance_warning(&[("a".into(), 500), ("b".into(), 0)]).is_none(), "new-file units weigh nothing and are not compared");
+    }
+
+    #[test]
+    fn a_retry_without_the_conversation_carries_the_whole_first_prompt() {
+        let first = planner_prompt("Add tests for lib/", 4, &["lib/a.test.ts".to_string()]);
+        let problems = vec!["the plan has 9 units; at most 4 are allowed".to_string()];
+        let fresh = retry_prompt(&first, false, "{}", &problems);
+        assert!(fresh.starts_with(&first) && fresh.contains("Add tests for lib/") && fresh.contains("lib/a.test.ts"), "{fresh}");
+        assert!(fresh.contains("at most 4 are allowed"), "{fresh}");
+        let same_session = retry_prompt(&first, true, "{}", &problems);
+        assert!(!same_session.contains("Add tests for lib/") && same_session.contains("at most 4 are allowed"), "{same_session}");
     }
 
     #[test]
