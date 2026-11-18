@@ -47,7 +47,9 @@ pub fn offered_models(config_options: &[serde_json::Value]) -> Vec<String> {
     fn collect(options: &[serde_json::Value], out: &mut Vec<String>) {
         for option in options {
             if let Some(value) = option.get("value").and_then(|v| v.as_str()) {
-                out.push(value.to_string());
+                if !out.iter().any(|seen| seen == value) {
+                    out.push(value.to_string());
+                }
             } else if let Some(group) = option.get("options").and_then(|v| v.as_array()) {
                 collect(group, out);
             }
@@ -169,5 +171,21 @@ impl AcpRuntime {
     pub fn shutdown(self) {
         self.runtime.block_on(self.client.shutdown());
         self.runtime.shutdown_timeout(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_listed_twice_is_offered_once() {
+        // Copilot CLI 1.0.106 lists `auto` twice: once as the recommended
+        // entry and once in the full list.
+        let options = vec![serde_json::json!({
+            "type": "select", "id": "model", "category": "model", "currentValue": "auto",
+            "options": [{"value": "auto"}, {"value": "auto"}, {"value": "claude-haiku-5.5"}]
+        })];
+        assert_eq!(offered_models(&options), ["auto", "claude-haiku-5.5"]);
     }
 }
