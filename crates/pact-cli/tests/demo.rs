@@ -1,6 +1,6 @@
 //! Integration coverage for issue #119: `pact demo` runs a real,
-//! zero-cost, zero-decision walkthrough (real worktrees, real merge-all,
-//! simulated agent output instead of a real paid agent call) and cleans
+//! zero-cost, zero-decision walkthrough (a real shared tree, real lanes
+//! and commit, simulated planner and agents) and cleans
 //! up after itself. Drives the real built `pact` binary; deliberately
 //! run from a non-git temp directory to confirm the command doesn't
 //! require being inside a git repo -- unlike every other pact command.
@@ -21,9 +21,12 @@ fn demo_succeeds_from_outside_any_git_repo() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Simulating"), "expected simulated-agent framing, got: {stdout}");
-    assert!(stdout.contains("running merge-all"), "expected a merge-all step, got: {stdout}");
-    assert!(stdout.contains("merged"), "expected a successful merge in the report, got: {stdout}");
+    assert!(stdout.contains("simulated"), "expected simulated-agent framing, got: {stdout}");
+    assert!(stdout.contains("lane greeting: simulated agent wrote greeting.py"), "expected lanes in one shared tree, got: {stdout}");
+    assert!(stdout.contains("committed the shared tree once"), "expected one commit, got: {stdout}");
+    assert!(stdout.contains("verify: passed (it failed on the base commit, so this run fixed it)"), "expected a baseline-aware verdict, got: {stdout}");
+    assert!(stdout.contains("pact run --agent copilot --dry-run"), "expected pact run as the next step, got: {stdout}");
+    assert!(!stdout.contains("core loop"), "worktrees and merge-all are no longer the main path: {stdout}");
     assert!(stdout.contains("cleaning up the demo repo"), "expected explicit cleanup framing, got: {stdout}");
 }
 

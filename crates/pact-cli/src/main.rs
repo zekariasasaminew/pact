@@ -204,8 +204,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), e.g.
         /// `haiku` for Claude Code. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -395,8 +395,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), applied to every
         /// task; a tier resolves per task's agent. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -504,8 +504,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), for the
         /// planner, every lane and the repair lane. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -585,6 +585,18 @@ enum Command {
     /// "advisory, not enforced" philosophy leases themselves follow.
     /// Messages and history are untouched.
     ClearLeases,
+    /// Remove state no workspace uses any more: logs, agent homes and run
+    /// records of workspaces that are gone, plus planner logs, briefs and
+    /// verification logs, once older than --older-than. Plans are kept.
+    Gc {
+        /// Keep anything modified more recently than this: seconds, or
+        /// forms like 12h, 7d, 1d12h.
+        #[arg(long, default_value = "7d")]
+        older_than: String,
+        /// List what would be removed and its size, remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the coordination layer's operation log: every claim, release,
     /// broadcast, direct message, merge-all invocation, arbiter decision,
     /// and teardown recorded this session (and any prior session against
@@ -818,8 +830,9 @@ enum Command {
     /// Check whether your environment is actually ready for `pact`: is
     /// `git` new enough for `worktree`, which agent CLIs (claude, copilot,
     /// codex, gemini, agy) are installed, and which package-manager CLIs
-    /// `pact-deps` already knows how to prep. Read-only -- doesn't install
-    /// or fix anything. A missing agent CLI or package manager is
+    /// `pact-deps` already knows how to prep, and whether Copilot's
+    /// settings list skill directories that no longer exist. Read-only
+    /// unless --fix-skill-dirs is given. A missing agent CLI or package manager is
     /// informational, not a failure, since not everyone needs all of them;
     /// only a missing (or too-old) `git` makes this exit non-zero.
     Doctor {
@@ -827,6 +840,10 @@ enum Command {
         /// report -- for CI diagnostics and bug reports.
         #[arg(long)]
         json: bool,
+        /// Remove skillDirectories entries that no longer exist from
+        /// Copilot's settings.json.
+        #[arg(long)]
+        fix_skill_dirs: bool,
     },
     /// Run independent tasks from a TOML file, each in a workspace and
     /// branch of its own and each in its own repository if the file says
@@ -861,8 +878,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Command::Doctor { json } = cli.command {
-        return run_doctor(json);
+    if let Command::Doctor { json, fix_skill_dirs } = cli.command {
+        return run_doctor(json, fix_skill_dirs);
     }
 
     if let Command::Demo = cli.command {
@@ -942,7 +959,6 @@ fn main() -> Result<()> {
                 )
             })?;
             let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent)?;
-            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let coord_override = coord_command.map(|command| CoordServerOverride {
                 command,
@@ -1074,7 +1090,6 @@ fn main() -> Result<()> {
                 );
             }
             let agents: Vec<AgentKind> = batch.iter().map(|t| t.agent).collect();
-            let requested_runtime = runtime_for_model(requested_runtime, batch.iter().any(|t| t.model.is_some()))?;
             let runtime = pact_core::effective_runtime(requested_runtime, &agents);
             let admission = pact_core::AdmissionPolicy {
                 max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
@@ -1274,7 +1289,6 @@ fn main() -> Result<()> {
                 anyhow::anyhow!("unknown --agent '{agent_name}' (expected claude, copilot, codex, gemini, or agy) -- try: pact doctor")
             })?;
             let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent_name)?;
-            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let min_free_mem_mb = min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500);
@@ -1474,6 +1488,35 @@ fn main() -> Result<()> {
             let status = orchestrator.coord_status()?;
             let active_workspace_ids: Vec<String> = orchestrator.list()?.into_iter().map(|w| w.id).collect();
             print_coord_status(&status, &active_workspace_ids);
+        }
+        Command::Gc { older_than, dry_run } => {
+            let older_than = config::parse_duration(&older_than).context("--older-than")?;
+            let items = orchestrator.gc(older_than, dry_run)?;
+            let mut total: u64 = items.iter().map(|item| item.bytes).sum();
+            for item in &items {
+                println!("{} ({})", item.path.display(), human_size(item.bytes));
+            }
+            let cutoff = std::time::SystemTime::now().checked_sub(older_than).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let coord_dirs = pact_coord::prunable_dirs(cutoff)?;
+            for dir in &coord_dirs {
+                let owner = match &dir.repo {
+                    Some(repo) => format!("coordination database of {}, which no longer exists", repo.display()),
+                    None => "coordination database of an unrecorded repository".to_string(),
+                };
+                println!("{} ({}, {owner})", dir.path.display(), human_size(dir.bytes));
+                total += dir.bytes;
+                if !dry_run {
+                    if let Err(err) = std::fs::remove_dir_all(&dir.path) {
+                        tracing::warn!("gc: could not remove {}: {err}", dir.path.display());
+                    }
+                }
+            }
+            println!(
+                "{} {} item(s), {}",
+                if dry_run { "would remove" } else { "removed" },
+                items.len() + coord_dirs.len(),
+                human_size(total)
+            );
         }
         Command::ClearLeases => {
             let removed = orchestrator.clear_leases()?;
@@ -1941,7 +1984,15 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
         Some(run) => {
             let duration = run.ended_at.saturating_sub(run.started_at);
             println!("  agent: {}", run.agent);
-            println!("  command: {} {}", run.program, run.args.join(" "));
+            match (&run.model, &run.effective_model) {
+                (Some(requested), Some(effective)) if requested != effective => {
+                    println!("  model: {effective} (WARNING: {requested} was requested)")
+                }
+                (_, Some(effective)) => println!("  model: {effective}"),
+                (Some(requested), None) => println!("  model: {requested} (requested; the agent did not report what it ran)"),
+                (None, None) => {}
+            }
+            println!("  command: {}", shell_command(&run.program, &run.args));
             println!("  {} in {duration}s: {}", if run.exit_success { "succeeded" } else { "failed" }, run.summary);
             if run.exit_success && !run.files_touched {
                 println!(
@@ -2432,7 +2483,55 @@ fn doctor_group_json(checks: &[DoctorCheck]) -> serde_json::Value {
     )
 }
 
-fn run_doctor(json: bool) -> Result<()> {
+/// Copilot CLI's user settings: `$COPILOT_HOME/settings.json`, else
+/// `~/.copilot/settings.json`.
+fn copilot_settings_path() -> Option<PathBuf> {
+    let home = match std::env::var_os("COPILOT_HOME").filter(|v| !v.is_empty()) {
+        Some(home) => PathBuf::from(home),
+        None => dirs::home_dir()?.join(".copilot"),
+    };
+    Some(home.join("settings.json"))
+}
+
+/// `skillDirectories` entries in a Copilot settings file that no longer
+/// exist on disk (issue #304): left behind by pre-#294 test runs, which
+/// registered temporary repositories.
+fn dead_skill_dirs(settings: &serde_json::Value) -> Vec<String> {
+    settings
+        .get("skillDirectories")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .filter(|path| !Path::new(path).exists())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The doctor's skill-directory check: lists dead entries, and with `fix`
+/// removes them from the file.
+fn check_skill_dirs(fix: bool) -> Vec<String> {
+    let Some(path) = copilot_settings_path() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    let dead = dead_skill_dirs(&settings);
+    if fix && !dead.is_empty() {
+        if let Some(list) = settings.get_mut("skillDirectories").and_then(|v| v.as_array_mut()) {
+            list.retain(|v| !v.as_str().is_some_and(|p| dead.iter().any(|d| d == p)));
+        }
+        match serde_json::to_string_pretty(&settings) {
+            Ok(text) => {
+                if let Err(err) = std::fs::write(&path, text + "\n") {
+                    eprintln!("could not rewrite {}: {err}", path.display());
+                }
+            }
+            Err(err) => eprintln!("could not serialize {}: {err}", path.display()),
+        }
+    }
+    dead
+}
+
+fn run_doctor(json: bool, fix_skill_dirs: bool) -> Result<()> {
     let git_check = DoctorCheck { label: "git", program: "git", args: &["--version"] };
     let git_version = doctor_check_version(&git_check);
     // An unparseable-but-present version string is treated as "can't
@@ -2445,6 +2544,7 @@ fn run_doctor(json: bool) -> Result<()> {
         None => false,
     };
     let git_ok = git_version.is_some() && worktree_ok;
+    let dead_skills = check_skill_dirs(fix_skill_dirs);
 
     if json {
         let report = serde_json::json!({
@@ -2457,6 +2557,7 @@ fn run_doctor(json: bool) -> Result<()> {
             "arch": std::env::consts::ARCH,
             "agent_clis": doctor_group_json(AGENT_CHECKS),
             "package_managers": doctor_group_json(PACKAGE_MANAGER_CHECKS),
+            "copilot_dead_skill_directories": dead_skills,
         });
         println!("{}", serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("error serializing result: {e}")));
         if !git_ok {
@@ -2481,6 +2582,18 @@ fn run_doctor(json: bool) -> Result<()> {
     print_doctor_group("agent CLIs", AGENT_CHECKS);
     println!();
     print_doctor_group("package managers", PACKAGE_MANAGER_CHECKS);
+    if !dead_skills.is_empty() {
+        let settings = copilot_settings_path().map(|p| p.display().to_string()).unwrap_or_default();
+        println!();
+        if fix_skill_dirs {
+            println!("copilot skills: removed {} skillDirectories entr{} that no longer exist from {settings}:", dead_skills.len(), if dead_skills.len() == 1 { "y" } else { "ies" });
+        } else {
+            println!("copilot skills: {settings} lists skillDirectories that no longer exist (remove them, or run `pact doctor --fix-skill-dirs`):");
+        }
+        for dir in &dead_skills {
+            println!("  {dir}");
+        }
+    }
 
     if !git_ok {
         std::process::exit(1);
@@ -2639,6 +2752,17 @@ fn register_skill_with_detected_agents(repo_root: &Path, installed: &[&'static s
 }
 
 fn register_skill_with_copilot(repo_root: &Path) {
+    // Issue #304: a path under the temp directory is gone soon, and a
+    // registered dead path stays in Copilot's settings.json for good.
+    if let (Ok(repo), Ok(temp)) = (repo_root.canonicalize(), std::env::temp_dir().canonicalize()) {
+        if repo.starts_with(&temp) {
+            eprintln!(
+                "not registering SKILL.md with copilot: {} is under the temp directory, so the registration would outlive it",
+                repo_root.display()
+            );
+            return;
+        }
+    }
     // `copilot` ships as a `.cmd` shim on Windows -- `std::process::
     // Command` doesn't consult PATHEXT the way a real shell does, so a
     // direct spawn fails with "program not found" even though `copilot`
@@ -2663,6 +2787,30 @@ fn register_skill_with_copilot(repo_root: &Path) {
     }
 }
 
+/// `program args...` as the current platform's shell would need it typed
+/// (issue #303): an argument holding whitespace or a shell metacharacter
+/// is quoted, so the preview is the argv actually passed and can be
+/// pasted to reproduce the launch.
+fn shell_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program).chain(args.iter().map(String::as_str)).map(|arg| shell_quote(arg, cfg!(windows))).collect::<Vec<_>>().join(" ")
+}
+
+fn shell_quote(arg: &str, windows: bool) -> String {
+    if windows {
+        let special = |c: char| c.is_whitespace() || "\"&|<>^()%!".contains(c);
+        if !arg.is_empty() && !arg.chars().any(special) {
+            return arg.to_string();
+        }
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        let special = |c: char| c.is_whitespace() || "'\"\\$`;&|<>()*?[]#~{}!".contains(c);
+        if !arg.is_empty() && !arg.chars().any(special) {
+            return arg.to_string();
+        }
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 fn print_spawn_preview(preview: &pact_core::SpawnPreview, deps: pact_core::DepsMode) {
     println!("would create workspace {} ({})", preview.workspace_id, preview.branch);
     println!("  path: {}", preview.path.display());
@@ -2681,7 +2829,7 @@ fn print_spawn_preview(preview: &pact_core::SpawnPreview, deps: pact_core::DepsM
     for (key, value) in &preview.env {
         println!("  env: {key}={value}");
     }
-    println!("  command: {} {}", preview.program, preview.args.join(" "));
+    println!("  command: {}", shell_command(&preview.program, &preview.args));
 }
 
 /// `--deps`/`--no-deps`/`pact.toml`'s `defaults.deps` folded into one
@@ -2735,18 +2883,6 @@ fn resolve_runtime(flag: Option<String>, config: &PactConfig) -> Result<pact_cor
     }
 }
 
-/// A requested model rules out the ACP runtime until it can set one (issue
-/// #374): `auto` becomes `process`, an explicit `acp` is refused.
-fn runtime_for_model(requested: pact_core::LaneRuntime, has_model: bool) -> Result<pact_core::LaneRuntime> {
-    match (requested, has_model) {
-        (pact_core::LaneRuntime::Acp, true) => {
-            bail!("--runtime acp cannot set a model yet (issue #374); use --runtime process, or drop --model/--tier and defaults.model")
-        }
-        (pact_core::LaneRuntime::Auto, true) => Ok(pact_core::LaneRuntime::Process),
-        _ => Ok(requested),
-    }
-}
-
 /// The dry-run line for the lane runtime: what was asked for, what the
 /// batch resolved to (`auto -> acp`), and under `acp` how many shared
 /// processes the batch would start and for which agents, so the one-
@@ -2774,6 +2910,21 @@ fn print_runtime_preview(
         }
         _ => println!("runtime: {label} (one agent CLI process per lane)"),
     }
+}
+
+/// `512 B`, `3.4 KB`, `76.0 MB`, `1.2 GB`.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 /// `pact run`'s end-of-run listing (issue #305): the plan as decided, each
@@ -2820,7 +2971,10 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                     .unwrap_or_default();
                 println!("unit {}: {}{duration}: {}", workspace.id, if run.success { "done" } else { "failed" }, run.summary);
             }
-            Err(err) => println!("unit #{}: FAILED before/during launch -- {err:#}", outcome.index),
+            Err(err) => {
+                let unit = report.plan.units.get(outcome.index).map(|unit| unit.name.trim().to_string()).unwrap_or_else(|| format!("#{}", outcome.index));
+                println!("unit {unit}: FAILED, never ran: {err:#}");
+            }
         }
     }
     for violation in &report.ownership {
@@ -3408,6 +3562,19 @@ mod tests {
     fn parse_task_spec_requires_a_prefix_when_no_default_is_set() {
         let err = parse_task_spec("fix the bug", None).unwrap_err();
         assert!(err.to_string().contains("must be in the form"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn preview_arguments_are_quoted_the_way_each_shell_reads_them() {
+        assert_eq!(shell_quote("--allow-all-tools", true), "--allow-all-tools");
+        assert_eq!(shell_quote("unit A", true), "\"unit A\"");
+        assert_eq!(shell_quote("say \"hi\"", true), "\"say \\\"hi\\\"\"");
+        assert_eq!(shell_quote("shell(npm install:*)", true), "\"shell(npm install:*)\"");
+        assert_eq!(shell_quote("", true), "\"\"");
+        assert_eq!(shell_quote("unit A", false), "'unit A'");
+        assert_eq!(shell_quote("it's", false), "'it'\\''s'");
+        assert_eq!(shell_quote("shell(npm:*)", false), "'shell(npm:*)'");
+        assert_eq!(shell_quote("@C:/x/y.json", false), "@C:/x/y.json");
     }
 
     #[test]

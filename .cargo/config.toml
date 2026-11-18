@@ -1,0 +1,5 @@
+# Keeps every coordination database cargo's processes create (tests, and
+# `cargo run`) out of the real per-user data directory (issue #416). An
+# installed `pact` binary does not read this file.
+[env]
+PACT_COORD_DIR = { value = "target/pact-coord", relative = true }

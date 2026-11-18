@@ -58,6 +58,9 @@ macos and windows, plus the Python, TypeScript and VS Code binding jobs.
   on it; git's 3-way merge has surprised this codebase before.
 - `docs_cli_grammar.rs` parses every `pact` command in README.md, SKILL.md,
   GETTING_STARTED.md and docs/usage.md against the real CLI.
+- `.cargo/config.toml` sets `PACT_COORD_DIR` to `target/pact-coord` for
+  everything cargo runs, so tests never write coordination databases into
+  your real data directory; `cargo run` uses it too.
 
 ## Build footprint
 
