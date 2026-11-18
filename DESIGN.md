@@ -1289,7 +1289,16 @@ is something pact already knows. `pact run` moves the loop inside:
    "plan, print, stop" and `--plan <file>` is "skip the planner and run
    this", the edit-and-rerun loop the epic asked for. Unit names are
    workspace names; a rerun after a failed run needs `pact teardown`
-   first, and the collision error says so.
+   first, and the collision error says so. Names come from the planner,
+   which is model output reading arbitrary repository content, so
+   `validate_plan` holds them to `[A-Za-z0-9][A-Za-z0-9._-]*`, at most
+   48 characters, unique by the slug their workspace id is made from
+   (issue #414): `Alpha One` and `alpha-one` used to pass as different
+   names and then share one workspace id, and `..\..\x` wrote its brief
+   outside the state directory. Briefs are named by that slug too, and
+   `create_lane` creates its metadata file with `create_new`, so lanes
+   started concurrently under one id get one lane and one clean error
+   instead of overwriting each other.
 
 Arm R (issue #308) then ran it on the benchmark with the planner
 deciding the split: 16.3 min, level with Copilot's in-process
@@ -1362,6 +1371,20 @@ wall-clock in Unix milliseconds (issue #358): Copilot's updates have
 no timestamp of their own, and without one the log said what happened
 but not when, which sent the first timing analysis back to Copilot's
 own event file, the thing the log was meant to replace.
+
+A rejected plan used to go back to a new agent (issue #413): `ask_agent`
+started a fresh ACP process and session, or a fresh headless process,
+for every attempt, and `repair_prompt` carried only the previous plan
+and its problems. The retrying planner never saw the task, the rules or
+the test anchors, so it could shuffle the JSON but not re-split the
+work, and it re-read the repository from scratch at the cost of a whole
+planning turn. `converse` now holds one planner conversation for every
+attempt: under ACP one process and one session, so the short repair
+prompt lands in a conversation that already has everything; for the
+process runtime, where a turn remembers nothing, the retry is the whole
+first prompt followed by the repair. Resuming a process agent's own
+session would avoid resending the prompt, but each CLI resumes
+differently and the self-contained prompt is correct for all of them.
 
 The same timeline showed the shared tree, its dependency prep and the
 29 s baseline waiting behind planning for no reason (issue #353): none
