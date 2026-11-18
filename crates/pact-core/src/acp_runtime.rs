@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use pact_acp::{AcpRuntime, AgentSpec, SessionUpdate};
 use pact_agents::{AcpLaunchRequest, AgentEvent, AgentKind, LaunchSpec};
 use pact_coord::http::{HttpCoordServer, LaneRoute};
@@ -177,6 +177,17 @@ impl AcpBatch {
         self.runtimes.get(&agent)
     }
 
+    /// Checks that `agent`'s process offers `model` by opening a throwaway
+    /// session and selecting it, so a bad model fails the batch before any
+    /// lane launches (issue #374).
+    pub(crate) fn check_model(&self, agent: AgentKind, cwd: &Path, model: &str) -> Result<()> {
+        let runtime = self.runtime(agent).ok_or_else(|| anyhow!("no ACP process for {}", crate::agent_kind_name(agent)))?;
+        let mut session = runtime.new_session(cwd, Vec::new()).map_err(|err| anyhow!("opening a session to check the model: {err}"))?;
+        let selected = select_model(runtime, &mut session, model, agent);
+        let _ = runtime.close(&session);
+        selected.map(|_| ())
+    }
+
     /// The resolved launch of the process hosting `agent`'s lanes, for
     /// the run record.
     pub(crate) fn launch(&self, agent: AgentKind) -> Option<&LaunchSpec> {
@@ -189,6 +200,32 @@ impl AcpBatch {
         }
         self.coord.shutdown();
     }
+}
+
+/// Puts `session` on `model` (issue #374), or says why it cannot: the
+/// agent offers no model selector, or does not offer this model. Returns
+/// the model the session reports afterwards.
+pub(crate) fn select_model(runtime: &AcpRuntime, session: &mut pact_acp::LaneSession, model: &str, agent: AgentKind) -> Result<Option<String>> {
+    let name = crate::agent_kind_name(agent);
+    let option_id = pact_acp::model_option(&session.config_options)
+        .and_then(|option| option.get("id").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{name}'s ACP session offers no model selector, so model '{model}' cannot be set; use --runtime process"))?;
+    let offered = pact_acp::offered_models(&session.config_options);
+    if !offered.iter().any(|m| m == model) {
+        bail!("model '{model}' is not offered by {name} (offered: {})", offered.join(", "));
+    }
+    runtime.set_config_option(session, &option_id, model).map_err(|err| anyhow!("setting model '{model}': {err}"))?;
+    Ok(pact_acp::current_model(&session.config_options))
+}
+
+/// The model a `config_option_update` says the session switched to.
+pub(crate) fn model_in_update(update: &SessionUpdate) -> Option<String> {
+    if update.kind != "config_option_update" {
+        return None;
+    }
+    let options = update.raw.get("configOptions")?.as_array()?;
+    pact_acp::current_model(options)
 }
 
 /// The `AgentEvent` a `session/update` stands for, so the ACP path feeds

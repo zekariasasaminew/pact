@@ -426,10 +426,13 @@ pact spawn-many --tier chore --task "claude:rename the helper" --task "codex:fix
 
 `--model` wins over `--tier`, which wins over `defaults.model`. An unknown
 tier, or a tier with no model for a task's agent, is an error rather than
-a silent fallback to the default model. ACP lanes cannot set a model yet
-(#374), so a model makes `--runtime auto` pick `process`, and `--runtime
-acp` with a model is refused. `--dry-run` shows the `--model` argument
-each lane would get, and `meta/runs/<id>.json` records it as `model`.
+a silent fallback to the default model. ACP lanes select the model on
+their session; a model the agent does not offer stops the batch before
+any lane starts, and a lane the agent ran on a different model than
+requested prints a warning. `--dry-run` shows the `--model` argument
+each lane would get, and `meta/runs/<id>.json` records it as `model`,
+with the model the agent reported as `effective_model` (ACP lanes;
+`pact inspect` shows both).
 
 **Neither `spawn` nor `spawn-many` commits anything.** An agent's changes
 land in its workspace's working tree; `pact list` shows it as `[dirty]`

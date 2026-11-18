@@ -22,4 +22,4 @@ pub use client::{AcpClient, AcpError, AgentSpec, ExitInfo, PermissionPolicy};
 pub use protocol::{
     allow_first_permission, McpServer, PermissionDecision, PermissionKind, PermissionRequest, SessionUpdate, StopReason,
 };
-pub use runtime::{AcpRuntime, LaneSession};
+pub use runtime::{current_model, model_option, offered_models, AcpRuntime, LaneSession};

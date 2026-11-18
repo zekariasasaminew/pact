@@ -221,6 +221,46 @@ fn a_lane_whose_shared_process_dies_mid_turn_is_reported_as_failed() {
 }
 
 #[test]
+fn an_acp_lane_selects_the_requested_model_and_records_what_it_ran() {
+    // Issue #374: the model is a session config option under ACP.
+    let repo = init_repo("model");
+    let shim = shim_dir();
+    let acp_log = shim.join("methods.log");
+    let run = |name: &str, model: &str| {
+        Command::new(env!("CARGO_BIN_EXE_pact"))
+            .args(["--repo", repo.to_str().unwrap(), "spawn-many", "--agent", "copilot", "--model", model, "--name", name, "--task", &task(&[(&format!("{name}.txt"), "x")], "w")])
+            .env("PATH", path_with_shim_first(&shim))
+            .env("FAKE_ACP_LOG", &acp_log)
+            .output()
+            .unwrap()
+    };
+
+    let out = run("fast", "fake-fast");
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("model: fake-fast"), "{}", stdout(&out));
+    let record = run_record(&repo, "fast");
+    assert_eq!((record["runtime"].as_str(), record["model"].as_str(), record["effective_model"].as_str()), (Some("acp"), Some("fake-fast"), Some("fake-fast")), "auto stays ACP with a model (#415): {record}");
+    assert!(std::fs::read_to_string(&acp_log).unwrap().lines().any(|l| l == "session/set_config_option"));
+
+    let out = run("retired", "fake-retired");
+    let text = stdout(&out);
+    assert!(text.contains("WARNING: model 'fake-retired' was requested but the agent ran this lane on 'fake-default'"), "{text}");
+    assert_eq!(run_record(&repo, "retired")["effective_model"], "fake-default");
+    let inspect = stdout(&pact(&repo, &shim, &["inspect", "retired"]));
+    assert!(inspect.contains("model: fake-default (WARNING: fake-retired was requested)"), "{inspect}");
+
+    std::fs::remove_file(&acp_log).unwrap();
+    let out = run("typo", "fake-nope");
+    assert!(!out.status.success());
+    let text = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(text.contains("model 'fake-nope' is not offered by copilot (offered: fake-default, fake-fast, fake-retired)"), "{text}");
+    assert!(!std::fs::read_to_string(&acp_log).unwrap().lines().any(|l| l == "session/prompt"), "no lane ran a turn");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn runtime_acp_dry_run_names_the_shared_process_and_refuses_agents_without_acp() {
     let repo = init_repo("dry-run");
     let shim = shim_dir();
