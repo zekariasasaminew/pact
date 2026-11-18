@@ -42,6 +42,9 @@ pub struct WorkspaceEntry {
     pub commits_ahead: Option<usize>,
     pub agent: Option<String>,
     pub model: Option<String>,
+    /// The model the agent reported running on, when it said (issue #374).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
     /// Seconds the last run took.
     pub seconds: Option<u64>,
     pub summary: Option<String>,
@@ -187,6 +190,7 @@ impl Orchestrator {
                     state,
                     agent: meta.as_ref().map(|m| m.agent.clone()),
                     model: meta.as_ref().and_then(|m| m.model.clone()),
+                    effective_model: meta.as_ref().and_then(|m| m.effective_model.clone()),
                     seconds: meta.as_ref().map(|m| m.ended_at.saturating_sub(m.started_at)),
                     summary: meta.as_ref().map(|m| m.summary.clone()),
                     report: meta.and_then(|m| m.report),

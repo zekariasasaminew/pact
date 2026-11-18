@@ -10,7 +10,7 @@ that own disjoint files, every unit runs as a session inside one shared
 agent process, and pact commits the result and checks it against a baseline
 of the untouched tree. Nobody writes briefs, and no agent waits on another.
 
-![pact demo: two workspaces created, listed, and merged onto one branch](docs/demo.gif)
+![pact demo: a plan of two units, two lanes writing into one shared tree, one commit and a verification verdict](docs/demo.gif)
 
 *The real output of `pact demo`: no agent calls, no cost, about five seconds.*
 

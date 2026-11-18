@@ -26,7 +26,7 @@ pub use adapter::{
 };
 pub use event::AgentEvent;
 pub use process::{run_and_stream, run_shell_logged, RunOutcome, ShellRun};
-pub use supervisor::Supervisor;
+pub use supervisor::{forget_pid, kill_everything, register_pid, ChildPoll, Supervisor};
 
 /// What to spawn directly for `program`, without a shell: on Windows an
 /// npm `.cmd` shim resolves to its `node.exe` plus script (see

@@ -203,6 +203,14 @@ impl AcpClient {
         Ok(parsed.stop_reason)
     }
 
+    /// Sets one of the session's config options (`session/set_config_option`)
+    /// and returns the complete list the agent answers with.
+    pub async fn set_config_option(&self, session_id: &str, config_id: &str, value: &str) -> Result<Vec<Value>, AcpError> {
+        let params = serde_json::json!({ "sessionId": session_id, "configId": config_id, "value": value });
+        let result = self.request("session/set_config_option", params).await?;
+        Ok(result.get("configOptions").and_then(Value::as_array).cloned().unwrap_or_default())
+    }
+
     /// Asks the agent to stop the session's current turn. A notification:
     /// the in-flight `prompt` resolves with `StopReason::Cancelled`.
     pub async fn cancel(&self, session_id: &str) -> Result<(), AcpError> {

@@ -28,6 +28,38 @@ pub struct LaneSession {
     updates: mpsc::UnboundedReceiver<SessionUpdate>,
 }
 
+/// The session's model selector: the config option with id `model`, or
+/// failing that the first in category `model` (issue #374).
+pub fn model_option(config_options: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    config_options
+        .iter()
+        .find(|o| o.get("id").and_then(|v| v.as_str()) == Some("model"))
+        .or_else(|| config_options.iter().find(|o| o.get("category").and_then(|v| v.as_str()) == Some("model")))
+}
+
+/// The model the session currently runs on, per its config options.
+pub fn current_model(config_options: &[serde_json::Value]) -> Option<String> {
+    model_option(config_options)?.get("currentValue")?.as_str().map(str::to_string)
+}
+
+/// Every model value the session offers, groups flattened.
+pub fn offered_models(config_options: &[serde_json::Value]) -> Vec<String> {
+    fn collect(options: &[serde_json::Value], out: &mut Vec<String>) {
+        for option in options {
+            if let Some(value) = option.get("value").and_then(|v| v.as_str()) {
+                out.push(value.to_string());
+            } else if let Some(group) = option.get("options").and_then(|v| v.as_array()) {
+                collect(group, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(options) = model_option(config_options).and_then(|o| o.get("options")).and_then(|v| v.as_array()) {
+        collect(options, &mut out);
+    }
+    out
+}
+
 impl AcpRuntime {
     /// Starts the agent, completes `initialize`, and returns. Fails if the
     /// agent cannot be spawned, exits before answering, or speaks another
@@ -111,6 +143,16 @@ impl AcpRuntime {
 
     pub fn cancel(&self, session: &LaneSession) -> Result<(), AcpError> {
         self.cancel_by_id(&session.id)
+    }
+
+    /// Sets one of the session's config options and keeps the session's
+    /// copy of them current.
+    pub fn set_config_option(&self, session: &mut LaneSession, config_id: &str, value: &str) -> Result<(), AcpError> {
+        let options = self.runtime.block_on(self.client.set_config_option(&session.id, config_id, value))?;
+        if !options.is_empty() {
+            session.config_options = options;
+        }
+        Ok(())
     }
 
     /// Cancels a session by id, for a watcher that cannot borrow the
