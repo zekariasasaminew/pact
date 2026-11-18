@@ -142,6 +142,7 @@ fn launch_acp(repo_root: &Path, spec: &LaunchSpec, name: &str, on_event: &mut im
         cwd: Some(repo_root.to_path_buf()),
     })
     .map_err(|err| anyhow!("starting `{name} --acp`: {err}"))?;
+    pact_agents::register_pid(runtime.pid());
     let info = runtime.initialize_result();
     on_event(&AgentEvent::Phase(format!(
         "{name} ACP server up in {:.1}s ({} {}, pid {})",
@@ -249,10 +250,12 @@ impl AcpBatch {
         let runtimes = self.runtimes.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
         let retired = self.retired.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
         for runtime in runtimes.into_values().chain(retired) {
+            let pid = runtime.pid();
             // Every lane thread has joined, so this is the last handle.
             if let Ok(runtime) = Arc::try_unwrap(runtime) {
                 runtime.shutdown();
             }
+            pact_agents::forget_pid(pid);
         }
         self.coord.shutdown();
     }
