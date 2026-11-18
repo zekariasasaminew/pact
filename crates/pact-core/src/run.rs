@@ -1164,7 +1164,6 @@ impl Orchestrator {
                     let _ = runtime.close(&session);
                     result
                 })();
-                drop(runtime);
                 batch.shutdown();
                 outcome
             }
