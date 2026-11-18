@@ -83,6 +83,11 @@ pub struct RunMetadata {
     /// own default and for records written before the field existed.
     #[serde(default)]
     pub model: Option<String>,
+    /// The model the agent reported running the lane on, which can differ
+    /// from `model` when the agent silently swaps one (issue #374). Known
+    /// for ACP lanes only; `None` when the agent did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
     /// Which lane runtime ran this: `process` (its own agent CLI process)
     /// or `acp` (a session inside a shared agent process, issue #331).
     /// Empty for records written before the field existed.
@@ -208,8 +213,8 @@ pub struct SpawnOptions<'a> {
     /// Failures warn, like dependency prep.
     pub prepare: &'a [String],
     /// The model every lane launches with unless its task names its own
-    /// (issue #387). `None` keeps each CLI's default. Process lanes only:
-    /// an ACP lane with a model is an error until #374.
+    /// (issue #387). `None` keeps each CLI's default. ACP lanes select it
+    /// with `session/set_config_option` (issue #374).
     pub model: Option<&'a str>,
     /// Append `fleet::REPORT_CONTRACT` to the prompt and record the
     /// parsed report in the run metadata (issue #388).
@@ -793,6 +798,33 @@ impl Orchestrator {
             _ => None,
         };
 
+        // A model the agent does not offer fails the batch here, before
+        // any lane spends anything (issue #374).
+        let model_error = acp.as_ref().and_then(|batch| {
+            let mut checked: Vec<(AgentKind, &str)> = Vec::new();
+            for spec in &tasks {
+                let Some(model) = spec.model.as_deref().or(options.model) else { continue };
+                if checked.contains(&(spec.agent, model)) {
+                    continue;
+                }
+                checked.push((spec.agent, model));
+                if let Err(err) = batch.check_model(spec.agent, &self.repo_root, model) {
+                    return Some(format!("{err:#}"));
+                }
+            }
+            None
+        });
+        if let Some(message) = model_error {
+            if let Some(batch) = acp {
+                batch.shutdown();
+            }
+            return tasks
+                .iter()
+                .enumerate()
+                .map(|(index, spec)| SpawnManyOutcome { index, agent: spec.agent, result: Err(anyhow::anyhow!("{message}")) })
+                .collect();
+        }
+
         let outcomes = std::thread::scope(|scope| {
             // Index and agent are captured here, outside the closure's
             // return value, specifically so a panic (which loses whatever
@@ -1091,11 +1123,6 @@ impl Orchestrator {
         };
 
         if let Some(acp) = acp {
-            if let Some(model) = options.model {
-                anyhow::bail!(
-                    "model '{model}' was requested for an ACP lane, which cannot set a model yet (issue #374); use --runtime process"
-                );
-            }
             return self.run_lane_acp(
                 acp,
                 agent,
@@ -1103,7 +1130,7 @@ impl Orchestrator {
                 task,
                 coord_name,
                 admission,
-                options.report_contract,
+                options,
                 &mut on_event,
             );
         }
@@ -1277,6 +1304,7 @@ impl Orchestrator {
             },
             coord_status: coord_last_status,
             model: options.model.map(str::to_string),
+            effective_model: None,
             runtime: LaneRuntime::Process.as_str().to_string(),
             // Fails closed (assumes touched) on a `git status` error,
             // matching `validate_arbiter_scope`'s existing "can't verify
@@ -1310,9 +1338,12 @@ impl Orchestrator {
         task: &str,
         coord_name: &str,
         admission: Option<&Admission>,
-        report_contract: bool,
+        options: &SpawnOptions<'_>,
         on_event: &mut impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
+        let report_contract = options.report_contract;
+        let requested_model = options.model;
+        let mut effective_model: Option<String> = None;
         if acp.runtime(agent).is_none() {
             bail!("no ACP process was started for agent {}", agent_kind_name(agent));
         }
@@ -1356,6 +1387,19 @@ impl Orchestrator {
             };
             session_id = Some(session.id.clone());
             on_event(&AgentEvent::Init { session_id: session.id.clone() });
+            effective_model = match requested_model {
+                Some(model) => match acp_runtime::select_model(&runtime, &mut session, model, agent) {
+                    Ok(current) => current,
+                    Err(err) => {
+                        let _ = runtime.close(&session);
+                        return Err(err);
+                    }
+                },
+                None => pact_acp::current_model(&session.config_options),
+            };
+            if let Some(model) = &effective_model {
+                on_event(&AgentEvent::Phase(format!("model: {model}")));
+            }
             if let Err(err) = self.workspaces.set_session_id(&workspace.id, &session.id) {
                 tracing::warn!("failed to record session id for workspace {}: {err:#}", workspace.id);
             }
@@ -1392,16 +1436,31 @@ impl Orchestrator {
                     }
                 });
                 let mut coalescer = acp_runtime::ChunkCoalescer::new();
+                let mut switched_to: Option<String> = None;
                 let outcome = runtime.prompt(&mut session, task, |update| {
                     let line = acp_runtime::log_line(&update);
                     let _ = writeln!(log, "{line}");
+                    if let Some(model) = acp_runtime::model_in_update(&update) {
+                        switched_to = Some(model);
+                    }
                     coalescer.push(&update, on_event);
                 });
                 coalescer.flush(on_event);
                 stop_watching.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = watcher.join();
-                outcome
+                (outcome, switched_to)
             });
+            let (stop, switched_to) = stop;
+            if let Some(model) = switched_to {
+                effective_model = Some(model);
+            }
+            if let (Some(requested), Some(effective)) = (requested_model, effective_model.as_deref()) {
+                if requested != effective {
+                    let warning = format!("WARNING: model '{requested}' was requested but the agent ran this lane on '{effective}'");
+                    tracing::warn!("workspace {}: {warning}", workspace.id);
+                    on_event(&AgentEvent::Phase(warning));
+                }
+            }
             if let Err(err) = runtime.close(&session) {
                 tracing::debug!("closing ACP session for {}: {err}", workspace.id);
             }
@@ -1455,7 +1514,8 @@ impl Orchestrator {
                 Err(err) => format!("failed to run: {err:#}"),
             },
             coord_status,
-            model: None,
+            model: requested_model.map(str::to_string),
+            effective_model: effective_model.clone(),
             runtime: LaneRuntime::Acp.as_str().to_string(),
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
             report: reported(report_contract, &run_result),
@@ -2940,6 +3000,7 @@ mod tests {
             summary: "Created foo.rs".to_string(),
             coord_status: Some("connected".to_string()),
             model: None,
+            effective_model: None,
             runtime: String::new(),
             files_touched: true,
             log_path: PathBuf::from("/tmp/state/logs/ws-1.jsonl"),
@@ -2987,6 +3048,7 @@ mod tests {
             summary: "failed to run: spawn error".to_string(),
             coord_status: None,
             model: None,
+            effective_model: None,
             runtime: String::new(),
             files_touched: false,
             log_path: PathBuf::from("/tmp/state/logs/ws-2.jsonl"),

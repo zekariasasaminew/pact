@@ -1169,6 +1169,13 @@ impl Orchestrator {
                         .open(log_path)
                         .with_context(|| format!("opening log file {}", log_path.display()))?;
                     let mut session = runtime.new_session(cwd, Vec::new()).map_err(|err| anyhow::anyhow!("opening the planner session: {err}"))?;
+                    let mut model = match spawn.model {
+                        Some(model) => crate::acp_runtime::select_model(&runtime, &mut session, model, agent)?,
+                        None => pact_acp::current_model(&session.config_options),
+                    };
+                    if let Some(model) = &model {
+                        on_event(&AgentEvent::Phase(format!("planner model: {model}")));
+                    }
                     let mut ask = |prompt: &str| -> Result<String> {
                         let mut text = String::new();
                         let mut forward = |event: &AgentEvent| collecting(&mut text, event);
@@ -1177,10 +1184,18 @@ impl Orchestrator {
                             .prompt(&mut session, prompt, |update| {
                                 let line = crate::acp_runtime::log_line(&update);
                                 let _ = writeln!(log, "{line}");
+                                if let Some(switched) = crate::acp_runtime::model_in_update(&update) {
+                                    model = Some(switched);
+                                }
                                 coalescer.push(&update, &mut forward)
                             })
                             .map_err(|err| anyhow::anyhow!("planner turn: {err}"))?;
                         coalescer.flush(&mut forward);
+                        if let (Some(requested), Some(effective)) = (spawn.model, model.as_deref()) {
+                            if requested != effective {
+                                forward(&AgentEvent::Phase(format!("WARNING: model '{requested}' was requested but the agent ran the planner on '{effective}'")));
+                            }
+                        }
                         if !stop.is_success() {
                             bail!("the planner's turn ended with stop reason {}", stop.as_str());
                         }

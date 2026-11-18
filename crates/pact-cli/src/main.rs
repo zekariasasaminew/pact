@@ -204,8 +204,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), e.g.
         /// `haiku` for Claude Code. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -395,8 +395,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), applied to every
         /// task; a tier resolves per task's agent. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -504,8 +504,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), for the
         /// planner, every lane and the repair lane. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -942,7 +942,6 @@ fn main() -> Result<()> {
                 )
             })?;
             let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent)?;
-            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let coord_override = coord_command.map(|command| CoordServerOverride {
                 command,
@@ -1074,7 +1073,6 @@ fn main() -> Result<()> {
                 );
             }
             let agents: Vec<AgentKind> = batch.iter().map(|t| t.agent).collect();
-            let requested_runtime = runtime_for_model(requested_runtime, batch.iter().any(|t| t.model.is_some()))?;
             let runtime = pact_core::effective_runtime(requested_runtime, &agents);
             let admission = pact_core::AdmissionPolicy {
                 max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
@@ -1274,7 +1272,6 @@ fn main() -> Result<()> {
                 anyhow::anyhow!("unknown --agent '{agent_name}' (expected claude, copilot, codex, gemini, or agy) -- try: pact doctor")
             })?;
             let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent_name)?;
-            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let min_free_mem_mb = min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500);
@@ -1941,6 +1938,14 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
         Some(run) => {
             let duration = run.ended_at.saturating_sub(run.started_at);
             println!("  agent: {}", run.agent);
+            match (&run.model, &run.effective_model) {
+                (Some(requested), Some(effective)) if requested != effective => {
+                    println!("  model: {effective} (WARNING: {requested} was requested)")
+                }
+                (_, Some(effective)) => println!("  model: {effective}"),
+                (Some(requested), None) => println!("  model: {requested} (requested; the agent did not report what it ran)"),
+                (None, None) => {}
+            }
             println!("  command: {} {}", run.program, run.args.join(" "));
             println!("  {} in {duration}s: {}", if run.exit_success { "succeeded" } else { "failed" }, run.summary);
             if run.exit_success && !run.files_touched {
@@ -2732,18 +2737,6 @@ fn resolve_runtime(flag: Option<String>, config: &PactConfig) -> Result<pact_cor
         Some(value) => pact_core::LaneRuntime::parse(value)
             .ok_or_else(|| anyhow::anyhow!("--runtime: unknown value '{value}' (expected auto, process or acp)")),
         None => Ok(pact_core::LaneRuntime::Auto),
-    }
-}
-
-/// A requested model rules out the ACP runtime until it can set one (issue
-/// #374): `auto` becomes `process`, an explicit `acp` is refused.
-fn runtime_for_model(requested: pact_core::LaneRuntime, has_model: bool) -> Result<pact_core::LaneRuntime> {
-    match (requested, has_model) {
-        (pact_core::LaneRuntime::Acp, true) => {
-            bail!("--runtime acp cannot set a model yet (issue #374); use --runtime process, or drop --model/--tier and defaults.model")
-        }
-        (pact_core::LaneRuntime::Auto, true) => Ok(pact_core::LaneRuntime::Process),
-        _ => Ok(requested),
     }
 }
 
