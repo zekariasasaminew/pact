@@ -435,10 +435,13 @@ pact spawn-many --tier chore --task "claude:rename the helper" --task "codex:fix
 
 `--model` wins over `--tier`, which wins over `defaults.model`. An unknown
 tier, or a tier with no model for a task's agent, is an error rather than
-a silent fallback to the default model. ACP lanes cannot set a model yet
-(#374), so a model makes `--runtime auto` pick `process`, and `--runtime
-acp` with a model is refused. `--dry-run` shows the `--model` argument
-each lane would get, and `meta/runs/<id>.json` records it as `model`.
+a silent fallback to the default model. ACP lanes select the model on
+their session; a model the agent does not offer stops the batch before
+any lane starts, and a lane the agent ran on a different model than
+requested prints a warning. `--dry-run` shows the `--model` argument
+each lane would get, and `meta/runs/<id>.json` records it as `model`,
+with the model the agent reported as `effective_model` (ACP lanes;
+`pact inspect` shows both).
 
 **Neither `spawn` nor `spawn-many` commits anything.** An agent's changes
 land in its workspace's working tree; `pact list` shows it as `[dirty]`
@@ -924,9 +927,27 @@ so it never shows up in the main repo's `git status`:
 <repo-parent>/.pact-<repo-name>/
 ├── locks/git.lock              # PID-aware lock serializing worktree add/remove
 ├── meta/<id>.json               # id, path, branch, task, created_at, agent_pid
+├── meta/runs|deps|prepare|replies/<id>.json   # per-workspace run records
+├── meta/plans/*.json            # pact run plans (kept by pact gc)
+├── meta/verify/<run>/           # pact run verification logs
 ├── mcp/<id>.json                 # generated --mcp-config file for this workspace
 ├── workspaces/<id>/            # the actual git worktree for that agent
+├── homes/                       # lean agent homes: per workspace, per ACP batch, per planner
+├── briefs/<stamp>/              # pact run unit briefs
 └── logs/<id>.jsonl              # raw NDJSON, one line per agent stdout line, as-is
+```
+
+`pact teardown` removes a workspace's worktree, branch and record but
+leaves its logs and run records for later reading. `pact gc` removes
+what nothing uses any more: the logs, homes and records of workspaces
+that no longer exist, and planner and arbiter logs, ACP homes, briefs
+and verification logs, all once nothing inside them has changed for
+`--older-than` (default `7d`). Plans are always kept. `--dry-run` lists
+each item and its size without removing anything.
+
+```sh
+pact gc --dry-run
+pact gc --older-than 1d
 ```
 
 The coordination database is the one exception -- deliberately *not* here
@@ -937,7 +958,13 @@ The coordination database is the one exception -- deliberately *not* here
 ```
 
 e.g. `%LOCALAPPDATA%\pact\<hash>\state.db` on Windows,
-`~/.local/share/pact/<hash>/state.db` on Linux.
+`~/.local/share/pact/<hash>/state.db` on Linux. `PACT_COORD_DIR`
+replaces `<platform-local-data-dir>/pact` when set (the test suite sets
+it through `.cargo/config.toml`). Each directory holds a `repo.txt`
+naming its repository, and `pact gc` also removes directories whose
+repository no longer exists (or was never recorded, for directories made
+before `repo.txt` existed) once they are older than `--older-than` and
+hold no unexpired lease.
 
 ## Privacy
 

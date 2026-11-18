@@ -204,8 +204,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), e.g.
         /// `haiku` for Claude Code. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -395,8 +395,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), applied to every
         /// task; a tier resolves per task's agent. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -504,8 +504,8 @@ enum Command {
 
         /// Model id passed to the agent CLI as `--model` (issue #387), for the
         /// planner, every lane and the repair lane. Falls back to --tier, then `pact.toml`'s
-        /// `defaults.model`, then the CLI's own default. Process lanes only:
-        /// with a model, `--runtime auto` picks `process`.
+        /// `defaults.model`, then the CLI's own default. ACP lanes set it on their
+        /// session; the agent's own report of the model it ran is recorded.
         #[arg(long, conflicts_with = "tier")]
         model: Option<String>,
 
@@ -585,6 +585,18 @@ enum Command {
     /// "advisory, not enforced" philosophy leases themselves follow.
     /// Messages and history are untouched.
     ClearLeases,
+    /// Remove state no workspace uses any more: logs, agent homes and run
+    /// records of workspaces that are gone, plus planner logs, briefs and
+    /// verification logs, once older than --older-than. Plans are kept.
+    Gc {
+        /// Keep anything modified more recently than this: seconds, or
+        /// forms like 12h, 7d, 1d12h.
+        #[arg(long, default_value = "7d")]
+        older_than: String,
+        /// List what would be removed and its size, remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the coordination layer's operation log: every claim, release,
     /// broadcast, direct message, merge-all invocation, arbiter decision,
     /// and teardown recorded this session (and any prior session against
@@ -947,7 +959,6 @@ fn main() -> Result<()> {
                 )
             })?;
             let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent)?;
-            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let coord_override = coord_command.map(|command| CoordServerOverride {
                 command,
@@ -1079,7 +1090,6 @@ fn main() -> Result<()> {
                 );
             }
             let agents: Vec<AgentKind> = batch.iter().map(|t| t.agent).collect();
-            let requested_runtime = runtime_for_model(requested_runtime, batch.iter().any(|t| t.model.is_some()))?;
             let runtime = pact_core::effective_runtime(requested_runtime, &agents);
             let admission = pact_core::AdmissionPolicy {
                 max_concurrent: max_concurrent.or(config.default_max_concurrent()).unwrap_or(2),
@@ -1279,7 +1289,6 @@ fn main() -> Result<()> {
                 anyhow::anyhow!("unknown --agent '{agent_name}' (expected claude, copilot, codex, gemini, or agy) -- try: pact doctor")
             })?;
             let model = config.resolve_model(model.as_deref(), tier.as_deref(), &agent_name)?;
-            let requested_runtime = runtime_for_model(requested_runtime, model.is_some())?;
             let runtime = pact_core::effective_runtime(requested_runtime, &[kind]);
             let safety = safety.or_else(|| config.default_safety().map(str::to_string));
             let min_free_mem_mb = min_free_mem_mb.or(config.default_min_free_mem_mb()).unwrap_or(1500);
@@ -1479,6 +1488,35 @@ fn main() -> Result<()> {
             let status = orchestrator.coord_status()?;
             let active_workspace_ids: Vec<String> = orchestrator.list()?.into_iter().map(|w| w.id).collect();
             print_coord_status(&status, &active_workspace_ids);
+        }
+        Command::Gc { older_than, dry_run } => {
+            let older_than = config::parse_duration(&older_than).context("--older-than")?;
+            let items = orchestrator.gc(older_than, dry_run)?;
+            let mut total: u64 = items.iter().map(|item| item.bytes).sum();
+            for item in &items {
+                println!("{} ({})", item.path.display(), human_size(item.bytes));
+            }
+            let cutoff = std::time::SystemTime::now().checked_sub(older_than).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let coord_dirs = pact_coord::prunable_dirs(cutoff)?;
+            for dir in &coord_dirs {
+                let owner = match &dir.repo {
+                    Some(repo) => format!("coordination database of {}, which no longer exists", repo.display()),
+                    None => "coordination database of an unrecorded repository".to_string(),
+                };
+                println!("{} ({}, {owner})", dir.path.display(), human_size(dir.bytes));
+                total += dir.bytes;
+                if !dry_run {
+                    if let Err(err) = std::fs::remove_dir_all(&dir.path) {
+                        tracing::warn!("gc: could not remove {}: {err}", dir.path.display());
+                    }
+                }
+            }
+            println!(
+                "{} {} item(s), {}",
+                if dry_run { "would remove" } else { "removed" },
+                items.len() + coord_dirs.len(),
+                human_size(total)
+            );
         }
         Command::ClearLeases => {
             let removed = orchestrator.clear_leases()?;
@@ -1946,6 +1984,14 @@ fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
         Some(run) => {
             let duration = run.ended_at.saturating_sub(run.started_at);
             println!("  agent: {}", run.agent);
+            match (&run.model, &run.effective_model) {
+                (Some(requested), Some(effective)) if requested != effective => {
+                    println!("  model: {effective} (WARNING: {requested} was requested)")
+                }
+                (_, Some(effective)) => println!("  model: {effective}"),
+                (Some(requested), None) => println!("  model: {requested} (requested; the agent did not report what it ran)"),
+                (None, None) => {}
+            }
             println!("  command: {} {}", run.program, run.args.join(" "));
             println!("  {} in {duration}s: {}", if run.exit_success { "succeeded" } else { "failed" }, run.summary);
             if run.exit_success && !run.files_touched {
@@ -2813,18 +2859,6 @@ fn resolve_runtime(flag: Option<String>, config: &PactConfig) -> Result<pact_cor
     }
 }
 
-/// A requested model rules out the ACP runtime until it can set one (issue
-/// #374): `auto` becomes `process`, an explicit `acp` is refused.
-fn runtime_for_model(requested: pact_core::LaneRuntime, has_model: bool) -> Result<pact_core::LaneRuntime> {
-    match (requested, has_model) {
-        (pact_core::LaneRuntime::Acp, true) => {
-            bail!("--runtime acp cannot set a model yet (issue #374); use --runtime process, or drop --model/--tier and defaults.model")
-        }
-        (pact_core::LaneRuntime::Auto, true) => Ok(pact_core::LaneRuntime::Process),
-        _ => Ok(requested),
-    }
-}
-
 /// The dry-run line for the lane runtime: what was asked for, what the
 /// batch resolved to (`auto -> acp`), and under `acp` how many shared
 /// processes the batch would start and for which agents, so the one-
@@ -2852,6 +2886,21 @@ fn print_runtime_preview(
         }
         _ => println!("runtime: {label} (one agent CLI process per lane)"),
     }
+}
+
+/// `512 B`, `3.4 KB`, `76.0 MB`, `1.2 GB`.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 /// `pact run`'s end-of-run listing (issue #305): the plan as decided, each
@@ -2898,7 +2947,10 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                     .unwrap_or_default();
                 println!("unit {}: {}{duration}: {}", workspace.id, if run.success { "done" } else { "failed" }, run.summary);
             }
-            Err(err) => println!("unit #{}: FAILED before/during launch -- {err:#}", outcome.index),
+            Err(err) => {
+                let unit = report.plan.units.get(outcome.index).map(|unit| unit.name.trim().to_string()).unwrap_or_else(|| format!("#{}", outcome.index));
+                println!("unit {unit}: FAILED, never ran: {err:#}");
+            }
         }
     }
     for violation in &report.ownership {

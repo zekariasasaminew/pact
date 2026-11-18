@@ -1,5 +1,5 @@
 use std::process::ExitStatus;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use command_group::GroupChild;
 
@@ -20,32 +20,82 @@ pub enum ChildPoll {
 /// Tracks every live child process group across however many concurrent
 /// `run_and_stream` calls share this `Supervisor`, so one process-wide
 /// Ctrl-C handler can kill all of them -- see DESIGN.md ("pact-agents >
-/// Supervisor and group kill").
+/// Supervisor and group kill"). Every `Supervisor` in a process is a
+/// handle on one registry (issue #366): `ctrlc` allows one handler per
+/// process, so per-supervisor registries left every supervisor but the
+/// first unreachable from Ctrl-C.
 pub struct Supervisor {
-    children: Arc<Mutex<Vec<Option<GroupChild>>>>,
+    children: &'static Mutex<Vec<Option<GroupChild>>>,
+}
+
+struct Registry {
+    children: Mutex<Vec<Option<GroupChild>>>,
+    /// Processes pact started outside a `Supervisor` (the shared ACP
+    /// agent processes), killed with their trees on Ctrl-C.
+    pids: Mutex<Vec<u32>>,
+}
+
+static REGISTRY: OnceLock<Registry> = OnceLock::new();
+
+fn registry() -> &'static Registry {
+    REGISTRY.get_or_init(|| {
+        if let Err(err) = ctrlc::set_handler(|| {
+            kill_everything();
+            std::process::exit(130);
+        }) {
+            tracing::warn!("could not install Ctrl-C handler: {err}");
+        }
+        Registry { children: Mutex::new(Vec::new()), pids: Mutex::new(Vec::new()) }
+    })
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Registers a process pact started without a `Supervisor` so Ctrl-C
+/// kills it and its children too; call [`forget_pid`] once it is gone.
+pub fn register_pid(pid: u32) {
+    lock(&registry().pids).push(pid);
+}
+
+pub fn forget_pid(pid: u32) {
+    lock(&registry().pids).retain(|&p| p != pid);
+}
+
+/// What the Ctrl-C handler does before exiting: kill every registered
+/// child group and every registered process tree. Public so it can be
+/// tested without sending a real signal.
+pub fn kill_everything() {
+    let registry = registry();
+    for child in lock(&registry.children).iter_mut().flatten() {
+        tracing::info!("Ctrl-C received: killing agent process group {}", child.id());
+        let _ = child.kill();
+    }
+    for pid in lock(&registry.pids).drain(..) {
+        tracing::info!("Ctrl-C received: killing process tree {pid}");
+        kill_tree(pid);
+    }
+}
+
+#[cfg(windows)]
+fn kill_tree(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn kill_tree(pid: u32) {
+    let _ = std::process::Command::new("pkill").args(["-KILL", "-P", &pid.to_string()]).status();
+    let _ = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status();
 }
 
 impl Supervisor {
     pub fn new() -> Self {
-        let children: Arc<Mutex<Vec<Option<GroupChild>>>> = Arc::new(Mutex::new(Vec::new()));
-        let handler_children = Arc::clone(&children);
-        let result = ctrlc::set_handler(move || {
-            let mut guard = handler_children
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for child in guard.iter_mut().flatten() {
-                tracing::info!(
-                    "Ctrl-C received: killing agent process group {}",
-                    child.id()
-                );
-                let _ = child.kill();
-            }
-            std::process::exit(130);
-        });
-        if let Err(err) = result {
-            tracing::warn!("could not install Ctrl-C handler: {err}");
-        }
-        Self { children }
+        Self { children: &registry().children }
     }
 
     /// Registers a freshly spawned child group so Ctrl-C can reach it.

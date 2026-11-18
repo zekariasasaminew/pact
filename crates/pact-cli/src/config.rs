@@ -146,8 +146,8 @@ impl PactConfig {
     }
 }
 
-/// `90`, `90s`, `20m`, `1h`, `1h30m`: a whole number of seconds,
-/// minutes or hours, or a sum of them. A bare number is seconds.
+/// `90`, `90s`, `20m`, `1h`, `1h30m`, `7d`: a whole number of seconds,
+/// minutes, hours or days, or a sum of them. A bare number is seconds.
 pub fn parse_duration(text: &str) -> Result<std::time::Duration> {
     let text = text.trim();
     if let Ok(secs) = text.parse::<u64>() {
@@ -158,20 +158,21 @@ pub fn parse_duration(text: &str) -> Result<std::time::Duration> {
     for c in text.chars() {
         match c {
             '0'..='9' => digits.push(c),
-            'h' | 'm' | 's' if !digits.is_empty() => {
+            'd' | 'h' | 'm' | 's' if !digits.is_empty() => {
                 let n: u64 = digits.parse().context("number too large")?;
                 total += n * match c {
+                    'd' => 86_400,
                     'h' => 3600,
                     'm' => 60,
                     _ => 1,
                 };
                 digits.clear();
             }
-            _ => bail!("{text:?} is not a duration; use a number of seconds or forms like 90s, 20m, 1h30m"),
+            _ => bail!("{text:?} is not a duration; use a number of seconds or forms like 90s, 20m, 1h30m, 7d"),
         }
     }
     if !digits.is_empty() || text.is_empty() {
-        bail!("{text:?} is not a duration; use a number of seconds or forms like 90s, 20m, 1h30m");
+        bail!("{text:?} is not a duration; use a number of seconds or forms like 90s, 20m, 1h30m, 7d");
     }
     Ok(std::time::Duration::from_secs(total))
 }
@@ -257,6 +258,7 @@ codex = \"gpt-5-mini\"
         assert_eq!(secs("90s"), Some(90));
         assert_eq!(secs("20m"), Some(1200));
         assert_eq!(secs("1h30m"), Some(5400));
+        assert_eq!(secs("1d12h"), Some(129_600));
         for bad in ["", "m", "20 min", "1h30", "-5", "1.5h"] {
             assert_eq!(secs(bad), None, "{bad:?} must be rejected");
         }
