@@ -469,6 +469,11 @@ enum Command {
         #[arg(long)]
         verify_timeout: Option<String>,
 
+        /// Run even though your checkout has uncommitted changes. The
+        /// lanes start from HEAD and will not see them; the report says so.
+        #[arg(long)]
+        allow_dirty: bool,
+
         /// Same meaning as on spawn-many.
         #[arg(long)]
         safety: Option<String>,
@@ -1223,6 +1228,7 @@ fn main() -> Result<()> {
             repair_attempts,
             plan_retries,
             verify_timeout,
+            allow_dirty,
             safety,
             deps,
             no_deps,
@@ -1317,6 +1323,7 @@ fn main() -> Result<()> {
                 plan_retries,
                 repair_attempts,
                 verify_timeout,
+                allow_dirty,
                 spawn: spawn_options,
             };
             let report = orchestrator.run_task(&task, &run_options, |index, agent, event| {
@@ -1329,7 +1336,7 @@ fn main() -> Result<()> {
                 // failure (1) and from clap's usage errors (2). The worst
                 // verdict across the commands decides, so one real failure
                 // beside an inconclusive check is still a failure.
-                let inconclusive = report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive);
+                let inconclusive = report.ownership.is_empty() && report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive);
                 std::process::exit(if inconclusive { 3 } else { 1 });
             }
         }
@@ -2786,6 +2793,13 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
     if let Some(warning) = &report.balance_warning {
         println!("  balance: {warning}");
     }
+    if !report.dirty_paths.is_empty() {
+        println!(
+            "warning: --allow-dirty: the lanes start from HEAD, without {} uncommitted change(s) in your checkout: {}",
+            report.dirty_paths.len(),
+            report.dirty_paths.join(", ")
+        );
+    }
     if report.dry_run {
         println!("dry run: nothing spawned. Edit the plan and run it with `pact run --plan {}`", report.plan_path.display());
         return;
@@ -2801,6 +2815,9 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
             }
             Err(err) => println!("unit #{}: FAILED before/during launch -- {err:#}", outcome.index),
         }
+    }
+    for violation in &report.ownership {
+        println!("ownership: {violation}");
     }
     for repair in &report.repairs {
         let lane = match &repair.unit {
@@ -2869,6 +2886,11 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
         if let Some(batch) = &report.batch {
             println!("run: OK. Review with `pact diff {}`, land with `pact merge-all`, or push {}", batch.id, batch.branch);
         }
+    } else if !report.ownership.is_empty() {
+        println!(
+            "run: FAILED. {} file(s) were written by a lane that does not own them (listed above). Nothing was reverted; review the result with `pact diff <id>` before landing it",
+            report.ownership.len()
+        );
     } else if report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive) {
         println!(
             "run: INCONCLUSIVE. The lanes finished but a verification command fails on the base commit too, so it cannot judge them; \
