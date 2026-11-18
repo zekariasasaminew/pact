@@ -1235,6 +1235,24 @@ any other kind or the end of the turn, so a lane's message reads as the
 process runtime's complete `assistant.message` does. The per-lane JSONL
 log is written before either and keeps every raw update.
 
+Sharing one process means sharing its failures (issue #412). When
+`copilot --acp` exited (a crash, an OOM kill, an expired login), the
+lane mid-turn failed, and so did every lane queued behind it, each
+failing to open a session on a process that was gone: one fault in
+lane 1 of 12 threw away the run. `AcpBatch` now keeps each agent's
+process behind a lock and `live_runtime` replaces it when a lane about
+to open a session finds it exited, so the queued lanes run on the
+replacement. The lane that was mid-turn stays failed, reported by name
+as "exited mid-turn" with its partial writes left in the tree, since
+resuming it would need `session/load`. A process that keeps dying is
+replaced at most twice per batch (`MAX_ACP_RESTARTS`); after that the
+remaining lanes fail with a message that says so, because a third
+death points at the environment (auth, memory) rather than at one
+lane's turn. The batch's closing line says how many restarts happened.
+A turn that fails while its process is still alive is now that lane's
+failed outcome too, rather than a launch error that lost the lane's
+name in the report.
+
 ### `pact run`: pact owns the split (issue #305)
 
 Everything above made execution cheap; the judgement still lived
