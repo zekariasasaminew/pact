@@ -234,19 +234,22 @@ fn lanes_queued_behind_a_dead_shared_process_run_on_a_restarted_one() {
             "spawn-many", "--agent", "copilot", "--runtime", "acp", "--max-concurrent", "1", "--stagger-ms", "0", "--min-free-mem-mb", "0",
             "--name", "alpha", "--name", "beta", "--name", "gamma",
             "--task", &dying,
-            "--task", &task(&[("beta.txt", "B")], "wrote beta"),
+            "--task", &dying,
             "--task", &task(&[("gamma.txt", "G")], "wrote gamma"),
         ],
     );
+    // Admission does not launch lanes in index order, but with two dying
+    // lanes at least one of them is followed by another lane in any order.
     let text = format!("{}{}", stdout(&spawn), stderr(&spawn));
     assert!(!spawn.status.success(), "{text}");
-    assert_eq!(run_record(&repo, "beta")["exit_success"], true, "{text}");
     assert_eq!(run_record(&repo, "gamma")["exit_success"], true, "{text}");
-    let alpha = run_record(&repo, "alpha");
-    assert_eq!(alpha["exit_success"], false);
-    assert!(alpha["summary"].as_str().unwrap().contains("exited mid-turn"), "{}", alpha["summary"]);
+    for dead in ["alpha", "beta"] {
+        let record = run_record(&repo, dead);
+        assert_eq!(record["exit_success"], false);
+        assert!(record["summary"].as_str().unwrap().contains("exited mid-turn"), "{}", record["summary"]);
+    }
     assert!(text.contains("restarting it (1/2)"), "{text}");
-    assert!(text.contains("restarted 1 time(s) in this batch"), "{text}");
+    assert!(text.contains("time(s) in this batch; lanes that had not opened a session ran on the replacement"), "{text}");
 
     cleanup(&repo);
     cleanup(&shim);
