@@ -469,6 +469,11 @@ enum Command {
         #[arg(long)]
         verify_timeout: Option<String>,
 
+        /// Run even though your checkout has uncommitted changes. The
+        /// lanes start from HEAD and will not see them; the report says so.
+        #[arg(long)]
+        allow_dirty: bool,
+
         /// Same meaning as on spawn-many.
         #[arg(long)]
         safety: Option<String>,
@@ -1225,6 +1230,7 @@ fn main() -> Result<()> {
             repair_attempts,
             plan_retries,
             verify_timeout,
+            allow_dirty,
             safety,
             deps,
             no_deps,
@@ -1320,6 +1326,7 @@ fn main() -> Result<()> {
                 plan_retries,
                 repair_attempts,
                 verify_timeout,
+                allow_dirty,
                 spawn: spawn_options,
             };
             let report = orchestrator.run_task(&task, &run_options, |index, agent, event| {
@@ -2792,6 +2799,13 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
     }
     if let Some(warning) = &report.balance_warning {
         println!("  balance: {warning}");
+    }
+    if !report.dirty_paths.is_empty() {
+        println!(
+            "warning: --allow-dirty: the lanes start from HEAD, without {} uncommitted change(s) in your checkout: {}",
+            report.dirty_paths.len(),
+            report.dirty_paths.join(", ")
+        );
     }
     if report.dry_run {
         println!("dry run: nothing spawned. Edit the plan and run it with `pact run --plan {}`", report.plan_path.display());

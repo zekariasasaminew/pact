@@ -21,6 +21,12 @@ pact run --agent copilot --task-file task.md      # a task statement that runs t
 pact run --agent copilot --plan .pact-<repo>/meta/plans/<stamp>-<slug>.json "..."   # re-run an edited plan
 ```
 
+`pact run` refuses to start when your checkout has uncommitted or
+untracked changes, and names them: the planner reads your checkout but
+the lanes start from `HEAD`, so they would not see that work. Commit or
+stash first, or pass `--allow-dirty` to run from `HEAD` anyway; the
+report then repeats which changes the lanes did not have.
+
 `pact run` (issue #305) is the whole loop with no briefs to write: a
 planner session reads the repository and splits the task into
 file-disjoint units; pact validates the plan mechanically (no file owned
