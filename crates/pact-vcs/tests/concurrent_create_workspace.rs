@@ -82,8 +82,32 @@ fn n_concurrent_create_workspace_calls_produce_n_workspaces() {
         workspaces.len(),
         N,
         "expected exactly {N} workspaces on disk after {N} concurrent create_workspace calls, found {}",
-        workspaces.len()
-    );
+    cleanup(&repo);
+}
+
+#[test]
+fn concurrent_lanes_with_one_name_produce_one_lane_and_errors_for_the_rest() {
+    // Issue #414: the uniqueness check and the metadata write are one step.
+    let repo = init_repo();
+    let manager = WorkspaceManager::open(&repo).unwrap();
+    let batch = manager.create_shared_batch("batch", None).unwrap();
+
+    const N: usize = 8;
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let (manager, batch) = (&manager, &batch);
+                scope.spawn(move || manager.create_lane(batch, &format!("lane task {i}"), Some("Same Name")))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "exactly one lane wins");
+    for err in results.iter().filter_map(|r| r.as_ref().err()) {
+        assert!(format!("{err:#}").contains("a workspace named 'same-name' already exists"), "{err:#}");
+    }
+    assert_eq!(manager.lanes_of(&batch.id).unwrap().len(), 1);
 
     cleanup(&repo);
 }

@@ -1289,7 +1289,16 @@ is something pact already knows. `pact run` moves the loop inside:
    "plan, print, stop" and `--plan <file>` is "skip the planner and run
    this", the edit-and-rerun loop the epic asked for. Unit names are
    workspace names; a rerun after a failed run needs `pact teardown`
-   first, and the collision error says so.
+   first, and the collision error says so. Names come from the planner,
+   which is model output reading arbitrary repository content, so
+   `validate_plan` holds them to `[A-Za-z0-9][A-Za-z0-9._-]*`, at most
+   48 characters, unique by the slug their workspace id is made from
+   (issue #414): `Alpha One` and `alpha-one` used to pass as different
+   names and then share one workspace id, and `..\..\x` wrote its brief
+   outside the state directory. Briefs are named by that slug too, and
+   `create_lane` creates its metadata file with `create_new`, so lanes
+   started concurrently under one id get one lane and one clean error
+   instead of overwriting each other.
 
 Arm R (issue #308) then ran it on the benchmark with the planner
 deciding the split: 16.3 min, level with Copilot's in-process
