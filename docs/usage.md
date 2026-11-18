@@ -616,7 +616,9 @@ loads completions from, then start a new shell.
 failure three steps into a real `spawn`: whether `git` is installed and
 new enough for `worktree`, which agent CLIs (claude, copilot, codex,
 gemini, agy) are on `PATH`, and which package-manager CLIs `pact-deps`
-already knows how to prep. Read-only -- doesn't install or fix anything.
+already knows how to prep. It also lists `skillDirectories` in
+Copilot's `settings.json` that no longer exist; `pact doctor
+--fix-skill-dirs` removes exactly those. Otherwise read-only.
 Only a missing/too-old `git` makes it exit non-zero; a missing agent CLI
 or package manager is informational, since not everyone needs all of
 them.
