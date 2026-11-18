@@ -79,7 +79,7 @@ pub trait AgentAdapter {
     /// Builds the program name and args for a headless launch.
     /// `safety_override`, if given, is passed through *raw* to this
     /// adapter's own safety/approval vocabulary (Claude Code's
-    /// `--permission-mode` values, Codex's `--ask-for-approval` values,
+    /// `--permission-mode` values, Codex's `--sandbox` values,
     /// etc.) -- these vocabularies don't share a common enum, so no
     /// attempt is made to unify them into one. `workspace_path` exists for
     /// the rare adapter (Gemini CLI) whose MCP config isn't handed over

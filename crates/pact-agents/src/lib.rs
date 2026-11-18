@@ -5,8 +5,9 @@
 //! `adapter::AgentAdapter`); actually running the process and driving that
 //! parser is adapter-agnostic machinery (`process::run_and_stream`), so
 //! adding an adapter means one new small module, not touching process
-//! supervision. Claude Code and Copilot CLI are both live-verified; Codex
-//! is implemented from documentation only -- see `codex.rs`'s doc comment.
+//! supervision. Claude Code, Copilot CLI, Codex and Antigravity are
+//! live-verified; Gemini CLI's flags are, but its output schema is still
+//! inferred. Each adapter's doc comment says what was confirmed.
 
 mod adapter;
 mod agy;
