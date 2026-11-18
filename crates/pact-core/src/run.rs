@@ -91,15 +91,21 @@ pub fn validate_plan(plan: &Plan, max_units: usize) -> Vec<String> {
     if plan.units.len() > max_units {
         problems.push(format!("the plan has {} units; at most {max_units} are allowed", plan.units.len()));
     }
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_slugs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut owners: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for unit in &plan.units {
         let name = unit.name.trim();
-        if !name.chars().any(|c| c.is_ascii_alphanumeric()) {
-            problems.push(format!("unit name {:?} must contain at least one ASCII letter or digit", unit.name));
-        }
-        if !seen_names.insert(name.to_ascii_lowercase()) {
-            problems.push(format!("unit name {name:?} is used more than once"));
+        if let Some(problem) = unit_name_problem(&unit.name) {
+            problems.push(problem);
+        } else {
+            let slug = pact_vcs::name_slug(name);
+            match seen_slugs.get(&slug) {
+                Some(first) if first == name => problems.push(format!("unit name {name:?} is used more than once")),
+                Some(first) => problems.push(format!("unit names {first:?} and {name:?} both become workspace {slug:?}; give them names that differ in letters or digits")),
+                None => {
+                    seen_slugs.insert(slug, name.to_string());
+                }
+            }
         }
         if unit.files.is_empty() {
             problems.push(format!("unit {name:?} owns no files"));
@@ -121,6 +127,26 @@ pub fn validate_plan(plan: &Plan, max_units: usize) -> Vec<String> {
         problems.push(format!("file {file:?} is owned by more than one unit ({}); give it to exactly one", units.join(", ")));
     }
     problems
+}
+
+/// The longest unit name a plan may use (issue #414).
+pub const MAX_UNIT_NAME_LEN: usize = 48;
+
+/// Why `name` cannot be a unit name, if it cannot: it becomes a workspace
+/// id and a file name, so it must be `[A-Za-z0-9][A-Za-z0-9._-]*` and
+/// short (issue #414).
+fn unit_name_problem(name: &str) -> Option<String> {
+    let mut chars = name.chars();
+    let well_formed = chars.next().is_some_and(|c| c.is_ascii_alphanumeric()) && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !well_formed {
+        return Some(format!(
+            "unit name {name:?} must start with an ASCII letter or digit and contain only letters, digits, '.', '_' and '-' (short-kebab-case)"
+        ));
+    }
+    if name.len() > MAX_UNIT_NAME_LEN {
+        return Some(format!("unit name {name:?} is {} characters; at most {MAX_UNIT_NAME_LEN} are allowed", name.len()));
+    }
+    None
 }
 
 /// Line counts of the files each unit owns that already exist, as a
@@ -874,7 +900,7 @@ impl Orchestrator {
         let mut tasks = Vec::new();
         for unit in &plan.units {
             let brief = render_brief(&plan, unit);
-            let path = briefs_dir.join(format!("{}.md", unit.name));
+            let path = briefs_dir.join(format!("{}.md", pact_vcs::name_slug(&unit.name)));
             std::fs::write(&path, &brief).with_context(|| format!("writing {}", path.display()))?;
             brief_paths.push(path);
             tasks.push(SpawnManyTask { agent: options.agent, task: brief, name: Some(unit.name.clone()), model: None });
@@ -1391,12 +1417,26 @@ mod tests {
         let problems = validate_plan(&p, 8);
         let joined = problems.join("\n");
         assert!(joined.contains("\"src/shared.ts\" is owned by more than one unit (a, A)"), "{joined}");
-        assert!(joined.contains("used more than once"), "{joined}");
+        assert!(joined.contains("unit names \"a\" and \"A\" both become workspace \"a\""), "{joined}");
         assert!(joined.contains("\"../outside.ts\" must be a repo-relative path"), "{joined}");
         assert!(joined.contains("\"C:/abs.ts\" must be a repo-relative path"), "{joined}");
-        assert!(joined.contains("must contain at least one ASCII letter or digit"), "{joined}");
+        assert!(joined.contains("\"---\" must start with an ASCII letter or digit"), "{joined}");
         assert!(joined.contains("owns no files"), "{joined}");
         assert!(joined.contains("has an empty brief"), "{joined}");
+    }
+
+    #[test]
+    fn unit_names_must_be_safe_identifiers_unique_by_workspace_id() {
+        let named = |names: &[&str]| validate_plan(&plan(names.iter().enumerate().map(|(i, n)| unit(n, &[&format!("f{i}.ts")])).collect()), 8).join("\n");
+        assert_eq!(named(&["alpha-one", "beta_2", "v1.2"]), "");
+        let slug_clash = named(&["Alpha.One", "alpha-one"]);
+        assert!(slug_clash.contains("both become workspace \"alpha-one\""), "{slug_clash}");
+        assert!(named(&["alpha", "alpha"]).contains("\"alpha\" is used more than once"));
+        for bad in ["..\\..\\..\\ESCAPED", "../x", "a/b", "Alpha One", ".hidden", "-x", ""] {
+            assert!(named(&[bad]).contains("must start with an ASCII letter or digit and contain only"), "{bad:?} must be rejected");
+        }
+        let long = "a".repeat(MAX_UNIT_NAME_LEN + 1);
+        assert!(named(&[long.as_str()]).contains("at most 48 are allowed"));
     }
 
     #[test]
