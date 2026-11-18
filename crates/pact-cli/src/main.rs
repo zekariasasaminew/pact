@@ -1400,7 +1400,7 @@ fn main() -> Result<()> {
                     workspace.branch,
                     workspace.path.display()
                 );
-                println!("    task: {}", workspace.task);
+                println!("    task: {}", task_headline(&workspace.task, &workspace.id));
                 if let Some(batch) = &workspace.shared_batch {
                     println!("    shared tree: lane of batch {batch} (same worktree as its sibling lanes; commit-all/merge-all treat the batch as one workspace)");
                 }
@@ -1699,6 +1699,19 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The task on one line for `pact list`: whitespace collapsed and cut at
+/// `TASK_HEADLINE_CHARS`, since a `pact run` lane's task is its whole
+/// rendered brief.
+fn task_headline(task: &str, id: &str) -> String {
+    const TASK_HEADLINE_CHARS: usize = 120;
+    let collapsed = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= TASK_HEADLINE_CHARS {
+        return collapsed;
+    }
+    let cut: String = collapsed.chars().take(TASK_HEADLINE_CHARS).collect();
+    format!("{}... (full text: pact inspect {id})", cut.trim_end())
 }
 
 fn land_line(outcome: &pact_core::LandOutcome) -> String {
@@ -3431,6 +3444,16 @@ mod tests {
             warnings: Vec::new(),
             linked_paths: Vec::new(),
         }
+    }
+
+    #[test]
+    fn task_headline_keeps_a_short_task_and_cuts_a_brief_to_one_line() {
+        assert_eq!(task_headline("add a feature", "a"), "add a feature");
+        let brief = format!("Part of a larger task:\n> Add twice.\n## Your files\n{}", "- `calc.py`\n".repeat(20));
+        let line = task_headline(&brief, "calc-twice");
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.starts_with("Part of a larger task: > Add twice. ## Your files"), "{line}");
+        assert!(line.ends_with("... (full text: pact inspect calc-twice)"), "{line}");
     }
 
     #[test]
