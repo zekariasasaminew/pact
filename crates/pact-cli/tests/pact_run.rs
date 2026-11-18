@@ -188,9 +188,19 @@ fn run_sends_a_bad_plan_back_and_gives_up_after_the_retries() {
         { "name": "b", "files": ["shared.txt"], "brief": write_task("shared.txt", "s", "b") }
     ]);
     let reply = write_reply(&shim, &plan_reply(overlapping, None));
+    let acp_log = shim.join("acp-methods.log");
 
-    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--plan-retries", "1", "Do things"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_pact"))
+        .args(["--repo", repo.to_str().unwrap(), "run", "--agent", "copilot", "--plan-retries", "1", "Do things"])
+        .env("PATH", path_with_shim_first(&shim))
+        .env("FAKE_ACP_REPLY_FILE", &reply)
+        .env("FAKE_ACP_LOG", &acp_log)
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "an unexecutable plan must fail the run:\n{}", stdout(&out));
+    let methods = std::fs::read_to_string(&acp_log).unwrap();
+    let count = |method: &str| methods.lines().filter(|l| *l == method).count();
+    assert_eq!((count("initialize"), count("session/new"), count("session/prompt")), (1, 1, 2), "both attempts share one process and one session (#413):\n{methods}");
     let text = format!("{}{}", stdout(&out), stderr(&out));
     assert!(text.contains("still cannot run after 2 attempt(s)"), "{text}");
     assert!(text.contains("\"shared.txt\" is owned by more than one unit (a, b)"), "{text}");
