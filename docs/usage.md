@@ -913,9 +913,27 @@ so it never shows up in the main repo's `git status`:
 <repo-parent>/.pact-<repo-name>/
 ├── locks/git.lock              # PID-aware lock serializing worktree add/remove
 ├── meta/<id>.json               # id, path, branch, task, created_at, agent_pid
+├── meta/runs|deps|prepare|replies/<id>.json   # per-workspace run records
+├── meta/plans/*.json            # pact run plans (kept by pact gc)
+├── meta/verify/<run>/           # pact run verification logs
 ├── mcp/<id>.json                 # generated --mcp-config file for this workspace
 ├── workspaces/<id>/            # the actual git worktree for that agent
+├── homes/                       # lean agent homes: per workspace, per ACP batch, per planner
+├── briefs/<stamp>/              # pact run unit briefs
 └── logs/<id>.jsonl              # raw NDJSON, one line per agent stdout line, as-is
+```
+
+`pact teardown` removes a workspace's worktree, branch and record but
+leaves its logs and run records for later reading. `pact gc` removes
+what nothing uses any more: the logs, homes and records of workspaces
+that no longer exist, and planner and arbiter logs, ACP homes, briefs
+and verification logs, all once nothing inside them has changed for
+`--older-than` (default `7d`). Plans are always kept. `--dry-run` lists
+each item and its size without removing anything.
+
+```sh
+pact gc --dry-run
+pact gc --older-than 1d
 ```
 
 The coordination database is the one exception -- deliberately *not* here
