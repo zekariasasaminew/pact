@@ -28,6 +28,7 @@ use pact_agents::{AgentEvent, AgentKind, LaunchRequest, Supervisor};
 use pact_vcs::Workspace;
 use serde::{Deserialize, Serialize};
 
+use crate::ownership::{check_ownership, edits_in_log, tree_hash, FinishSnapshots, OwnershipViolation};
 use crate::verify_output::{failing_files, FailingFile};
 use crate::{agent_kind_name, effective_runtime, unix_now, LaneRuntime, Orchestrator, SpawnManyOutcome, SpawnManyTask, SpawnOptions};
 
@@ -387,11 +388,18 @@ pub struct RunReport {
     pub committed: Option<bool>,
     pub repairs: Vec<RepairOutcome>,
     pub verify: Vec<VerifyOutcome>,
+    /// Files the units' lanes wrote outside their own (issue #409); the
+    /// run fails when there are any. Nothing is reverted.
+    pub ownership: Vec<OwnershipViolation>,
 }
 
 pub struct RepairOutcome {
     pub attempt: usize,
+    /// The unit whose failing files this lane repaired; `None` for the
+    /// lane that took the failures no unit owns (issue #372).
+    pub unit: Option<String>,
     pub outcome: SpawnManyOutcome,
+    /// Whether this attempt's round, all its lanes together, committed.
     pub committed: bool,
 }
 
@@ -406,7 +414,7 @@ impl RunReport {
             && self.outcomes.iter().all(|o| matches!(&o.result, Ok((_, run)) if run.success));
         // An inconclusive verification is not a success: the user has to
         // judge the result some other way, and the exit code says so.
-        lanes_ok && self.verify.iter().all(|v| v.success)
+        lanes_ok && self.ownership.is_empty() && self.verify.iter().all(|v| v.success)
     }
 
     /// The verdict that decides the exit code: the worst across the
@@ -475,41 +483,142 @@ impl VerifyOutcome {
 }
 
 fn verification_needs_repair(outcomes: &[VerifyOutcome]) -> bool {
-    outcomes.iter().any(|outcome| matches!(outcome.verdict(), Verdict::Regressed | Verdict::Failed))
+    outcomes.iter().any(needs_repair)
 }
 
-/// Unit names are workspace names, so the repair lane must not reuse one.
-fn repair_lane_name(attempt: usize, plan: &Plan) -> String {
-    let taken = |name: &str| plan.units.iter().any(|unit| unit.name.trim().eq_ignore_ascii_case(name));
-    let base = format!("repair-{attempt}");
-    let mut name = base.clone();
-    let mut suffix = 2;
-    while taken(&name) {
-        name = format!("{base}-{suffix}");
-        suffix += 1;
-    }
-    name
+/// One repair lane's share of a failed verification (issue #372).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepairAssignment {
+    /// `None` for the lane taking failures no unit owns.
+    unit: Option<String>,
+    /// The files the lane may edit, disjoint from every other lane's.
+    allowed: Vec<String>,
+    checks: Vec<RepairCheck>,
 }
 
-fn render_repair_brief(attempt: usize, total: usize, outcomes: &[VerifyOutcome], touched_files: &[String]) -> String {
-    let mut brief = format!(
-        "# Repair attempt {attempt}/{total}\n\nMake the combined verification checks pass without changing application behaviour. "
-    );
-    brief.push_str("Touch only files this run created or edited, listed below. Do not edit any other file.\n\n## Files you may touch\n");
-    for file in touched_files {
-        brief.push_str(&format!("- `{file}`\n"));
-    }
-    brief.push_str("\n## Failing checks\n");
-    for outcome in outcomes.iter().filter(|outcome| matches!(outcome.verdict(), Verdict::Regressed | Verdict::Failed)) {
-        brief.push_str(&format!("\n### `{}`\n\nFull output: `{}`\n", outcome.command, outcome.log.display()));
-        if outcome.timed_out {
-            brief.push_str("\nIt did not finish: pact killed it at the verification timeout. Look for a test that hangs or waits on input.\n");
+/// A failing check as one lane sees it: only the files routed to it, or
+/// the output's last lines when it names no file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepairCheck {
+    command: String,
+    log: PathBuf,
+    timed_out: bool,
+    files: Vec<FailingFile>,
+    tail: Option<String>,
+}
+
+fn needs_repair(outcome: &VerifyOutcome) -> bool {
+    matches!(outcome.verdict(), Verdict::Regressed | Verdict::Failed)
+}
+
+/// Splits the real failures between repair lanes: each failing file goes
+/// to the unit that owns it, and that unit's lane may edit only its own
+/// files. Files no unit owns, and checks whose output names no file or
+/// that timed out, go to one extra lane that may edit the run's touched
+/// files no unit lane holds this round. When that leaves the extra lane
+/// nothing to edit, its checks are context for every unit lane instead.
+fn route_repairs(plan: &Plan, outcomes: &[VerifyOutcome], touched_files: &[String]) -> Vec<RepairAssignment> {
+    let normalize = |path: &str| path.replace('\\', "/").trim_start_matches("./").to_string();
+    let owner = |path: &str| plan.units.iter().find(|unit| unit.files.iter().any(|file| normalize(file) == path)).map(|unit| unit.name.trim().to_string());
+    let check_for = |checks: &mut Vec<RepairCheck>, outcome: &VerifyOutcome| -> usize {
+        match checks.iter().position(|check| check.command == outcome.command) {
+            Some(index) => index,
+            None => {
+                checks.push(RepairCheck { command: outcome.command.clone(), log: outcome.log.clone(), timed_out: outcome.timed_out, files: Vec::new(), tail: None });
+                checks.len() - 1
+            }
         }
-        if outcome.failing_files.is_empty() {
-            brief.push_str(&format!("\nThe output names no file in the tree; its last lines:\n\n```text\n{}\n```\n", outcome.output_tail));
+    };
+
+    let mut by_unit: Vec<(String, Vec<RepairCheck>)> = Vec::new();
+    let mut unowned: Vec<RepairCheck> = Vec::new();
+    for outcome in outcomes.iter().filter(|outcome| needs_repair(outcome)) {
+        if outcome.timed_out || outcome.failing_files.is_empty() {
+            let index = check_for(&mut unowned, outcome);
+            unowned[index].tail = Some(outcome.output_tail.clone());
             continue;
         }
         for file in &outcome.failing_files {
+            let checks = match owner(&file.path) {
+                Some(unit) => match by_unit.iter().position(|(name, _)| *name == unit) {
+                    Some(index) => &mut by_unit[index].1,
+                    None => {
+                        by_unit.push((unit, Vec::new()));
+                        &mut by_unit.last_mut().expect("just pushed").1
+                    }
+                },
+                None => &mut unowned,
+            };
+            let index = check_for(checks, outcome);
+            checks[index].files.push(file.clone());
+        }
+    }
+    by_unit.sort_by_key(|(name, _)| plan.units.iter().position(|unit| unit.name.trim() == name));
+
+    let mut assignments: Vec<RepairAssignment> = by_unit
+        .into_iter()
+        .map(|(name, checks)| {
+            let allowed = plan.units.iter().find(|unit| unit.name.trim() == name).map(|unit| unit.files.iter().map(|f| normalize(f)).collect()).unwrap_or_default();
+            RepairAssignment { unit: Some(name), allowed, checks }
+        })
+        .collect();
+    if !unowned.is_empty() {
+        let held: Vec<&String> = assignments.iter().flat_map(|assignment| &assignment.allowed).collect();
+        let allowed: Vec<String> = touched_files.iter().map(|f| normalize(f)).filter(|file| !held.contains(&file)).collect();
+        if allowed.is_empty() && !assignments.is_empty() {
+            for assignment in &mut assignments {
+                assignment.checks.extend(unowned.iter().cloned());
+            }
+        } else {
+            assignments.push(RepairAssignment { unit: None, allowed, checks: unowned });
+        }
+    }
+    assignments
+}
+
+/// Repair lane names are workspace names: never a unit's, never each other's.
+fn repair_lane_names(attempt: usize, plan: &Plan, assignments: &[RepairAssignment]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for assignment in assignments {
+        let base = match &assignment.unit {
+            Some(unit) => format!("repair-{attempt}-{unit}"),
+            None => format!("repair-{attempt}"),
+        };
+        let taken = |name: &str| plan.units.iter().any(|unit| unit.name.trim().eq_ignore_ascii_case(name)) || names.iter().any(|n| n.eq_ignore_ascii_case(name));
+        let mut name = base.clone();
+        let mut suffix = 2;
+        while taken(&name) {
+            name = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        names.push(name);
+    }
+    names
+}
+
+fn render_repair_brief(attempt: usize, total: usize, assignment: &RepairAssignment, touched_files: &[String], parallel_lanes: usize) -> String {
+    let mut brief = match &assignment.unit {
+        Some(unit) => format!("# Repair attempt {attempt}/{total}: unit `{unit}`\n\nMake the combined verification checks pass for the files of unit `{unit}` without changing application behaviour. "),
+        None => format!("# Repair attempt {attempt}/{total}\n\nMake the combined verification checks pass without changing application behaviour. "),
+    };
+    brief.push_str("Touch only the files listed below. Do not edit any other file.");
+    if parallel_lanes > 1 {
+        brief.push_str(&format!(" {} other repair lane(s) are fixing other files in this tree at the same time.", parallel_lanes - 1));
+    }
+    brief.push_str("\n\n## Files you may touch\n");
+    for file in &assignment.allowed {
+        brief.push_str(&format!("- `{file}`\n"));
+    }
+    brief.push_str("\n## Failing checks\n");
+    for check in &assignment.checks {
+        brief.push_str(&format!("\n### `{}`\n\nFull output: `{}`\n", check.command, check.log.display()));
+        if check.timed_out {
+            brief.push_str("\nIt did not finish: pact killed it at the verification timeout. Look for a test that hangs or waits on input.\n");
+        }
+        if let Some(tail) = &check.tail {
+            brief.push_str(&format!("\nThe output's last lines:\n\n```text\n{tail}\n```\n"));
+        }
+        for file in &check.files {
             let note = if touched_files.contains(&file.path) { "" } else { " (not changed by this run: fix it through the files you may touch)" };
             brief.push_str(&format!("\n#### `{}`{note}\n\n```text\n{}\n```\n", file.path, file.excerpt));
         }
@@ -763,6 +872,7 @@ impl Orchestrator {
                 committed: None,
                 repairs: Vec::new(),
                 verify: Vec::new(),
+                ownership: Vec::new(),
             });
         }
 
@@ -786,49 +896,78 @@ impl Orchestrator {
             None if verify_commands.is_empty() => Vec::new(),
             None => self.run_baselines(&batch, &verify_commands, verify_context, &planner_events)?,
         };
-        let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), &on_event);
+        let snapshots = FinishSnapshots::default();
+        let lane_events = |index: usize, agent: &AgentKind, event: &AgentEvent| {
+            if let (AgentEvent::Result { .. }, Some(unit)) = (event, plan.units.get(index)) {
+                snapshots.record(index, &unit.files, &batch.path);
+            }
+            on_event(index, agent, event)
+        };
+        let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), lane_events);
         let batch = self.workspaces.get_workspace(&batch.id).ok();
 
         let mut committed = None;
         let mut repairs = Vec::new();
         let mut verify = Vec::new();
+        let mut ownership = Vec::new();
         if let Some(batch) = &batch {
+            let changed = pact_vcs::changed_since(&batch.path, &batch.base_commit).context("listing the files the lanes changed")?;
+            let logs = self.workspaces.state_dir().join("logs");
+            let lane_edits: Vec<(usize, Vec<String>)> = outcomes
+                .iter()
+                .filter_map(|outcome| outcome.result.as_ref().ok().map(|(lane, _)| (outcome.index, edits_in_log(&logs.join(format!("{}.jsonl", lane.id)), &batch.path))))
+                .collect();
+            ownership = check_ownership(&plan, &changed, &lane_edits, snapshots, tree_hash(&batch.path));
+            for violation in &ownership {
+                planner_events(&AgentEvent::Phase(format!("ownership: {violation}")));
+            }
             planner_events(&AgentEvent::Phase(format!("committing the shared tree {}", batch.id)));
             committed = Some(self.workspaces.commit_all(&batch.id).context("committing the batch")?);
             verify = self.verify_run(batch, &verify_commands, &baselines, verify_context, "after", &planner_events)?;
 
             let touched_files = self.workspaces.workspace_changes(&batch.id).context("finding files touched by the run")?.files;
+            let mut next_lane_index = plan.units.len();
             for attempt in 1..=options.repair_attempts {
                 if !verification_needs_repair(&verify) {
                     break;
                 }
+                let assignments = route_repairs(&plan, &verify, &touched_files);
+                let names = repair_lane_names(attempt, &plan, &assignments);
+                let lanes: Vec<String> = assignments.iter().map(|a| a.unit.clone().unwrap_or_else(|| "files no unit owns".to_string())).collect();
                 planner_events(&AgentEvent::Phase(format!(
-                    "repair attempt {attempt}/{} for failed combined verification",
-                    options.repair_attempts
+                    "repair attempt {attempt}/{} for failed combined verification: {} lane{} in parallel ({})",
+                    options.repair_attempts,
+                    assignments.len(),
+                    if assignments.len() == 1 { "" } else { "s" },
+                    lanes.join(", ")
                 )));
-                let task = SpawnManyTask {
-                    agent: options.agent,
-                    task: render_repair_brief(attempt, options.repair_attempts, &verify, &touched_files),
-                    name: Some(repair_lane_name(attempt, &plan)),
-                    model: None,
-                };
-                let repair_index = plan.units.len() + attempt - 1;
-                let mut repair_outcomes = self.spawn_many_in(vec![task], spawn_options, Some(batch.clone()), |_, agent, event| {
-                    on_event(repair_index, agent, event)
-                });
-                let outcome = repair_outcomes.pop().expect("one repair task produces one outcome");
-                let lane_succeeded = matches!(&outcome.result, Ok((_, run)) if run.success);
-                let repair_committed = if lane_succeeded {
+                let tasks: Vec<SpawnManyTask> = assignments
+                    .iter()
+                    .zip(&names)
+                    .map(|(assignment, name)| SpawnManyTask {
+                        agent: options.agent,
+                        task: render_repair_brief(attempt, options.repair_attempts, assignment, &touched_files, assignments.len()),
+                        name: Some(name.clone()),
+                        model: None,
+                    })
+                    .collect();
+                let base_index = next_lane_index;
+                next_lane_index += tasks.len();
+                let round = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), |index, agent, event| on_event(base_index + index, agent, event));
+                let any_succeeded = round.iter().any(|outcome| matches!(&outcome.result, Ok((_, run)) if run.success));
+                let round_committed = if any_succeeded {
                     planner_events(&AgentEvent::Phase(format!("committing repair attempt {attempt}")));
-                    let repair_committed = self.workspaces.commit_all(&batch.id).context("committing the repair")?;
-                    committed = Some(committed.unwrap_or(false) || repair_committed);
+                    let round_committed = self.workspaces.commit_all(&batch.id).context("committing the repair")?;
+                    committed = Some(committed.unwrap_or(false) || round_committed);
                     verify = self.verify_run(batch, &verify_commands, &baselines, verify_context, &format!("repair-{attempt}"), &planner_events)?;
-                    repair_committed
+                    round_committed
                 } else {
                     false
                 };
-                repairs.push(RepairOutcome { attempt, outcome, committed: repair_committed });
-                if !lane_succeeded {
+                for (assignment, outcome) in assignments.into_iter().zip(round) {
+                    repairs.push(RepairOutcome { attempt, unit: assignment.unit, outcome, committed: round_committed });
+                }
+                if !any_succeeded {
                     break;
                 }
             }
@@ -848,6 +987,7 @@ impl Orchestrator {
             committed,
             repairs,
             verify,
+            ownership,
         })
     }
 
@@ -1163,6 +1303,7 @@ mod tests {
             committed: None,
             repairs: vec![],
             verify,
+            ownership: vec![],
         };
         assert_eq!(report(vec![]).worst_verdict(), None);
         assert_eq!(report(vec![outcome(true, Some(true)), outcome(true, Some(false))]).worst_verdict(), Some(Verdict::Fixed));
@@ -1171,11 +1312,31 @@ mod tests {
         assert_eq!(report(vec![outcome(false, None), outcome(false, Some(false))]).worst_verdict(), Some(Verdict::Failed));
     }
 
+    fn failing(command: &str, files: Vec<FailingFile>) -> VerifyOutcome {
+        VerifyOutcome {
+            command: command.into(),
+            success: false,
+            exit_code: Some(1),
+            output_tail: format!("TAIL OF {command}"),
+            duration: Duration::ZERO,
+            baseline_success: Some(true),
+            timed_out: false,
+            log: PathBuf::from("verify.log"),
+            failing_files: files,
+        }
+    }
+
+    fn file(path: &str, excerpt: &str) -> FailingFile {
+        FailingFile { path: path.into(), excerpt: excerpt.into() }
+    }
+
     #[test]
-    fn the_repair_lane_never_reuses_a_unit_name() {
-        assert_eq!(repair_lane_name(1, &plan(vec![unit("a", &["a.ts"])])), "repair-1");
+    fn the_repair_lanes_never_reuse_a_unit_name_or_each_others() {
+        let assignment = |unit: Option<&str>| RepairAssignment { unit: unit.map(str::to_string), allowed: vec![], checks: vec![] };
+        let names = repair_lane_names(1, &plan(vec![unit("a", &["a.ts"])]), &[assignment(Some("a")), assignment(None)]);
+        assert_eq!(names, ["repair-1-a", "repair-1"]);
         let taken = plan(vec![unit("Repair-1", &["a.ts"]), unit("repair-1-2", &["b.ts"])]);
-        assert_eq!(repair_lane_name(1, &taken), "repair-1-3");
+        assert_eq!(repair_lane_names(1, &taken, &[assignment(None)]), ["repair-1-3"]);
     }
 
     #[test]
@@ -1342,32 +1503,59 @@ mod tests {
     }
 
     #[test]
-    fn the_repair_brief_gives_each_failing_file_its_excerpt_and_falls_back_to_the_tail() {
-        let failing = |command: &str, files: Vec<FailingFile>| VerifyOutcome {
-            command: command.into(),
-            success: false,
-            exit_code: Some(1),
-            output_tail: "TAIL LINE".into(),
-            duration: Duration::ZERO,
-            baseline_success: Some(true),
-            timed_out: false,
-            log: PathBuf::from("verify.log"),
-            failing_files: files,
-        };
-        let file = |path: &str, excerpt: &str| FailingFile { path: path.into(), excerpt: excerpt.into() };
-        let brief = render_repair_brief(
-            1,
-            1,
-            &[
-                failing("npm test", vec![file("src/a.ts", "src/a.ts:3 boom"), file("src/old.test.ts", "FAIL src/old.test.ts")]),
-                failing("npm run lint", vec![]),
-            ],
-            &["src/a.ts".to_string()],
-        );
+    fn the_repair_brief_gives_each_failing_file_its_excerpt_and_says_who_else_is_working() {
+        let p = plan(vec![unit("alpha", &["src/a.ts"])]);
+        let touched = vec!["src/a.ts".to_string(), "package.json".to_string()];
+        let routed = route_repairs(&p, &[failing("npm test", vec![file("src/a.ts", "src/a.ts:3 boom")]), failing("lint", vec![file("src/old.test.ts", "FAIL old")])], &touched);
+        assert_eq!(routed.len(), 2, "{routed:?}");
+        let brief = render_repair_brief(1, 2, &routed[0], &touched, 2);
+        assert!(brief.starts_with("# Repair attempt 1/2: unit `alpha`"), "{brief}");
         assert!(brief.contains("#### `src/a.ts`\n\n```text\nsrc/a.ts:3 boom"), "{brief}");
-        assert!(brief.contains("#### `src/old.test.ts` (not changed by this run"), "{brief}");
-        assert_eq!(brief.matches("TAIL LINE").count(), 1, "only the check with no named file falls back to its tail:\n{brief}");
+        assert!(brief.contains("1 other repair lane(s) are fixing other files"), "{brief}");
         assert!(brief.contains("Full output: `verify.log`"), "{brief}");
+        assert!(!brief.contains("old.test.ts"), "another lane's failure stays out:\n{brief}");
+    }
+
+    #[test]
+    fn repairs_go_to_the_unit_owning_each_failing_file_and_the_rest_to_one_extra_lane() {
+        let p = plan(vec![unit("alpha", &["src/a.ts", "src/a.test.ts"]), unit("beta", &["src/b.ts"]), unit("gamma", &["src/c.ts"])]);
+        let touched: Vec<String> = ["src/a.ts", "src/a.test.ts", "src/b.ts", "src/c.ts", "package.json"].iter().map(|s| s.to_string()).collect();
+        let outcomes = [
+            failing("npm test", vec![file("src/a.test.ts", "FAIL a"), file("src/b.ts", "b broke"), file("src/old.test.ts", "FAIL old")]),
+            failing("npm run lint", vec![file("src/a.ts", "a lint")]),
+            failing("tsc", vec![]),
+        ];
+        let routed = route_repairs(&p, &outcomes, &touched);
+        let units: Vec<Option<&str>> = routed.iter().map(|a| a.unit.as_deref()).collect();
+        assert_eq!(units, [Some("alpha"), Some("beta"), None], "gamma has no failure, so no lane: {routed:?}");
+
+        let alpha = &routed[0];
+        assert_eq!(alpha.allowed, ["src/a.ts", "src/a.test.ts"]);
+        let alpha_files: Vec<(&str, &str)> = alpha.checks.iter().flat_map(|c| c.files.iter().map(move |f| (c.command.as_str(), f.path.as_str()))).collect();
+        assert_eq!(alpha_files, [("npm test", "src/a.test.ts"), ("npm run lint", "src/a.ts")], "each check carries only the lane's own files");
+
+        let extra = &routed[2];
+        assert_eq!(extra.allowed, ["src/c.ts", "package.json"], "touched files no unit lane holds, never an untouched file");
+        assert_eq!(extra.checks.len(), 2, "{extra:?}");
+        assert_eq!(extra.checks[0].files, [file("src/old.test.ts", "FAIL old")]);
+        assert_eq!(extra.checks[1].tail.as_deref(), Some("TAIL OF tsc"), "a check naming no file goes whole to the extra lane");
+
+        let lanes_allowed: Vec<&String> = routed.iter().flat_map(|a| &a.allowed).collect();
+        let distinct: std::collections::HashSet<&&String> = lanes_allowed.iter().collect();
+        assert_eq!(distinct.len(), lanes_allowed.len(), "no file is editable by two lanes: {lanes_allowed:?}");
+    }
+
+    #[test]
+    fn unowned_failures_with_nothing_left_to_edit_become_context_for_the_unit_lanes() {
+        let p = plan(vec![unit("alpha", &["a.ts"]), unit("beta", &["b.ts"])]);
+        let touched = vec!["a.ts".to_string(), "b.ts".to_string()];
+        let routed = route_repairs(&p, &[failing("test", vec![file("a.ts", "x"), file("b.ts", "y"), file("old.test.ts", "z")])], &touched);
+        assert_eq!(routed.len(), 2, "{routed:?}");
+        assert!(routed.iter().all(|a| a.checks.iter().any(|c| c.files.iter().any(|f| f.path == "old.test.ts"))), "{routed:?}");
+
+        let only_unowned = route_repairs(&p, &[failing("tsc", vec![])], &touched);
+        assert_eq!(only_unowned.len(), 1);
+        assert_eq!((only_unowned[0].unit.as_deref(), only_unowned[0].allowed.len()), (None, 2), "with no unit lane the extra lane may edit every touched file");
     }
 
     #[test]

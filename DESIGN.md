@@ -1522,6 +1522,66 @@ The repair brief gives each failing file its excerpt and marks the ones
 the run never changed, since the repair may only edit touched files and
 has to fix those failures through them.
 
+#### Repair lanes per unit, in parallel (issue #372)
+
+#362's repair was one agent fixing every failure in turn. In R5 it ran
+31 minutes, longer than any lane, and the checks still failed. The plan
+already says which unit owns every file, and #373 says which files
+failed, so `route_repairs` sends each failing file to the unit that
+owns it. That unit's repair lane gets only its own files' excerpts and
+may edit only its own files, so the round's lanes are disjoint the same
+way the plan's units are, and they run together through `spawn_many_in`
+under the run's runtime and admission policy. A failing file no unit
+owns, a check whose output names no file, and a check that timed out go
+to one extra lane, which may edit the touched files no unit lane holds
+that round. Untouched files stay off limits for every lane: a test the
+run did not edit that now fails is evidence against the run, and letting
+the repair edit it would hide that. If the extra lane is left with
+nothing it may edit, its checks become context for every unit lane
+rather than a lane that cannot act. Each round commits once after its
+lanes finish and reruns every check; `--repair-attempts` still counts
+rounds, and a round in which no lane succeeded ends the loop. Lane names
+are `repair-<round>-<unit>` and `repair-<round>`, suffixed if they would
+collide with a unit's name.
+
+#### Enforcing file ownership (issue #409)
+
+`validate_plan` makes the plan disjoint and the brief tells each worker
+it owns its files and nothing else, but nothing checked what the lanes
+wrote. A lane that reformatted a neighbour's file, fixed an import in a
+shared barrel or updated a snapshot silently replaced that work, the
+commit took it, and the report said OK. After the units' lanes finish
+and before the commit, pact now lists what the tree carries over its
+base (`changed_since`: `git diff --name-only <base>` plus untracked
+files git does not ignore, so new directories appear file by file) and
+compares it with the plan. Three sources of evidence, each covering
+what the one before cannot:
+
+- A changed file no unit owns is caught from the tree alone.
+- A write into another unit's file is attributed from the lane's ACP
+  log: `tool_call` and `tool_call_update` updates carry `locations`,
+  and those of kind `edit`, `delete` or `move` name what the lane
+  changed. Reads and searches carry locations too and are ignored. The
+  kind is remembered per tool call because an update need not repeat it.
+- For lanes without such a log (process lanes), each unit's own files
+  are hashed when its lane reports its result. A file that differs at
+  the end changed after its owner finished, so one of the lanes still
+  running then wrote it; the report names those lanes. This misses a
+  write that lands before the owner finishes, which only the log can
+  see.
+
+Each violation names the lane, the file and the owning unit, the run
+fails with exit 1, and the report ends by saying nothing was reverted.
+Reverting was considered and rejected: the stray write may be the
+correct fix (a barrel export the owner forgot), pact cannot tell, and
+undoing it can break the owner's work instead. The commit still
+happens so the result can be reviewed with `pact diff`. The check runs
+once, on the units' lanes; repair lanes (#372) work across the run's
+touched files by design and are not held to unit ownership. The ACP
+locations path is verified with the fake agent only; whether Copilot
+CLI reports `locations` for every edit is not yet verified against a
+real paid run.
+
 ### `pact fleet`: independent tasks (issue #388)
 
 `spawn-many` and `pact run` assume one repository and one result: the
