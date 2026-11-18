@@ -62,11 +62,9 @@ fn run_inner(repo_root: &Path) -> Result<()> {
     init_git_repo(repo_root)?;
 
     println!("pact run \"{DEMO_TASK}\"");
-    println!(
-        "(The planner and the agents are simulated: they are the steps that cost money and \
-         need a signed-in agent CLI. Everything else below is pact's real code on a real repo. \
-         See the end of this output for how to run the real thing.)"
-    );
+    println!("(The planner and the agents are simulated: they are the steps that cost money and need a");
+    println!("signed-in agent CLI. Everything else below is pact's real code on a real repo. The end of this");
+    println!("output shows how to run the real thing.)");
     println!();
 
     println!("plan: {} units, each owning its own files", DEMO_TASKS.len());
@@ -100,10 +98,8 @@ fn run_inner(repo_root: &Path) -> Result<()> {
     println!("  verify: {verdict}");
 
     println!();
-    println!(
-        "That's pact run: units that own disjoint files run as parallel lanes in one tree, \
-         with no merge step, and the result is checked against the base commit."
-    );
+    println!("That's pact run: units that own disjoint files run as parallel lanes in one tree, with no");
+    println!("merge step, and the result is checked against the base commit.");
     println!();
     println!("Try it for real, in your own repo:");
     println!("  pact doctor");
