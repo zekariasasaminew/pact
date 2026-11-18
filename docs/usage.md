@@ -55,8 +55,13 @@ stdin closed, so watch-by-default runners exit, and under
 as timed out, a timed-out baseline as no baseline. Every command's full
 output, both streams interleaved, is kept under the state dir's
 `meta/verify/<run>/`, and a failing command's report line lists the
-files its output names (the repair lane gets each file's own excerpt)
-and names its log.
+files its output names (each repair lane gets its own files' excerpts)
+and names its log. A failure goes to the unit owning the failing file:
+those units' repair lanes run in parallel, a failure no unit owns goes to
+one extra lane, and `--repair-attempts` bounds the rounds. Before the
+commit pact also checks ownership: a lane that wrote another unit's file,
+or a file no unit owns, is named with the file and its owner, and the
+run fails (exit 1) without reverting anything.
 The shared tree, its
 dependencies and those baselines are prepared while the planner works.
 Plans and briefs are

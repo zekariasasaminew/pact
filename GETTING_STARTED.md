@@ -59,8 +59,9 @@ What happens, in order:
 2. The units run as parallel lanes, as many at once as memory allows. Each
    lane prints its progress prefixed `[copilot:<n>]`.
 3. pact commits the combined result once and runs every check again.
-4. A check that passed before and fails now gets one repair lane in the
-   same tree, then the checks run again.
+4. A check that passed before and fails now gets repair lanes in the same
+   tree, one per unit whose files it names, running in parallel; then the
+   checks run again.
 
 The last lines are the verdicts and where the result is:
 
