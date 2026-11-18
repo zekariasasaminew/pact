@@ -2810,6 +2810,10 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
         }
     }
     for repair in &report.repairs {
+        let lane = match &repair.unit {
+            Some(unit) => format!("repair attempt {} ({unit})", repair.attempt),
+            None => format!("repair attempt {} (files no unit owns)", repair.attempt),
+        };
         match &repair.outcome.result {
             Ok((workspace, run)) => {
                 let duration = orchestrator
@@ -2817,14 +2821,13 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                     .map(|metadata| format!(" in {}s", metadata.ended_at.saturating_sub(metadata.started_at)))
                     .unwrap_or_default();
                 println!(
-                    "repair attempt {}: {}{duration}: {} ({})",
-                    repair.attempt,
+                    "{lane}: {}{duration}: {} ({})",
                     if run.success { "done" } else { "failed" },
                     run.summary,
                     if repair.committed { "committed" } else { "nothing committed" }
                 );
             }
-            Err(err) => println!("repair attempt {}: FAILED before/during launch -- {err:#}", repair.attempt),
+            Err(err) => println!("{lane}: FAILED before or during launch: {err:#}"),
         }
     }
     if let Some(batch) = &report.batch {

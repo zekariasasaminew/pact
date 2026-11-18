@@ -64,7 +64,7 @@ flowchart TD
     L --> C[commit once]
     C --> R[run every --verify command]
     R --> D{worst verdict}
-    D -- regressed or failed --> X[repair lane in the same tree,<br/>up to --repair-attempts]
+    D -- regressed or failed --> X[repair lanes in the same tree,<br/>one per unit owning a failing file,<br/>in parallel, up to --repair-attempts rounds]
     X --> C
     D -- passed, fixed or inconclusive --> O([report + branch])
 ```
@@ -76,9 +76,9 @@ starts, and on the combined result. The pair decides the verdict:
 |---|---|---|---|
 | passes | passes | passed | 0 |
 | fails | passes | fixed | 0 |
-| passes | fails | regressed: a repair lane runs | 1 if still failing |
+| passes | fails | regressed: repair lanes run | 1 if still failing |
 | fails | fails | inconclusive: cannot judge the run | 3 |
-| no baseline | fails | failed: a repair lane runs | 1 if still failing |
+| no baseline | fails | failed: repair lanes run | 1 if still failing |
 
 Workers check only their own files; the project-wide checks run once, by
 pact, on the combined result. Twelve lanes each running a full type-check
