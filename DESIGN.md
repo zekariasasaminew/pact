@@ -1656,9 +1656,8 @@ those files are not run. `repo` resolves through `git rev-parse
 directory beside the repository root.
 
 **Process lanes only.** An ACP batch is one agent process bound to one
-repository's coordination server, and it cannot set a model per lane yet
-(#374). Per-task models are the point of a fleet, so every task is its
-own process whatever the agent.
+repository's coordination server, and a fleet's tasks span repositories,
+so every task is its own process whatever the agent.
 
 **The worker report contract.** A process exit code says the CLI did not
 crash; it does not say the task is finished: an agent that stops to ask
@@ -3591,12 +3590,34 @@ unknown or lacks the task's agent fails the command: falling back to the
 CLI default would silently run at the price the user was trying to avoid.
 
 ACP lanes share one agent process per agent kind, so a model is a
-per-session setting there (`session/set_config_option`, #374), not a
-launch flag. Until that lands, a requested model turns `--runtime auto`
-into `process` (more memory per lane, but the model the user asked for)
-and refuses an explicit `--runtime acp`; `spawn_with_supervisor` also
-refuses an ACP lane with a model, so a library caller cannot get the
-silent default either.
+per-session setting there (`session/set_config_option`), not a launch
+flag. Until #374 a requested model turned `--runtime auto` into
+`process` and refused `--runtime acp`. That fallback hid a cost of its
+own (issue #415): `pact run --tier cheap` silently became the
+process runtime, with three times the per-lane memory reserve and so
+far fewer planned units, the configuration the benchmark shows losing.
+
+### The model a lane actually ran on (issue #374)
+
+On 2026-10-02 every `pact run` lane ran on `claude-haiku-4.5` while
+everyone believed it was `claude-opus-5`: Copilot's catalog had dropped
+the requested id and the agent swapped in a default at session start,
+announcing it only in a `config_option_update` pact threw away. ACP
+sessions describe their model as a config option (id `model`, or
+category `model`), with the values on offer and `currentValue`. So an
+ACP lane with a model now selects it with `session/set_config_option`
+after `session/new`; a model the agent does not offer is an error, and
+`spawn_many_in` checks every requested (agent, model) pair on a
+throwaway session before any lane launches, so a typo or a retired id
+costs nothing. Every lane, and the planner, records the model the agent
+reports: the value after selection, replaced by any later
+`config_option_update` during the turn. When that differs from the
+request the lane prints a warning and the run record keeps both
+(`model` and `effective_model`, shown by `pact inspect` and `pact list
+--json`). Process lanes still pass `--model` and record only the
+request, since a process CLI reports no model in a form pact parses.
+With selection in place the fallback above is gone: `auto` stays ACP
+when a model is set.
 
 ## pact-coord — MCP coordination server
 
