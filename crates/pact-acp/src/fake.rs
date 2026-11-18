@@ -13,7 +13,8 @@
 //!
 //! Behaviour per prompt: emit a `usage_update`; if `ask_permission`, send
 //! `session/request_permission` and wait for the answer (a rejection or
-//! cancellation skips the writes); for each write emit `tool_call`, write
+//! cancellation skips the writes); for each write emit `tool_call` (kind
+//! `edit`, with the file's absolute path in `locations`), write
 //! the file into the session's cwd, emit `tool_call_update`; if
 //! `exit_mid_turn`, exit with status 3 after the first tool call; emit the
 //! summary as two `agent_message_chunk`s; answer with `stop`. Every method
@@ -169,11 +170,14 @@ impl Fake {
             let writes = task.get("writes").and_then(Value::as_object).cloned().unwrap_or_default();
             for (index, (file, content)) in writes.iter().enumerate() {
                 let call_id = format!("call-{}", index + 1);
-                self.update(&session_id, json!({ "sessionUpdate": "tool_call", "toolCallId": call_id, "title": format!("Creating {file}"), "kind": "edit", "status": "pending" }));
+                let path = std::path::Path::new(&cwd).join(file);
+                self.update(&session_id, json!({
+                    "sessionUpdate": "tool_call", "toolCallId": call_id, "title": format!("Creating {file}"), "kind": "edit", "status": "pending",
+                    "locations": [{ "path": path.display().to_string() }],
+                }));
                 if task.get("exit_mid_turn").and_then(Value::as_bool).unwrap_or(false) {
                     std::process::exit(3);
                 }
-                let path = std::path::Path::new(&cwd).join(file);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }

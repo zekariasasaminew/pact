@@ -542,6 +542,60 @@ fn run_lists_the_files_a_failing_check_names() {
 }
 
 #[test]
+fn run_refuses_a_dirty_checkout_unless_allowed() {
+    // Issue #411: the planner reads the live checkout, the lanes start from
+    // HEAD; uncommitted work would be seen by one and not the other.
+    let repo = init_repo("dirty");
+    let shim = shim_dir();
+    std::fs::write(repo.join("local.txt"), "work in progress\n").unwrap();
+    std::fs::write(repo.join("README.md"), "# edited\n").unwrap();
+    let reply = write_reply(&shim, &plan_reply(good_units(), None));
+
+    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run", "Add two text files"]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("2 uncommitted change(s) in your checkout: ") && err.contains("local.txt") && err.contains("README.md"), "{err}");
+    assert!(err.contains("--allow-dirty"), "{err}");
+    assert!(!stdout(&out).contains("[planner] [phase] planning"), "the planner never ran:\n{}", stdout(&out));
+
+    let out = pact(&repo, &shim, Some(&reply), &["run", "--agent", "copilot", "--dry-run", "--allow-dirty", "Add two text files"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("warning: --allow-dirty: the lanes start from HEAD, without 2 uncommitted change(s) in your checkout: "), "{}", stdout(&out));
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
+fn run_names_a_lane_that_writes_another_units_file_or_an_unowned_one() {
+    // Issue #409: the plan is disjoint, the lanes need not be.
+    let repo = init_repo("ownership");
+    let shim = shim_dir();
+    let alpha = serde_json::json!({ "writes": { "alpha.txt": "A", "beta.txt": "CLOBBERED BY ALPHA", "stray.txt": "S" }, "summary": "a" }).to_string();
+    let plan = serde_json::json!({
+        "task": "two files",
+        "shared_context": "",
+        "units": [
+            { "name": "alpha", "files": ["alpha.txt"], "brief": alpha },
+            { "name": "beta", "files": ["beta.txt"], "brief": write_task("beta.txt", "B from beta", "b") }
+        ],
+    });
+    let plan_path = shim.join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "x"]);
+    assert_eq!(out.status.code(), Some(1), "{}\n{}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("ownership: lane `alpha` wrote `beta.txt`, which unit `beta` owns"), "{text}");
+    assert!(text.contains("ownership: lane `alpha` wrote `stray.txt`, which no unit owns"), "{text}");
+    assert!(text.contains("run: FAILED. 2 file(s) were written by a lane that does not own them"), "{text}");
+    assert!(text.contains("(committed)"), "nothing is reverted; the result is committed for review:\n{text}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn run_refuses_a_plan_file_that_cannot_run() {
     let repo = init_repo("bad-file");
     let shim = shim_dir();
