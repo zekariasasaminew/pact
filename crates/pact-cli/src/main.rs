@@ -2827,7 +2827,7 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                     if repair.committed { "committed" } else { "nothing committed" }
                 );
             }
-            Err(err) => println!("{lane}: FAILED before/during launch -- {err:#}"),
+            Err(err) => println!("{lane}: FAILED before or during launch: {err:#}"),
         }
     }
     if let Some(batch) = &report.batch {
