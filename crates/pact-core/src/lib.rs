@@ -6,6 +6,7 @@ mod acp_runtime;
 mod admission;
 pub mod fleet;
 mod land;
+pub mod ownership;
 pub mod run;
 pub mod verify_output;
 pub use land::{DiscardOutcome, EntryState, WorkspaceEntry};
