@@ -261,6 +261,60 @@ fn an_acp_lane_selects_the_requested_model_and_records_what_it_ran() {
 }
 
 #[test]
+fn lanes_queued_behind_a_dead_shared_process_run_on_a_restarted_one() {
+    // Issue #412: one lane kills the shared process; the lanes behind it
+    // open their sessions on a replacement instead of failing too.
+    let repo = init_repo("restart");
+    let shim = shim_dir();
+    let dying = serde_json::json!({ "writes": { "never.txt": "x" }, "summary": "dies", "exit_mid_turn": true }).to_string();
+    let spawn = pact(
+        &repo,
+        &shim,
+        &[
+            "spawn-many", "--agent", "copilot", "--runtime", "acp", "--max-concurrent", "1", "--stagger-ms", "0", "--min-free-mem-mb", "0",
+            "--name", "alpha", "--name", "beta", "--name", "gamma",
+            "--task", &dying,
+            "--task", &dying,
+            "--task", &task(&[("gamma.txt", "G")], "wrote gamma"),
+        ],
+    );
+    // Admission does not launch lanes in index order, but with two dying
+    // lanes at least one of them is followed by another lane in any order.
+    let text = format!("{}{}", stdout(&spawn), stderr(&spawn));
+    assert!(!spawn.status.success(), "{text}");
+    assert_eq!(run_record(&repo, "gamma")["exit_success"], true, "{text}");
+    for dead in ["alpha", "beta"] {
+        let record = run_record(&repo, dead);
+        assert_eq!(record["exit_success"], false);
+        assert!(record["summary"].as_str().unwrap().contains("exited mid-turn"), "{}", record["summary"]);
+    }
+    assert!(text.contains("restarting it (1/2)"), "{text}");
+    assert!(text.contains("time(s) in this batch; lanes that had not opened a session ran on the replacement"), "{text}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
+fn a_process_that_keeps_dying_stops_being_restarted() {
+    let repo = init_repo("restart-limit");
+    let shim = shim_dir();
+    let dying = serde_json::json!({ "writes": { "never.txt": "x" }, "summary": "dies", "exit_mid_turn": true }).to_string();
+    let mut args = vec!["spawn-many", "--agent", "copilot", "--runtime", "acp", "--max-concurrent", "1", "--stagger-ms", "0", "--min-free-mem-mb", "0"];
+    for _ in 0..4 {
+        args.extend(["--task", dying.as_str()]);
+    }
+    let spawn = pact(&repo, &shim, &args);
+    let text = format!("{}{}", stdout(&spawn), stderr(&spawn));
+    assert!(!spawn.status.success(), "{text}");
+    assert_eq!(text.matches("exited mid-turn").count(), 3, "the original and two replacements each die mid-turn:\n{text}");
+    assert_eq!(text.matches("already restarted 2 time(s), the most a batch allows").count(), 1, "the fourth lane never runs:\n{text}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn runtime_acp_dry_run_names_the_shared_process_and_refuses_agents_without_acp() {
     let repo = init_repo("dry-run");
     let shim = shim_dir();

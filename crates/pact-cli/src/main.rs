@@ -2813,7 +2813,10 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                     .unwrap_or_default();
                 println!("unit {}: {}{duration}: {}", workspace.id, if run.success { "done" } else { "failed" }, run.summary);
             }
-            Err(err) => println!("unit #{}: FAILED before/during launch -- {err:#}", outcome.index),
+            Err(err) => {
+                let unit = report.plan.units.get(outcome.index).map(|unit| unit.name.trim().to_string()).unwrap_or_else(|| format!("#{}", outcome.index));
+                println!("unit {unit}: FAILED, never ran: {err:#}");
+            }
         }
     }
     for violation in &report.ownership {
