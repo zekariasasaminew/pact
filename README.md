@@ -33,6 +33,8 @@ brew tap zekariasasaminew/pact && brew install pact
 # Windows (x86_64)
 Invoke-WebRequest https://github.com/zekariasasaminew/pact/releases/latest/download/pact-x86_64-pc-windows-msvc.zip -OutFile pact.zip
 Expand-Archive pact.zip
+# or with winget
+winget install zekariasasaminew.pact
 ```
 
 The [`edge` release](https://github.com/zekariasasaminew/pact/releases/tag/edge)
