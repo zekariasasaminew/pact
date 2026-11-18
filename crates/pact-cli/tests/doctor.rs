@@ -93,3 +93,31 @@ fn doctor_json_and_human_readable_agree_on_git_worktree_support() {
         assert!(human_stdout.contains("too old for `git worktree`"), "got: {human_stdout}");
     }
 }
+
+#[test]
+fn doctor_lists_dead_copilot_skill_directories_and_removes_them_on_request() {
+    // Issue #304: pre-#294 test runs left registered temp paths behind.
+    let home = std::env::temp_dir().join(format!("pact-doctor-copilot-home-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let alive = home.to_string_lossy().to_string();
+    let dead = home.join("pact-cli-init-register-skill-gone").to_string_lossy().to_string();
+    let settings = home.join("settings.json");
+    std::fs::write(&settings, serde_json::json!({ "model": "x", "skillDirectories": [alive, dead] }).to_string()).unwrap();
+    let doctor = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_pact")).arg("doctor").args(args).env("COPILOT_HOME", &home).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let report = doctor(&[]);
+    assert!(report.contains("lists skillDirectories that no longer exist") && report.contains(&dead) && !report.contains(&format!("  {alive}\n")), "{report}");
+    let json: serde_json::Value = serde_json::from_str(&doctor(&["--json"])).unwrap();
+    assert_eq!(json["copilot_dead_skill_directories"], serde_json::json!([dead]));
+    assert!(std::fs::read_to_string(&settings).unwrap().contains("register-skill-gone"), "read-only without the flag");
+
+    let fixed = doctor(&["--fix-skill-dirs"]);
+    assert!(fixed.contains("removed 1 skillDirectories entry"), "{fixed}");
+    let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(after["skillDirectories"], serde_json::json!([alive]));
+    assert_eq!(after["model"], "x", "other settings are kept");
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -62,6 +62,24 @@ macos and windows, plus the Python, TypeScript and VS Code binding jobs.
   everything cargo runs, so tests never write coordination databases into
   your real data directory; `cargo run` uses it too.
 
+## Build footprint
+
+Cargo never deletes old artifacts: every dependency or feature change adds
+new hashed files to `target/` beside the old ones, and one long-lived
+Windows checkout reached 62.5 GiB (issue #384). The workspace's dev
+profile keeps that down: pact's own crates build with
+`debug = "line-tables-only"` (backtraces keep file and line numbers;
+variables are not inspectable in a debugger) and dependencies with no
+debug info. Measured on a clean `cargo test --workspace --no-run`: 2.1 GiB
+and 186 s, against 5.2 GiB and 256 s with Cargo's defaults.
+
+When you need full debug info for a session, override it without editing
+the manifest: `CARGO_PROFILE_DEV_DEBUG=true cargo build`. To reclaim
+space, `cargo clean` removes everything (the next build is a cold one);
+`cargo clean -p <crate>` removes one package's artifacts. Nothing in pact
+or its tests builds Rust code at run time; `pact-deps` only runs
+`cargo fetch`, which fills Cargo's own download cache, not `target/`.
+
 ## Workflow
 
 - One GitHub issue per finding or feature, filed before the code; one PR

@@ -5683,6 +5683,16 @@ passes, and `pact spawn --ag<TAB>` correctly completed to `--agent`.
 
 ### `pact doctor` (issue #18)
 
+Dead Copilot skill directories (issue #304). Before #294, every `cargo
+test` on a machine with Copilot installed registered a temporary
+repository's `SKILL.md`, and the entries outlived the directories in
+`settings.json`. `doctor` now reads `$COPILOT_HOME/settings.json` (else
+`~/.copilot/settings.json`), lists `skillDirectories` that no longer
+exist (also in `--json`), and removes exactly those with
+`--fix-skill-dirs`, rewriting the file with every other key kept; it
+stays read-only without the flag. `init --register-skill` now refuses a
+repository under the temp directory, the source of every such entry.
+
 Reuses `pact_deps::run_shimmed` (`pact-deps`'s existing `cmd /C`
 Windows-shim-resolution helper, re-exported for this rather than
 re-derived) to run each tool's real version-check invocation and reports
@@ -5970,6 +5980,25 @@ suite once with `%TEMP%` cleared first and confirming zero `.pact-*`
 directories remained afterward, not just that the code compiles.
 
 ## CI and release infrastructure
+
+### Build footprint (issue #384)
+
+A long-lived Windows checkout's `target/` reached 62.5 GiB in 151,109
+files, 59 GiB of it older than a week: Cargo keeps every superseded
+artifact, and the default dev profile carries full debug info, which on
+Windows is a PDB per crate and test binary. Not a pact runtime leak: no
+pact code path builds Rust, and `pact-deps` only runs `cargo fetch`.
+Measured on a clean `cargo test --workspace --no-run` (2026-11-18, the
+owner's laptop): Cargo's defaults gave 5.21 GiB (3.51 deps of which 2.04
+PDB, 1.32 incremental) in 256 s; `debug = "line-tables-only"` for the
+workspace and `debug = false` for dependencies gave 2.12 GiB (0.39 PDB,
+0.66 incremental) in 186 s. Line tables keep panics and backtraces
+pointing at files and lines, which is what this project's debugging
+actually uses; a debugger session that needs variables sets
+`CARGO_PROFILE_DEV_DEBUG=true` for that build. Incremental compilation
+stays on: it is half of what remains but is what makes the edit, test
+loop fast. Nothing deletes build outputs automatically; CONTRIBUTING.md
+documents `cargo clean` and `cargo clean -p`.
 
 ### Rolling `edge` release
 
