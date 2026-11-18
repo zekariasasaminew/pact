@@ -46,3 +46,10 @@ pact-coord = { path = "crates/pact-coord" }
 pact-acp = { path = "crates/pact-acp" }
 pact-agents = { path = "crates/pact-agents" }
 pact-core = { path = "crates/pact-core" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
