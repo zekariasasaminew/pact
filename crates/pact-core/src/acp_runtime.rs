@@ -13,8 +13,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use pact_acp::{AcpRuntime, AgentSpec, SessionUpdate};
 use pact_agents::{AcpLaunchRequest, AgentEvent, AgentKind, LaunchSpec};
 use pact_coord::http::{HttpCoordServer, LaneRoute};
@@ -118,8 +119,38 @@ impl CoordHttp {
 /// before any lane thread, shut down after the last one joins.
 pub(crate) struct AcpBatch {
     pub(crate) coord: CoordHttp,
-    runtimes: HashMap<AgentKind, AcpRuntime>,
+    runtimes: Mutex<HashMap<AgentKind, Arc<AcpRuntime>>>,
+    /// Processes that died and were replaced (issue #412), kept so their
+    /// tokio runtimes are shut down with the batch.
+    retired: Mutex<Vec<Arc<AcpRuntime>>>,
+    restarts: Mutex<HashMap<AgentKind, usize>>,
     launches: HashMap<AgentKind, LaunchSpec>,
+    repo_root: PathBuf,
+}
+
+/// How many times one batch replaces a dead shared agent process before
+/// the lanes still waiting fail instead (issue #412).
+pub(crate) const MAX_ACP_RESTARTS: usize = 2;
+
+fn launch_acp(repo_root: &Path, spec: &LaunchSpec, name: &str, on_event: &mut impl FnMut(&AgentEvent)) -> Result<AcpRuntime> {
+    on_event(&AgentEvent::Phase(format!("starting one {name} process for the batch (ACP)")));
+    let started = std::time::Instant::now();
+    let runtime = AcpRuntime::start_unattended(AgentSpec {
+        program: spec.program.clone(),
+        args: spec.args.clone(),
+        env: spec.env.clone(),
+        cwd: Some(repo_root.to_path_buf()),
+    })
+    .map_err(|err| anyhow!("starting `{name} --acp`: {err}"))?;
+    let info = runtime.initialize_result();
+    on_event(&AgentEvent::Phase(format!(
+        "{name} ACP server up in {:.1}s ({} {}, pid {})",
+        started.elapsed().as_secs_f32(),
+        info.agent_info.as_ref().map(|a| a.name.as_str()).unwrap_or(name),
+        info.agent_info.as_ref().map(|a| a.version.as_str()).unwrap_or(""),
+        runtime.pid()
+    )));
+    Ok(runtime)
 }
 
 impl AcpBatch {
@@ -150,31 +181,51 @@ impl AcpBatch {
                 .ok_or_else(|| anyhow!("agent `{name}` has no Agent Client Protocol mode; use --runtime process"))?;
             let (program, mut args) = pact_agents::resolve_program(&spec.program);
             args.extend(spec.args.iter().cloned());
-            on_event(&AgentEvent::Phase(format!("starting one {name} process for the batch (ACP)")));
-            let started = std::time::Instant::now();
-            let runtime = AcpRuntime::start_unattended(AgentSpec {
-                program: program.clone(),
-                args: args.clone(),
-                env: spec.env.clone(),
-                cwd: Some(repo_root.to_path_buf()),
-            })
-            .map_err(|err| anyhow!("starting `{name} --acp`: {err}"))?;
-            let info = runtime.initialize_result();
-            on_event(&AgentEvent::Phase(format!(
-                "{name} ACP server up in {:.1}s ({} {}, pid {})",
-                started.elapsed().as_secs_f32(),
-                info.agent_info.as_ref().map(|a| a.name.as_str()).unwrap_or(name),
-                info.agent_info.as_ref().map(|a| a.version.as_str()).unwrap_or(""),
-                runtime.pid()
-            )));
-            runtimes.insert(agent, runtime);
-            launches.insert(agent, LaunchSpec { program, args, env: spec.env });
+            let launch = LaunchSpec { program, args, env: spec.env };
+            let runtime = launch_acp(repo_root, &launch, name, on_event)?;
+            runtimes.insert(agent, Arc::new(runtime));
+            launches.insert(agent, launch);
         }
-        Ok(AcpBatch { coord, runtimes, launches })
+        Ok(AcpBatch {
+            coord,
+            runtimes: Mutex::new(runtimes),
+            retired: Mutex::new(Vec::new()),
+            restarts: Mutex::new(HashMap::new()),
+            launches,
+            repo_root: repo_root.to_path_buf(),
+        })
     }
 
-    pub(crate) fn runtime(&self, agent: AgentKind) -> Option<&AcpRuntime> {
-        self.runtimes.get(&agent)
+    pub(crate) fn runtime(&self, agent: AgentKind) -> Option<Arc<AcpRuntime>> {
+        lock(&self.runtimes).get(&agent).cloned()
+    }
+
+    /// `agent`'s process, replaced first if it has exited (issue #412).
+    /// Lanes call this before opening a session, so a lane queued behind
+    /// a crash starts on a fresh process; after [`MAX_ACP_RESTARTS`]
+    /// replacements it fails instead and says why.
+    pub(crate) fn live_runtime(&self, agent: AgentKind, on_event: &mut impl FnMut(&AgentEvent)) -> Result<Arc<AcpRuntime>> {
+        let name = crate::agent_kind_name(agent);
+        let mut runtimes = lock(&self.runtimes);
+        let current = runtimes.get(&agent).cloned().ok_or_else(|| anyhow!("no ACP process was started for agent {name}"))?;
+        let Some(exit) = current.exit_info() else { return Ok(current) };
+        let mut restarts = lock(&self.restarts);
+        let count = restarts.entry(agent).or_insert(0);
+        if *count >= MAX_ACP_RESTARTS {
+            bail!("the shared {name} process exited ({}) and was already restarted {count} time(s), the most a batch allows; not starting it again", exit.status);
+        }
+        *count += 1;
+        let launch = self.launches.get(&agent).ok_or_else(|| anyhow!("no launch recorded for {name}"))?;
+        on_event(&AgentEvent::Phase(format!("the shared {name} process (pid {}) exited ({}); restarting it ({count}/{MAX_ACP_RESTARTS})", current.pid(), exit.status)));
+        let fresh = Arc::new(launch_acp(&self.repo_root, launch, name, on_event)?);
+        runtimes.insert(agent, Arc::clone(&fresh));
+        lock(&self.retired).push(current);
+        Ok(fresh)
+    }
+
+    /// How many times each agent's process was replaced in this batch.
+    pub(crate) fn restart_count(&self) -> usize {
+        lock(&self.restarts).values().sum()
     }
 
     /// The resolved launch of the process hosting `agent`'s lanes, for
@@ -184,11 +235,20 @@ impl AcpBatch {
     }
 
     pub(crate) fn shutdown(self) {
-        for (_, runtime) in self.runtimes {
-            runtime.shutdown();
+        let runtimes = self.runtimes.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let retired = self.retired.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for runtime in runtimes.into_values().chain(retired) {
+            // Every lane thread has joined, so this is the last handle.
+            if let Ok(runtime) = Arc::try_unwrap(runtime) {
+                runtime.shutdown();
+            }
         }
         self.coord.shutdown();
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The `AgentEvent` a `session/update` stands for, so the ACP path feeds

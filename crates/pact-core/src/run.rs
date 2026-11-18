@@ -1090,6 +1090,7 @@ impl Orchestrator {
                     }
                     Ok(())
                 })();
+                drop(runtime);
                 batch.shutdown();
                 outcome?;
             }

@@ -851,6 +851,13 @@ impl Orchestrator {
                 .collect()
         });
         if let Some(acp) = acp {
+            let restarts = acp.restart_count();
+            if restarts > 0 {
+                let first_agent = agents.first().copied().unwrap_or(AgentKind::Copilot);
+                on_event(0, &first_agent, &AgentEvent::Phase(format!(
+                    "the shared agent process was restarted {restarts} time(s) in this batch; lanes that had not opened a session ran on the replacement"
+                )));
+            }
             acp.shutdown();
         }
         outcomes
@@ -1305,9 +1312,9 @@ impl Orchestrator {
         report_contract: bool,
         on_event: &mut impl FnMut(&AgentEvent),
     ) -> Result<(Workspace, RunOutcome)> {
-        let runtime = acp
-            .runtime(agent)
-            .ok_or_else(|| anyhow::anyhow!("no ACP process was started for agent {}", agent_kind_name(agent)))?;
+        if acp.runtime(agent).is_none() {
+            bail!("no ACP process was started for agent {}", agent_kind_name(agent));
+        }
         let launch = acp.launch(agent).cloned().unwrap_or(pact_agents::LaunchSpec {
             program: String::new(),
             args: Vec::new(),
@@ -1336,9 +1343,16 @@ impl Orchestrator {
 
         let mut session_id: Option<String> = None;
         let run_result: Result<RunOutcome> = (|| {
-            let mut session = runtime
-                .new_session(&workspace.path, vec![pact_acp::McpServer::http(coord_name, coord_url)])
-                .map_err(|err| anyhow::anyhow!("opening the lane's ACP session: {err}"))?;
+            // A lane that never opened its session runs on a replacement if
+            // the shared process died first, even while opening (issue #412).
+            let mut runtime = acp.live_runtime(agent, &mut *on_event)?;
+            let mut session = loop {
+                match runtime.new_session(&workspace.path, vec![pact_acp::McpServer::http(coord_name, coord_url.clone())]) {
+                    Ok(session) => break session,
+                    Err(_) if runtime.exit_info().is_some() => runtime = acp.live_runtime(agent, &mut *on_event)?,
+                    Err(err) => bail!("opening the lane's ACP session: {err}"),
+                }
+            };
             session_id = Some(session.id.clone());
             on_event(&AgentEvent::Init { session_id: session.id.clone() });
             if let Err(err) = self.workspaces.set_session_id(&workspace.id, &session.id) {
@@ -1390,10 +1404,17 @@ impl Orchestrator {
             if let Err(err) = runtime.close(&session) {
                 tracing::debug!("closing ACP session for {}: {err}", workspace.id);
             }
-            let stop = stop.map_err(|err| anyhow::anyhow!("{err}"))?;
-            let summary = format!("stop reason {}", stop.as_str());
-            on_event(&AgentEvent::Result { success: stop.is_success(), summary: summary.clone() });
-            Ok(RunOutcome { success: stop.is_success(), summary })
+            // The lane launched and ran, so a failed turn is this lane's
+            // failed outcome, never a launch error that loses its name.
+            let (success, summary) = match stop {
+                Ok(stop) => (stop.is_success(), format!("stop reason {}", stop.as_str())),
+                Err(err) => match runtime.exit_info() {
+                    Some(exit) => (false, format!("the shared agent process exited mid-turn ({}); this lane's partial writes stay in the tree", exit.status)),
+                    None => (false, format!("the turn failed: {err}")),
+                },
+            };
+            on_event(&AgentEvent::Result { success, summary: summary.clone() });
+            Ok(RunOutcome { success, summary })
         })();
         drop(slot);
         let ended_at = unix_now();
