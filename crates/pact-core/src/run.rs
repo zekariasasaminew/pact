@@ -28,6 +28,7 @@ use pact_agents::{AgentEvent, AgentKind, LaunchRequest, Supervisor};
 use pact_vcs::Workspace;
 use serde::{Deserialize, Serialize};
 
+use crate::verify_output::{failing_files, FailingFile};
 use crate::{agent_kind_name, effective_runtime, unix_now, LaneRuntime, Orchestrator, SpawnManyOutcome, SpawnManyTask, SpawnOptions};
 
 /// What the planner returns and pact executes. Persisted under
@@ -418,6 +419,9 @@ pub struct VerifyOutcome {
     pub timed_out: bool,
     /// The command's whole output, both streams in write order.
     pub log: PathBuf,
+    /// The tree's files a failing command's output names (issue #373);
+    /// empty when it passed.
+    pub failing_files: Vec<FailingFile>,
 }
 
 /// How a verification result reads once the baseline is known.
@@ -485,7 +489,18 @@ fn render_repair_brief(attempt: usize, total: usize, outcomes: &[VerifyOutcome],
     }
     brief.push_str("\n## Failing checks\n");
     for outcome in outcomes.iter().filter(|outcome| matches!(outcome.verdict(), Verdict::Regressed | Verdict::Failed)) {
-        brief.push_str(&format!("\n### `{}`\n\n```text\n{}\n```\n", outcome.command, outcome.output_tail));
+        brief.push_str(&format!("\n### `{}`\n\nFull output: `{}`\n", outcome.command, outcome.log.display()));
+        if outcome.timed_out {
+            brief.push_str("\nIt did not finish: pact killed it at the verification timeout. Look for a test that hangs or waits on input.\n");
+        }
+        if outcome.failing_files.is_empty() {
+            brief.push_str(&format!("\nThe output names no file in the tree; its last lines:\n\n```text\n{}\n```\n", outcome.output_tail));
+            continue;
+        }
+        for file in &outcome.failing_files {
+            let note = if touched_files.contains(&file.path) { "" } else { " (not changed by this run: fix it through the files you may touch)" };
+            brief.push_str(&format!("\n#### `{}`{note}\n\n```text\n{}\n```\n", file.path, file.excerpt));
+        }
     }
     brief.push_str("\nRun the failing checks after the fix. Keep the change as small as possible.\n");
     brief
@@ -1051,15 +1066,17 @@ fn run_shell_captured(dir: &Path, cmd: &str, log: &Path, timeout: Duration) -> R
     let combined = String::from_utf8_lossy(&std::fs::read(log).unwrap_or_default()).into_owned();
     let lines: Vec<&str> = combined.lines().collect();
     let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+    let success = run.status.is_some_and(|status| status.success());
     Ok(VerifyOutcome {
         command: cmd.to_string(),
-        success: run.status.is_some_and(|status| status.success()),
+        success,
         exit_code: run.status.and_then(|status| status.code()),
         output_tail: tail,
         duration,
         baseline_success: None,
         timed_out: run.timed_out,
         log: log.to_path_buf(),
+        failing_files: if success { Vec::new() } else { failing_files(&combined, dir) },
     })
 }
 
@@ -1101,6 +1118,7 @@ mod tests {
             baseline_success: baseline,
             timed_out: false,
             log: PathBuf::new(),
+            failing_files: Vec::new(),
         };
         let report = |verify: Vec<VerifyOutcome>| RunReport {
             plan: plan(vec![]),
@@ -1284,6 +1302,35 @@ mod tests {
     }
 
     #[test]
+    fn the_repair_brief_gives_each_failing_file_its_excerpt_and_falls_back_to_the_tail() {
+        let failing = |command: &str, files: Vec<FailingFile>| VerifyOutcome {
+            command: command.into(),
+            success: false,
+            exit_code: Some(1),
+            output_tail: "TAIL LINE".into(),
+            duration: Duration::ZERO,
+            baseline_success: Some(true),
+            timed_out: false,
+            log: PathBuf::from("verify.log"),
+            failing_files: files,
+        };
+        let file = |path: &str, excerpt: &str| FailingFile { path: path.into(), excerpt: excerpt.into() };
+        let brief = render_repair_brief(
+            1,
+            1,
+            &[
+                failing("npm test", vec![file("src/a.ts", "src/a.ts:3 boom"), file("src/old.test.ts", "FAIL src/old.test.ts")]),
+                failing("npm run lint", vec![]),
+            ],
+            &["src/a.ts".to_string()],
+        );
+        assert!(brief.contains("#### `src/a.ts`\n\n```text\nsrc/a.ts:3 boom"), "{brief}");
+        assert!(brief.contains("#### `src/old.test.ts` (not changed by this run"), "{brief}");
+        assert_eq!(brief.matches("TAIL LINE").count(), 1, "only the check with no named file falls back to its tail:\n{brief}");
+        assert!(brief.contains("Full output: `verify.log`"), "{brief}");
+    }
+
+    #[test]
     fn the_verdict_reads_the_result_against_the_baseline() {
         let outcome = |success: bool, baseline: Option<bool>| VerifyOutcome {
             command: "x".into(),
@@ -1294,6 +1341,7 @@ mod tests {
             baseline_success: baseline,
             timed_out: false,
             log: PathBuf::new(),
+            failing_files: Vec::new(),
         };
         assert_eq!(outcome(true, Some(true)).verdict(), Verdict::Passed);
         assert_eq!(outcome(true, None).verdict(), Verdict::Passed);

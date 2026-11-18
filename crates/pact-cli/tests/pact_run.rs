@@ -471,6 +471,32 @@ fn run_verifies_with_ci_set() {
 }
 
 #[test]
+fn run_lists_the_files_a_failing_check_names() {
+    // Issue #373: the report names the failing files instead of a tail.
+    let repo = init_repo("failing-files");
+    let shim = shim_dir();
+    let plan = serde_json::json!({
+        "task": "t",
+        "shared_context": "",
+        "units": [{ "name": "alpha", "files": ["alpha.txt"], "brief": write_task("alpha.txt", "A", "a") }],
+    });
+    let plan_path = shim.join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+    let check = if cfg!(windows) {
+        "if exist alpha.txt (echo alpha.txt:3:1 error broken & echo src.ts^(1,1^): error & echo noise & exit 1) else (exit 0)"
+    } else {
+        "if [ -f alpha.txt ]; then echo 'alpha.txt:3:1 error broken'; echo 'src.ts(1,1): error'; echo noise; exit 1; fi"
+    };
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "--verify", check, "--repair-attempts", "0", "x"]);
+    assert_eq!(out.status.code(), Some(1), "{}\n{}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("    failing files (2):\n      alpha.txt\n      src.ts\n    full output: "), "{text}");
+    assert!(!text.contains("    noise"), "the tail is replaced by the file list:\n{text}");
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn run_refuses_a_plan_file_that_cannot_run() {
     let repo = init_repo("bad-file");
     let shim = shim_dir();

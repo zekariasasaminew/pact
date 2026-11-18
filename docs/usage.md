@@ -48,7 +48,9 @@ stdin closed, so watch-by-default runners exit, and under
 `20m`): at the deadline its whole process tree is killed and it counts
 as timed out, a timed-out baseline as no baseline. Every command's full
 output, both streams interleaved, is kept under the state dir's
-`meta/verify/<run>/`, and a failing command's report line names its log.
+`meta/verify/<run>/`, and a failing command's report line lists the
+files its output names (the repair lane gets each file's own excerpt)
+and names its log.
 The shared tree, its
 dependencies and those baselines are prepared while the planner works.
 Plans and briefs are

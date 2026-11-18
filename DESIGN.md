@@ -1481,6 +1481,33 @@ under `meta/verify/<run>/`, one per command and phase (`baseline`,
 `after`, `repair-<n>`), and a failing command's report line names its
 log.
 
+#### Failing files instead of a tail (issue #373)
+
+The repair lane used to get the last 40 lines of each failing command,
+stdout then stderr. In R5 that was useless for all three checks: for
+`npm test` it was the middle of a React Testing Library DOM dump that
+stderr had appended after vitest's summary, so the failing test files
+never reached the repair lane; for `eslint` it was the last file's
+errors; `tsc` had stopped at the first syntax error. With the
+interleaved log from #410 in hand, `verify_output::failing_files` reads
+the whole output and keeps every token that, cleaned of what tools add
+around a path (`:line:col`, tsc's `(line,col)`, quotes, the tree's own
+absolute prefix, `\` separators), names a file that exists in the tree.
+Each file comes with the lines naming it and the few after each up to
+a blank line, which is where eslint, vitest and cargo print the error
+under its file, capped at 20 lines. Recognising files by existence
+rather than by per-tool formats keeps it working for runners pact has
+never seen; `node_modules` and `.git` paths are dropped because stack
+traces are full of them.
+
+Every file in the tree counts, not only the run's touched files: a test
+the run did not edit can fail because of a source file it did. The
+report lists the failing files per command and the path of the full
+log, and keeps the tail only for a command whose output names no file.
+The repair brief gives each failing file its excerpt and marks the ones
+the run never changed, since the repair may only edit touched files and
+has to fix those failures through them.
+
 ### `pact fleet`: independent tasks (issue #388)
 
 `spawn-many` and `pact run` assume one repository and one result: the
