@@ -2852,8 +2852,19 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
             v.duration.as_secs_f32()
         );
         if !v.success {
-            for line in v.output_tail.lines() {
-                println!("    {line}");
+            if v.failing_files.is_empty() {
+                for line in v.output_tail.lines() {
+                    println!("    {line}");
+                }
+            } else {
+                const SHOWN: usize = 30;
+                println!("    failing files ({}):", v.failing_files.len());
+                for file in v.failing_files.iter().take(SHOWN) {
+                    println!("      {}", file.path);
+                }
+                if v.failing_files.len() > SHOWN {
+                    println!("      ... and {} more", v.failing_files.len() - SHOWN);
+                }
             }
             println!("    full output: {}", v.log.display());
         }
