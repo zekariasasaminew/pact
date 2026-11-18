@@ -8,7 +8,7 @@ unconditionally imports the Unix-only `fcntl` module at startup and fails
 before doing anything else. This script builds the .cast directly from a
 real subprocess run instead of going through asciinema's recorder, so the
 result is still genuinely captured output, not hand-authored -- see
-DESIGN.md ("pact-cli > demo GIF re-recording", issue #124) for the full
+docs/design/cli.md ("demo GIF re-recording", issue #124) for the full
 tooling story, including why the earlier version of this file
 (`render_demo.py`, since deleted) existed at all.
 

@@ -8,7 +8,7 @@
 //! GETTING_STARTED.md and docs/usage.md is extracted and run against a real scratch repo,
 //! asserting it isn't rejected as a clap usage error (exit code 2 is
 //! clap's own convention for "arguments didn't parse" -- distinct from
-//! `main`'s own runtime errors, which exit 1). See DESIGN.md ("pact-cli >
+//! `main`'s own runtime errors, which exit 1). See docs/design/cli.md ("
 //! Doc/CLI grammar drift check (issue #238)").
 
 use std::path::{Path, PathBuf};

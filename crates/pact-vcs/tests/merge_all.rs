@@ -1,5 +1,5 @@
 //! Integration coverage for `WorkspaceManager::merge_all` against a real,
-//! throwaway git repo -- see DESIGN.md ("pact-vcs > merge_all").
+//! throwaway git repo -- see docs/design/vcs.md ("merge_all").
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -83,7 +83,7 @@ fn init_repo_with_cargo_toml() -> PathBuf {
 }
 
 /// Same base as `init_repo`, plus a single-line `src/barrel.ts` -- used by
-/// the `--union` test. See DESIGN.md ("pact-vcs > merge_all") for why a
+/// the `--union` test. See docs/design/vcs.md ("merge_all") for why a
 /// single-line file is used deliberately.
 fn init_repo_with_barrel() -> PathBuf {
     let root = init_repo();
@@ -125,7 +125,7 @@ fn merge_all_merges_compatible_changes_and_skips_real_conflict() {
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    // See DESIGN.md ("pact-vcs > merge_all") for why this scenario is
+    // See docs/design/vcs.md ("merge_all") for why this scenario is
     // shaped the way it is (confirmed by hand against real git first).
     let a = manager.create_workspace("append L6", None).unwrap();
     std::fs::write(
@@ -437,8 +437,8 @@ fn merge_all_auto_resolves_package_json_dependency_conflict() {
     let repo = init_repo_with_package_json();
     let manager = WorkspaceManager::open(&repo).unwrap();
 
-    // Confirmed by hand against real git first -- see DESIGN.md
-    // ("pact-vcs > Semantic auto-resolution").
+    // Confirmed by hand against real git first -- see docs/design/vcs.md
+    // ("Semantic auto-resolution").
     let a = manager.create_workspace("add dep b", None).unwrap();
     std::fs::write(
         a.path.join("package.json"),

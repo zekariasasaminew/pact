@@ -1,8 +1,8 @@
 //! Regression coverage for issue #230: `spawn-many` silently produced fewer
 //! workspaces than tasks requested once (N-1) waiters queued behind the
 //! `locks/git.lock` guard for longer than the (then 30s) timeout allowed.
-//! Real repo, real concurrent `git worktree add` calls -- see DESIGN.md
-//! ("pact-vcs > PidLock origin").
+//! Real repo, real concurrent `git worktree add` calls -- see docs/design/vcs.md
+//! ("PidLock origin").
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

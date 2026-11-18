@@ -1,5 +1,5 @@
 //! Typed handoff/negotiation protocol between agents (issue #163) -- see
-//! DESIGN.md ("pact-coord > Typed handoff/negotiation protocol") for the
+//! docs/design/coord.md ("Typed handoff/negotiation protocol") for the
 //! design rationale (Contract Net Protocol as prior art, why this is
 //! polling-based like `messages`, and why `narrowed` doesn't mutate the
 //! same row further). A structured alternative to prose `send_message`
@@ -96,7 +96,7 @@ fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<HandoffRequest> {
 /// Flips any `pending` row past its `expires_at` to `expired` -- lazy,
 /// evaluated on read, mirroring `claim_files`' own `DELETE FROM leases
 /// WHERE expires_at <= ?1` pattern rather than a background sweeper
-/// (`pact-coord` has none, by design -- see DESIGN.md). An `UPDATE`, not
+/// (`pact-coord` has none, by design -- see docs/design/coord.md). An `UPDATE`, not
 /// a `DELETE`: unlike a lease, a handoff request's history (who asked
 /// whom for what, and how it was left) stays meaningful after expiry.
 /// Rows are updated one at a time so each gets its own fresh

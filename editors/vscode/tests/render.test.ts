@@ -3,7 +3,7 @@ import { escapeHtml, formatTimestamp, Operation, renderHtml } from "../src/rende
 
 // Real captured output from a real `pact history --json` run (two agents
 // claiming/releasing/messaging via the pact-coord Python binding against
-// a real throwaway repo) -- not fabricated, see DESIGN.md ("VS Code
+// a real throwaway repo) -- not fabricated, see docs/design/coord.md ("VS Code
 // extension v1", issue #128).
 const REAL_OPERATIONS: Operation[] = [
   {

@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::db;
 
 /// One already-happened, significant coordination-layer event -- see
-/// DESIGN.md ("pact-coord > Operation log / `pact history` (issue #84)")
+/// docs/design/coord.md ("Operation log / `pact history` (issue #84)")
 /// for the full set of `op_type` values and what's deliberately excluded
 /// (`check_messages`, a read, isn't logged).
 #[derive(Debug, Clone, Serialize)]

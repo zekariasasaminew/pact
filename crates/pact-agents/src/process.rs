@@ -48,7 +48,7 @@ pub struct ShellRun {
 /// Runs `cmd` through the platform shell (`cmd /C`, `sh -c`) in `cwd`
 /// with stdin closed and `CI=true`, both output streams appended to one
 /// file at `log` in the order they were written, and kills the whole
-/// process tree once `timeout` passes. See DESIGN.md ("pact-core >
+/// process tree once `timeout` passes. See docs/design/run-planner.md ("
 /// Verification timeout", issue #410).
 pub fn run_shell_logged(cmd: &str, cwd: &Path, log: &Path, timeout: Duration) -> Result<ShellRun> {
     if let Some(parent) = log.parent() {
@@ -98,7 +98,7 @@ pub fn run_shell_logged(cmd: &str, cwd: &Path, log: &Path, timeout: Duration) ->
 /// `windows_shim::resolve`) avoids `cmd.exe` reparsing the command line at
 /// all, since that reparsing silently truncates a multi-line `-p` prompt
 /// (and every flag after it) at the first embedded newline -- confirmed by
-/// hand, see DESIGN.md ("pact-agents > Windows multi-line prompt
+/// hand, see docs/design/agents-adapters.md ("Windows multi-line prompt
 /// truncation", issue #210). Only falls back to the old `cmd /C <program>`
 /// wrapper when `program` doesn't resolve either way (an unrecognized
 /// shim shape), preserving prior behavior for that case exactly.
@@ -124,8 +124,8 @@ fn build_agent_command(program: &str) -> Command {
 }
 
 /// Spawns `program args` in `cwd`, streaming its stdout as NDJSON to
-/// `on_event` and appending every raw line to `log_path` -- see DESIGN.md
-/// ("pact-agents > run_and_stream") for `on_pid`'s timing, the stderr
+/// `on_event` and appending every raw line to `log_path` -- see docs/design/agents-adapters.md
+/// ("run_and_stream") for `on_pid`'s timing, the stderr
 /// draining approach, and why `parse_line` returns zero-or-more events per
 /// line rather than exactly one.
 ///
@@ -139,7 +139,7 @@ fn build_agent_command(program: &str) -> Command {
 /// lifetime. Instead, stdout is read on a background thread that feeds a
 /// channel, and the main loop races each line against a poll of the
 /// *direct* child's own exit status, returning as soon as that child is
-/// gone -- see DESIGN.md for the full writeup and why this is preferred
+/// gone -- see docs/design/agents-adapters.md for the full writeup and why this is preferred
 /// over OS-level handle-inheritance controls (which can restrict what the
 /// direct child receives, but can't stop that child from re-exposing an
 /// inherited, still-inheritable handle to its own children).
@@ -308,7 +308,7 @@ pub fn run_and_stream(
     };
 
     Ok(saw_result.unwrap_or_else(|| {
-        // No adapter-level Result event -- see DESIGN.md ("pact-agents >
+        // No adapter-level Result event -- see docs/design/agents-adapters.md ("
         // run_and_stream") for why the exit code is the fallback signal.
         match status {
             Some(status) => RunOutcome {

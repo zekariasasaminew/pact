@@ -4,7 +4,7 @@ use crate::adapter::{AgentAdapter, CoordConfig};
 use crate::event::AgentEvent;
 
 /// Live-verified against a real installed `codex` (codex-cli 0.144.3) --
-/// see DESIGN.md ("pact-agents > Codex adapter").
+/// see docs/design/agents-adapters.md ("Codex adapter").
 pub struct CodexAdapter;
 
 impl AgentAdapter for CodexAdapter {
@@ -12,14 +12,14 @@ impl AgentAdapter for CodexAdapter {
         "pact-coord"
     }
 
-    /// See DESIGN.md ("pact-agents > Codex adapter").
+    /// See docs/design/agents-adapters.md ("Codex adapter").
     fn default_safety_description(&self) -> &'static str {
         "--dangerously-bypass-approvals-and-sandbox (can run any shell command and edit any file \
          with no restriction -- confirmed no safe alternative actually lets it write files at all \
          in headless mode; see issue #2's investigation)"
     }
 
-    /// See DESIGN.md ("pact-agents > Codex adapter").
+    /// See docs/design/agents-adapters.md ("Codex adapter").
     fn build_command(
         &self,
         task: &str,
@@ -52,8 +52,8 @@ impl AgentAdapter for CodexAdapter {
         ("codex".to_string(), args)
     }
 
-    /// Schema modeled against real captured output -- see DESIGN.md
-    /// ("pact-agents > Codex adapter") for the success-signal gap this
+    /// Schema modeled against real captured output -- see docs/design/agents-adapters.md
+    /// ("Codex adapter") for the success-signal gap this
     /// adapter works around.
     fn parse_line(&self, line: &str) -> Vec<AgentEvent> {
         let value: Value = match serde_json::from_str(line) {

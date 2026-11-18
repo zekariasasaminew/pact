@@ -236,6 +236,6 @@ worker (Copilot gets an isolated agent home, Claude Code
 | [GETTING_STARTED.md](GETTING_STARTED.md) | the first run, step by step |
 | [docs/usage.md](docs/usage.md) | every command, the safety model in full, architecture flows, state layout |
 | [SKILL.md](SKILL.md) | what an agent reads to drive pact |
-| [DESIGN.md](DESIGN.md) | why each decision was made, with the measurements |
+| [DESIGN.md](DESIGN.md) | why each decision was made, with the measurements: an index of the area files in [docs/design/](docs/design/) |
 | [docs/design/history/readme.md](docs/design/history/readme.md) | the earlier README: roadmap and design notes |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | building, testing, the PR workflow |

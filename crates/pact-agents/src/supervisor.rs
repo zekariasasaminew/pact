@@ -5,7 +5,7 @@ use command_group::GroupChild;
 
 /// Result of a non-blocking peek at a registered child, used by
 /// `run_and_stream` to race the direct agent process's own exit against a
-/// stdout pipe that may never see EOF -- see DESIGN.md ("pact-agents >
+/// stdout pipe that may never see EOF -- see docs/design/agents-adapters.md ("
 /// Windows pipe-inheritance root cause", issue #253).
 pub enum ChildPoll {
     /// Still running as far as this check can tell.
@@ -19,7 +19,7 @@ pub enum ChildPoll {
 
 /// Tracks every live child process group across however many concurrent
 /// `run_and_stream` calls share this `Supervisor`, so one process-wide
-/// Ctrl-C handler can kill all of them -- see DESIGN.md ("pact-agents >
+/// Ctrl-C handler can kill all of them -- see docs/design/agents-adapters.md ("
 /// Supervisor and group kill"). Every `Supervisor` in a process is a
 /// handle on one registry (issue #366): `ctrlc` allows one handler per
 /// process, so per-supervisor registries left every supervisor but the

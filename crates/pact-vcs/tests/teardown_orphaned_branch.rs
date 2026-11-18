@@ -4,7 +4,7 @@
 //! stay quiet in the normal flow (a branch still at the base tip, or one
 //! whose commits `merge_all` already landed on a `pact/merged-*` branch)
 //! and refuse only when deleting the branch would orphan committed work.
-//! See DESIGN.md ("pact-vcs > Workspace teardown").
+//! See docs/design/vcs.md ("Workspace teardown").
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

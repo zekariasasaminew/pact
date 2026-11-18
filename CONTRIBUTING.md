@@ -88,9 +88,12 @@ or its tests builds Rust code at run time; `pact-deps` only runs
   commits, one concern each; rebase on `main` before pushing.
 - Imperative commit messages that say why. No AI attribution trailers.
 - Default to no comments: naming carries the what. Exceptions: `///` on
-  public API, `// SAFETY:`, clap `///` help text. The why goes in
-  `DESIGN.md`, referenced by section name; say there when something is
-  implemented but not verified against a real paid agent call.
+  public API, `// SAFETY:`, clap `///` help text. The why goes at the end of
+  the matching area file under `docs/design/` (`DESIGN.md` lists them, and
+  each opens with a summary of the current design: update it when a
+  decision changes it), referenced by file and section name; say there
+  when something is implemented but not verified against a real paid
+  agent call.
 
 ## Project layout
 
@@ -127,7 +130,7 @@ CLI has an Agent Client Protocol mode, also `supports_acp` and
 Then live-verify it against the real installed CLI, including a
 `claim_files` call through the coordination server: this project has been
 burned by trusting CLI documentation over the binary. Record the result in
-`DESIGN.md` and update the Safety table in README.md and the known
+`docs/design/agents-adapters.md` and update the Safety table in README.md and the known
 limitations in `docs/usage.md`.
 
 ## Adding a new package-manager detector

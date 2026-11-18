@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 /// Repo-local defaults for `--agent`/`--safety`, read from `pact.toml` at
-/// the repo root -- see DESIGN.md ("pact-cli > `pact.toml` / `pact init`").
+/// the repo root -- see docs/design/cli.md ("`pact.toml` / `pact init`").
 /// A CLI flag always wins when both are given; this only fills in what the
 /// flag would otherwise have defaulted to.
 #[derive(Debug, Default, Deserialize)]

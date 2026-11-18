@@ -26,7 +26,7 @@ pub use pact_vcs::{
     ResolveOutcome, SkippedWorkspace,
 };
 
-/// A `resolve_conflict` attempt's result -- see DESIGN.md ("pact-coord >
+/// A `resolve_conflict` attempt's result -- see docs/design/coord.md ("
 /// Persisted conflicts / `pact resolve` (issue #85)").
 pub struct ConflictResolution {
     pub conflict_id: i64,
@@ -34,15 +34,15 @@ pub struct ConflictResolution {
 }
 
 /// Configuration for the Arbiter fallback resolver -- entirely opt-in,
-/// see DESIGN.md ("pact-core > Arbiter -- agent invocation").
+/// see docs/design/core-orchestrator.md ("Arbiter -- agent invocation").
 pub struct ArbiterConfig {
     pub agent: AgentKind,
     pub safety_override: Option<String>,
     pub test_cmd: String,
 }
 
-/// A durable, structured record of one real agent run -- see DESIGN.md
-/// ("pact-core > structured run metadata", issue #15). Persisted to
+/// A durable, structured record of one real agent run -- see docs/design/core-orchestrator.md
+/// ("structured run metadata", issue #15). Persisted to
 /// `state_dir/meta/runs/<id>.json` (issue #343; the dependency-prep
 /// report of issue #12 lives in `meta/deps/`), beside the workspace's own
 /// `meta/<id>.json`. Before
@@ -118,7 +118,7 @@ pub struct RunMetadata {
     /// MCP client), so this can go stale if the sidecar dies mid-session
     /// and the agent never has occasion to notice (e.g. it makes no
     /// further coordination tool call for the rest of the run). See
-    /// DESIGN.md ("pact-core > Structured run metadata", issue #201).
+    /// docs/design/core-orchestrator.md ("Structured run metadata", issue #201).
     pub coord_status: Option<String>,
     /// The model pact asked the CLI for (issue #387), `None` for the CLI's
     /// own default and for records written before the field existed.
@@ -149,7 +149,7 @@ pub struct RunMetadata {
     /// deliberately *not* folded into `exit_success` -- a legitimate
     /// read-only/inspect task also touches zero files, so this is
     /// informational, surfaced by `pact list`, not a pass/fail signal on
-    /// its own. See DESIGN.md ("pact-core > Structured run metadata").
+    /// its own. See docs/design/core-orchestrator.md ("Structured run metadata").
     pub files_touched: bool,
     pub log_path: PathBuf,
     /// The worker report parsed from the agent's final message (issue
@@ -168,7 +168,7 @@ pub struct Orchestrator {
 }
 
 /// One (agent, task) pair to run as part of a `spawn_many` batch -- see
-/// DESIGN.md ("pact-core > spawn / spawn_many concurrency") for why a
+/// docs/design/core-orchestrator.md ("spawn / spawn_many concurrency") for why a
 /// per-task safety override isn't supported yet.
 pub struct SpawnManyTask {
     pub agent: AgentKind,
@@ -247,7 +247,7 @@ pub struct SpawnOptions<'a> {
     /// `spawn_many` only (issue #315): run every lane in one shared
     /// worktree instead of one worktree per task. For file-disjoint
     /// batches this removes per-lane isolation and the whole merge phase
-    /// -- see DESIGN.md ("pact-core > Shared-tree batches"). Ignored by
+    /// -- see docs/design/core-orchestrator.md ("Shared-tree batches"). Ignored by
     /// single `spawn`.
     pub shared_tree: bool,
     /// How each lane's agent runs -- see `LaneRuntime` (issue #331).
@@ -460,7 +460,7 @@ pub struct FileConflict {
 
 /// One file-like token mentioned in more than one task's text within the
 /// same `spawn_many` batch -- "Weaver", the prevention half of the
-/// conflict-avoidance story. See DESIGN.md ("pact-core > Weaver -- task
+/// conflict-avoidance story. See docs/design/core-orchestrator.md ("Weaver -- task
 /// overlap prediction").
 #[derive(Debug)]
 pub struct PredictedOverlap {
@@ -471,7 +471,7 @@ pub struct PredictedOverlap {
 }
 
 /// Scans every task's text for file-path-like tokens and reports any token
-/// mentioned by two or more tasks -- see DESIGN.md ("pact-core > Weaver --
+/// mentioned by two or more tasks -- see docs/design/core-orchestrator.md ("Weaver --
 /// task overlap prediction").
 pub fn predict_task_overlap(tasks: &[SpawnManyTask]) -> Vec<PredictedOverlap> {
     let mut token_to_tasks: std::collections::HashMap<String, Vec<usize>> =
@@ -650,7 +650,7 @@ fn looks_like_member_access(candidate: &str) -> bool {
 }
 
 /// A conservative, regex-free "does this look like a file path" check --
-/// see DESIGN.md ("pact-core > Weaver -- task overlap prediction").
+/// see docs/design/core-orchestrator.md ("Weaver -- task overlap prediction").
 fn looks_like_file_path(s: &str) -> bool {
     let Some(dot) = s.rfind('.') else { return false };
     let ext = &s[dot + 1..];
@@ -770,7 +770,7 @@ impl Orchestrator {
     /// task's batch index alongside its event so the caller can attribute
     /// interleaved output back to its source; it's called from whichever
     /// task's thread produced the event, so it must be `Sync`. See
-    /// DESIGN.md ("pact-core > spawn / spawn_many concurrency") for the
+    /// docs/design/core-orchestrator.md ("spawn / spawn_many concurrency") for the
     /// synchronization argument.
     pub fn spawn_many(
         &self,
@@ -947,7 +947,7 @@ impl Orchestrator {
     /// detected for the repo, and the exact `program args...` that would be
     /// launched (matching `AgentAdapter::build_command`'s real output) --
     /// without creating a workspace, running dependency prep, or launching
-    /// anything. See DESIGN.md ("pact-core > --dry-run preview") for why
+    /// anything. See docs/design/cli.md ("--dry-run preview") for why
     /// `build_command`'s MCP-config-file side effect has to be cleaned up
     /// here rather than left as a stray file.
     #[allow(clippy::too_many_arguments)]
@@ -1656,7 +1656,7 @@ impl Orchestrator {
     /// Closes the loop from "N dirty workspaces" to "one clean integration
     /// branch" -- see `pact_vcs::WorkspaceManager::merge_all`. `arbiter`,
     /// if given, is wired in as pact-vcs's `ArbiterResolver` hook -- see
-    /// DESIGN.md ("pact-core > Arbiter -- agent invocation").
+    /// docs/design/core-orchestrator.md ("Arbiter -- agent invocation").
     #[allow(clippy::too_many_arguments)]
     pub fn merge_all(
         &self,
@@ -1727,7 +1727,7 @@ impl Orchestrator {
     }
 
     /// Every currently-open persisted conflict -- what `pact resolve` (no
-    /// workspace id) lists. See DESIGN.md ("pact-coord > Persisted
+    /// workspace id) lists. See docs/design/coord.md ("Persisted
     /// conflicts / `pact resolve` (issue #85)").
     pub fn open_conflicts(&self) -> Result<Vec<pact_coord::PersistedConflict>> {
         pact_coord::open_conflicts(&self.repo_root)
@@ -1793,7 +1793,7 @@ impl Orchestrator {
         Ok(true)
     }
 
-    /// Best-effort operation-log write -- see DESIGN.md ("pact-coord >
+    /// Best-effort operation-log write -- see docs/design/coord.md ("
     /// Operation log / `pact history` (issue #84)"). Never fails the
     /// caller: recording history must not become a new way for
     /// `merge_all`/`teardown`/Arbiter to fail.
@@ -1805,7 +1805,7 @@ impl Orchestrator {
 
     /// Invokes the Arbiter fallback for one workspace's still-unresolved
     /// conflicted files, then records an `arbiter_decision` operation --
-    /// see DESIGN.md ("pact-coord > Operation log / `pact history` (issue
+    /// see docs/design/coord.md ("Operation log / `pact history` (issue
     /// #84)"). `workspace_id` is derived from `worktree_path`'s final path
     /// component, which is always the workspace id (see
     /// `WorkspaceManager::preview_workspace_location`), rather than
@@ -1837,7 +1837,7 @@ impl Orchestrator {
         // normal workspace's own log uses -- deliberately NOT inside
         // `worktree_path` (the throwaway integration/resolve worktree),
         // which gets torn down unconditionally once merge_all/resolve_conflict
-        // finishes. See DESIGN.md ("pact-core > Arbiter diagnosability",
+        // finishes. See docs/design/core-orchestrator.md ("Arbiter diagnosability",
         // issue #106) for why the raw log survives every rejection path;
         // `decision.json` extends that same convention (issue #148)
         // rather than introducing a second, competing directory
@@ -1978,7 +1978,7 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// The operation log for `pact history` -- see DESIGN.md ("pact-coord
+    /// The operation log for `pact history` -- see docs/design/coord.md ("pact-coord
     /// > Operation log / `pact history` (issue #84)").
     pub fn history(&self, filter: &pact_coord::HistoryFilter) -> Result<Vec<pact_coord::Operation>> {
         pact_coord::history(&self.repo_root, filter)
@@ -1986,7 +1986,7 @@ impl Orchestrator {
 }
 
 /// Checks an Arbiter agent's resolution against the conflicted-file
-/// scope it was given -- see DESIGN.md ("pact-core > Arbiter scope
+/// scope it was given -- see docs/design/core-orchestrator.md ("Arbiter scope
 /// enforcement", issue #146/#147). Returns `Err(reason)` for the first
 /// violation found, `Ok(())` if the resolution passes every check.
 ///
@@ -2103,7 +2103,7 @@ fn build_arbiter_decision(
 /// `decision.json` on every path (issue #148) straightforward instead
 /// of repetitive.
 /// Wraps `attempt_arbiter_resolution_inner` with repo-level merge-state
-/// neutralization -- see DESIGN.md ("pact-core > Arbiter merge-state
+/// neutralization -- see docs/design/core-orchestrator.md ("Arbiter merge-state
 /// neutralization", issue #185). Restored unconditionally after the inner
 /// attempt returns, accepted or rejected: the merge itself isn't finished
 /// either way, `merge_branch_into` still needs `MERGE_HEAD` present for the
@@ -2198,7 +2198,7 @@ fn attempt_arbiter_resolution_inner(
 
     // Handed to the agent as clean, labeled base/ours/theirs content
     // instead of asking it to Edit the raw conflict-marker text in place
-    // -- see DESIGN.md ("pact-core > Arbiter Write-fresh redesign", issue
+    // -- see docs/design/core-orchestrator.md ("Arbiter Write-fresh redesign", issue
     // #106) for why: every real attempt under the old Edit-based prompt
     // failed identically (agent describes the correct fix in plain text,
     // then refuses to apply it), even under the strongest permission
@@ -2223,7 +2223,7 @@ fn attempt_arbiter_resolution_inner(
     }
 
     // Neutralized so a real agent will actually operate on these files at
-    // all -- see DESIGN.md ("pact-core > Arbiter Write-fresh redesign",
+    // all -- see docs/design/core-orchestrator.md ("Arbiter Write-fresh redesign",
     // issue #106): confirmed by hand, a real agent refuses to touch a file
     // git still reports as unmerged ("UU"), even under the strongest
     // permission override, regardless of Edit vs Write. Every rejection
@@ -2332,7 +2332,7 @@ fn restore_all(workspaces: &pact_vcs::WorkspaceManager, worktree_path: &Path, sn
 
 /// Whether `content` still holds a git conflict: a line starting with
 /// `<<<<<<<` or `>>>>>>>`. A bare `=======` line is not enough on its own,
-/// see DESIGN.md ("pact-core > Arbiter marker check", issue #380).
+/// see docs/design/core-orchestrator.md ("Arbiter marker check", issue #380).
 fn has_conflict_markers(content: &str) -> bool {
     content.lines().any(|line| {
         ["<<<<<<<", ">>>>>>>"]
@@ -2376,7 +2376,7 @@ fn validate_arbiter_scope(
 
 /// Builds Arbiter's prompt around each conflicted file's clean three-way
 /// content (base/ours/theirs) rather than its raw on-disk conflict-marker
-/// text -- see DESIGN.md ("pact-core > Arbiter Write-fresh redesign",
+/// text -- see docs/design/core-orchestrator.md ("Arbiter Write-fresh redesign",
 /// issue #106).
 fn build_arbiter_prompt(task_text: &str, stages: &[pact_vcs::ConflictStages]) -> String {
     let file_names: Vec<&str> = stages.iter().map(|s| s.path.as_str()).collect();

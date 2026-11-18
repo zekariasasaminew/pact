@@ -179,7 +179,7 @@ pub fn adapter(kind: AgentKind) -> Box<dyn AgentAdapter> {
 }
 
 /// A `--safety` value users can give without knowing any one adapter's own
-/// vocabulary -- see DESIGN.md ("pact-agents > safety profiles", issue
+/// vocabulary -- see docs/design/agents-adapters.md ("safety profiles", issue
 /// #161). Aliases layered *on top of* the existing raw pass-through, never
 /// a replacement: any other string (`acceptEdits`, `read-only`, ...) keeps
 /// flowing through to `build_command` completely unchanged, exactly as
@@ -192,7 +192,7 @@ pub enum SafetyProfile {
     /// a distinct, more-permissive-than-default setting: for Codex and
     /// Gemini, pact's existing default is already the only mode confirmed
     /// to complete real headless work at all (see each adapter's own
-    /// DESIGN.md section), so "workspace-write" and "unrestricted" both
+    /// docs/design/agents-adapters.md section), so "workspace-write" and "unrestricted" both
     /// resolve to that same default for those two -- there is no safer
     /// mode that still gets real work done to alias instead.
     WorkspaceWrite,
@@ -228,7 +228,7 @@ pub fn resolve_safety_profile(agent: AgentKind, safety: Option<&str>) -> Option<
         (AgentKind::Claude, SafetyProfile::WorkspaceWrite) => None,
         (AgentKind::Claude, SafetyProfile::Unrestricted) => Some("bypassPermissions".to_string()),
 
-        // Codex: confirmed by hand (see DESIGN.md "Codex adapter"), a
+        // Codex: confirmed by hand (see docs/design/agents-adapters.md "Codex adapter"), a
         // plain `--sandbox` mode -- even `workspace-write` -- still
         // refuses to write files at all in headless mode; the only
         // confirmed-working "gets real work done" setting is the full
@@ -296,8 +296,8 @@ pub(crate) fn push_model(args: &mut Vec<String>, model: Option<&str>) {
 
 /// Writes `{"mcpServers": {<name>: {"command": ..., "args": [...]}}}` to
 /// `path`, the shape Claude Code's `--mcp-config` and Copilot CLI's
-/// `--additional-mcp-config @<path>` both expect -- see DESIGN.md
-/// ("pact-agents > MCP config format confirmation"). Codex doesn't use
+/// `--additional-mcp-config @<path>` both expect -- see docs/design/agents-adapters.md
+/// ("MCP config format confirmation"). Codex doesn't use
 /// this at all -- it takes inline config overrides instead of a file.
 pub fn write_mcp_json_config(path: &Path, coord: &CoordConfig) -> Result<()> {
     if let Some(parent) = path.parent() {

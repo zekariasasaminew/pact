@@ -72,9 +72,10 @@ enum Command {
         #[arg(long)]
         register_skill: bool,
     },
-    /// A zero-decision, zero-cost walkthrough of the core loop: creates a
-    /// disposable temp repo, runs two simulated agents on independent
-    /// files, merges them, then deletes the temp repo. No real agent CLI
+    /// A zero-decision, zero-cost walkthrough of the `pact run` loop:
+    /// creates a disposable temp repo, runs two simulated agents on
+    /// disjoint files in one shared tree, commits once, checks the result
+    /// against a baseline, then deletes the temp repo. No real agent CLI
     /// or API call is made -- that's the one step this fakes, since it's
     /// the one that costs money and needs a real installed/authenticated
     /// agent. Works from anywhere, doesn't need to be run inside a git repo.
@@ -114,7 +115,7 @@ enum Command {
         /// target repo, but its own plan-document feature may still write
         /// a real file to the host user's ~/.claude/plans/, outside this
         /// workspace's isolation and pact's own cleanup -- confirmed by
-        /// hand, see DESIGN.md. Falls back to `pact.toml`'s
+        /// hand, see docs/design/agents-adapters.md. Falls back to `pact.toml`'s
         /// `defaults.safety` if omitted.
         #[arg(long)]
         safety: Option<String>,
@@ -915,7 +916,7 @@ fn main() -> Result<()> {
 
     if let Command::McpServe { agent_id, workspace } = cli.command {
         // A current-thread runtime, not the default multi-threaded one --
-        // see DESIGN.md ("pact-coord > mcp-serve startup latency", issue
+        // see docs/design/coord.md ("mcp-serve startup latency", issue
         // #105) for why this matters specifically under concurrent
         // spawn-many: one stdio MCP server serving one client has no use
         // for a worker thread pool, and spinning one up anyway multiplies
@@ -1729,7 +1730,7 @@ fn print_merge_report(report: &MergeReport) {
         println!("dry run: would merge onto '{}' from {}", report.target_branch, short(&report.base_commit));
         println!(
             "  planned order (risk score -- changed-file count plus a penalty for central \
-             files/lockfiles/files shared with another workspace in this batch, see DESIGN.md):"
+             files/lockfiles/files shared with another workspace in this batch, see docs/design/vcs.md):"
         );
         for workspace in &report.planned {
             let commit_note = if workspace.would_auto_commit { ", uncommitted changes would be committed first" } else { "" };
@@ -1843,7 +1844,7 @@ fn print_conflicts(conflicts: &[FileConflict]) {
     }
 }
 
-/// Prints `pact history` results -- see DESIGN.md ("pact-coord >
+/// Prints `pact history` results -- see docs/design/coord.md ("
 /// Operation log / `pact history` (issue #84)"). `--json` prints the raw
 /// rows; otherwise a compact, type-specific one-line summary derived from
 /// each operation's `detail`, falling back to the raw JSON for any
@@ -1923,11 +1924,11 @@ fn history_summary(op: &pact_coord::Operation) -> String {
     }
 }
 
-/// Prints a `pact coord-status` snapshot -- see DESIGN.md ("pact-coord >
+/// Prints a `pact coord-status` snapshot -- see docs/design/coord.md ("
 /// Coord status") for why this exists (issue #64: the coordination layer
 /// was otherwise a black box from the outside).
 /// Everything pact knows about one workspace, aggregated from existing
-/// data sources -- see DESIGN.md ("pact-cli > `pact inspect`", issue
+/// data sources -- see docs/design/cli.md ("`pact inspect`", issue
 /// #16). Read-only, computes nothing new.
 fn print_inspect(orchestrator: &Orchestrator, id: &str) -> Result<()> {
     let workspace = orchestrator.get_workspace(id)?;
@@ -2116,7 +2117,7 @@ fn print_coord_status(status: &pact_coord::CoordStatus, active_workspace_ids: &[
 /// One workspace's row in `pact status` -- combines `Workspace`, dirty
 /// status, agent liveness, the `files_touched` annotation (issue #212),
 /// and this workspace's own coordination claims/pending messages. See
-/// DESIGN.md ("pact-cli > `pact status` (issue #221)").
+/// docs/design/cli.md ("`pact status` (issue #221)").
 struct StatusWorkspaceRow {
     workspace: pact_vcs::Workspace,
     dirty: Option<bool>,
@@ -2301,7 +2302,7 @@ fn run_status(orchestrator: &Orchestrator, json: bool) -> Result<()> {
 }
 
 /// Parses one `--task` value into `(agent, task text, agent display name)`
-/// -- see DESIGN.md ("pact-cli") for the prefix-vs-`--agent`-default
+/// -- see docs/design/cli.md for the prefix-vs-`--agent`-default
 /// precedence rules.
 /// Issue #234: `--name` drives the workspace id directly (slugified, no
 /// random suffix), so it needs at least one character that survives
@@ -2435,8 +2436,8 @@ const PACKAGE_MANAGER_CHECKS: &[DoctorCheck] = &[
 ];
 
 /// Runs `check` and returns its first output line trimmed, or `None` if
-/// the program isn't on `PATH`/failed to report a version -- see DESIGN.md
-/// ("pact-cli > `pact doctor` (issue #18)").
+/// the program isn't on `PATH`/failed to report a version -- see docs/design/cli.md
+/// ("`pact doctor` (issue #18)").
 fn doctor_check_version(check: &DoctorCheck) -> Option<String> {
     let output = pact_deps::run_probe(check.program, check.args).ok()?;
     if !output.status.success() {
@@ -2631,7 +2632,7 @@ fn detect_installed_agents() -> Vec<&'static str> {
 /// fallback (`spawn` falls back to the pre-existing hardcoded `"claude"`;
 /// `spawn-many` leaves it as a real per-task error, unchanged from before
 /// this existed). Zero or multiple installed CLIs both fall through to
-/// `None` rather than guessing between them -- see DESIGN.md ("pact-cli >
+/// `None` rather than guessing between them -- see docs/design/cli.md ("
 /// `--agent` auto-default", issue #121) for why guessing there would be
 /// worse than asking.
 /// For the "explicit safety override" warning: shows what a `--safety`
@@ -2779,7 +2780,7 @@ fn register_skill_with_copilot(repo_root: &Path) {
     // Command` doesn't consult PATHEXT the way a real shell does, so a
     // direct spawn fails with "program not found" even though `copilot`
     // works fine typed interactively (confirmed by hand; same class of
-    // bug DESIGN.md documents for `cmdutil::run`). `run_shimmed` routes
+    // bug docs/design/cli.md documents for `cmdutil::run`). `run_shimmed` routes
     // through `cmd /C` on Windows for exactly this reason.
     let cwd = std::env::current_dir().unwrap_or_else(|_| repo_root.to_path_buf());
     match pact_deps::run_shimmed("copilot", &["skill", "add", &repo_root.to_string_lossy()], &cwd) {
@@ -3240,7 +3241,7 @@ fn agent_label(kind: AgentKind) -> &'static str {
 }
 
 /// Raw `type` values that are real but uninteresting to a human watching
-/// the stream live -- see DESIGN.md ("pact-cli > streamed event filtering")
+/// the stream live -- see docs/design/cli.md ("streamed event filtering")
 /// for the measurements that justified suppressing these two specifically.
 /// Suppressed only from the live terminal view by default; `--verbose`
 /// restores them, and the full unfiltered stream is always in the
@@ -3328,7 +3329,7 @@ fn should_print_other(value: &serde_json::Value, verbose: bool) -> bool {
 
 /// Same event formatting as `print_event`, prefixed with `label` so N
 /// interleaved concurrent agents' output stays attributable -- see
-/// DESIGN.md ("pact-cli") for the line-granularity locking note.
+/// docs/design/cli.md for the line-granularity locking note.
 fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[{label}] [init] session {session_id}"),
@@ -3350,7 +3351,7 @@ fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
     }
 }
 
-/// Prints one streamed agent event -- see DESIGN.md ("pact-cli") for why
+/// Prints one streamed agent event -- see docs/design/cli.md for why
 /// `Other` is not skipped by default except for the short, confirmed list
 /// of known-noisy raw types (`should_print_other`), suppressed unless
 /// `--verbose` is passed.

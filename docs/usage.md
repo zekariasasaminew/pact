@@ -278,7 +278,7 @@ or symlink to it in about 0.1 s, instead of a full per-workspace install
 workspace, even with a warm npm cache). The link is shared, not a private
 copy: `list`/`inspect` say so, teardown removes the link without touching
 the repo root's install (see "Reparse points and worktree removal" in
-DESIGN.md for the git behavior that made that a real hazard), and the
+docs/design/vcs.md for the git behavior that made that a real hazard), and the
 agent must not run installs inside the workspace. Turbopack (`next build`
 on Next.js 16) refuses a linked `node_modules`, so a task that needs a
 real build should use `--deps install` (each detected package manager's

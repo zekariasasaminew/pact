@@ -1,6 +1,6 @@
 //! `pact ui` (issue #390): a local web page over the fleet engine, for
 //! starting, watching, reviewing, landing and discarding tasks without
-//! the command line. See DESIGN.md ("`pact ui`").
+//! the command line. See docs/design/cli.md ("`pact ui`").
 
 use std::collections::VecDeque;
 use std::io::Write;

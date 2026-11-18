@@ -2,7 +2,7 @@
 //! which runs `require_passing_tests` once against the fully merged branch
 //! instead of after every clean merge. Real repo, real shell commands,
 //! content-based fixtures (a gate whose verdict depends on what was
-//! merged, never a bare `true`/`false`) -- see DESIGN.md ("pact-vcs >
+//! merged, never a bare `true`/`false`) -- see docs/design/vcs.md ("
 //! Gate timing (issue #309)").
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -178,7 +178,7 @@ fn each_mode_cannot_see_a_combination_failure_that_final_mode_catches() {
     // (c.txt absent), then c.txt merges and the gate fails, so only the
     // second workspace is skipped and the first stays merged. Documents
     // the localization/coverage tradeoff between the two modes rather
-    // than leaving it as prose in DESIGN.md.
+    // than leaving it as prose in docs/design/vcs.md.
     let repo = init_repo();
     let manager = WorkspaceManager::open(&repo).unwrap();
 

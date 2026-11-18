@@ -8,7 +8,7 @@ use crate::event::AgentEvent;
 pub struct CopilotAdapter;
 
 /// Commands a lean Copilot launch denies at the CLI's own tool gate --
-/// see DESIGN.md ("pact-agents > Copilot lean profile", issue #284).
+/// see docs/design/agents-adapters.md ("Copilot lean profile", issue #284).
 /// Dependency mutation would write into a linked, shared `node_modules`
 /// (issue #283); full builds and dev servers are the verifier's job and
 /// the memory-heaviest thing an editor workspace can do (`next build`
@@ -68,13 +68,13 @@ impl AgentAdapter for CopilotAdapter {
         "pact-coord"
     }
 
-    /// See DESIGN.md ("pact-agents > Copilot CLI safety default").
+    /// See docs/design/agents-adapters.md ("Copilot CLI safety default").
     fn default_safety_description(&self) -> &'static str {
         "--allow-all-tools (can run any shell command and edit any file with no restriction)"
     }
 
     /// `safety_override` is accepted for interface consistency but ignored
-    /// -- see DESIGN.md ("pact-agents > Copilot CLI safety default").
+    /// -- see docs/design/agents-adapters.md ("Copilot CLI safety default").
     fn build_command(
         &self,
         task: &str,
@@ -103,7 +103,7 @@ impl AgentAdapter for CopilotAdapter {
         ("copilot".to_string(), args)
     }
 
-    /// The lean profile -- see DESIGN.md ("pact-agents > Copilot lean
+    /// The lean profile -- see docs/design/agents-adapters.md ("Copilot lean
     /// profile", issue #284). Measured on the same trivial prompt: the
     /// user's full home with 7 MCP servers took 57 s and 1.37 GB peak; a
     /// per-agent home holding only `config.json` took 6.3 s and 326 MB.
@@ -214,8 +214,8 @@ fn prepare_lean_home(source: &Path, agent_home: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Schema modeled against real captured output -- see DESIGN.md
-/// ("pact-agents > Copilot CLI output schema").
+/// Schema modeled against real captured output -- see docs/design/agents-adapters.md
+/// ("Copilot CLI output schema").
 fn parse_line(line: &str) -> Vec<AgentEvent> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -264,7 +264,7 @@ fn parse_line(line: &str) -> Vec<AgentEvent> {
 }
 
 /// Copilot CLI can bundle response text *and* tool calls into a single
-/// `assistant.message` event -- see DESIGN.md ("pact-agents > Copilot CLI
+/// `assistant.message` event -- see docs/design/agents-adapters.md ("Copilot CLI
 /// output schema").
 fn parse_assistant_message(value: &Value) -> Vec<AgentEvent> {
     let data = match value.get("data") {

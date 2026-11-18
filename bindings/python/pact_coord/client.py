@@ -2,7 +2,7 @@
 coordination server (file leases + inter-agent messaging).
 
 Spawns `pact mcp-serve` itself and speaks real MCP (via Anthropic's own
-`mcp` package) over stdio -- pact's own DESIGN.md ("pact-coord SDK
+`mcp` package) over stdio -- pact's own docs/design/coord.md ("pact-coord SDK
 bindings v1", issue #127) covers why this is the right shape (there is
 no standing coordination server to connect to instead) and why the
 response parsing below is asymmetric (claim_files/check_messages/

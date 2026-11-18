@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// How long a caller waits for `locks/git.lock` (guards `git worktree
-/// add`/`remove`, see DESIGN.md ("pact-vcs > PidLock origin")) before giving
+/// add`/`remove`, see docs/design/vcs.md ("PidLock origin")) before giving
 /// up. Deliberately generous, not tuned to "how long one worktree checkout
 /// takes" -- a legitimately busy queue (N concurrent `spawn-many` tasks each
 /// waiting their turn for a slow checkout) is not a deadlock and must not
@@ -77,9 +77,10 @@ pub struct Workspace {
     /// Set on a *lane* of a shared-tree batch (issue #315): the id of the
     /// batch workspace whose worktree this lane runs in. A lane has its
     /// own id, metadata, agent and log, but `path` and `branch` are the
-    /// batch's, so there is nothing to merge between lanes and only the
-    /// last lane torn down removes the worktree. `None` for an ordinary
-    /// isolated workspace and for the batch workspace itself.
+    /// batch's, so there is nothing to merge between lanes. A lane never
+    /// owns the worktree: the batch workspace's own teardown removes it
+    /// once every lane is gone. `None` for an ordinary isolated workspace
+    /// and for the batch workspace itself.
     #[serde(default)]
     pub shared_batch: Option<String>,
     /// Set when this workspace's agent runs as a session inside a shared
@@ -122,7 +123,7 @@ pub struct WorkspaceChanges {
 }
 
 /// When `merge_all`'s `--require-passing-tests` command runs relative to
-/// the per-workspace merges -- see DESIGN.md ("pact-vcs > Gate timing
+/// the per-workspace merges -- see docs/design/vcs.md ("Gate timing
 /// (issue #309)").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GateMode {
@@ -178,8 +179,8 @@ pub struct SkippedWorkspace {
 /// conflict (never the moving-base check) -- the structured subset of
 /// `SkippedWorkspace` that's actually resumable via
 /// `WorkspaceManager::resolve_conflict`, since a moving-base skip needs a
-/// rebased/recreated workspace, not a retried merge. See DESIGN.md
-/// ("pact-vcs > Persisted conflicts (issue #85)").
+/// rebased/recreated workspace, not a retried merge. See docs/design/vcs.md
+/// ("Persisted conflicts (issue #85)").
 #[derive(Debug, Clone)]
 pub struct ConflictedWorkspace {
     pub id: String,
@@ -254,21 +255,21 @@ pub enum ResolveOutcome {
 
 /// Given `(worktree_path, the workspace's task text, the still-unresolved
 /// conflicted files)`, returns exactly the subset it resolved and staged
-/// (`git add`) itself -- see DESIGN.md ("pact-vcs > Arbiter resolver
+/// (`git add`) itself -- see docs/design/vcs.md ("Arbiter resolver
 /// hook").
 pub type ArbiterResolver<'a> = dyn Fn(&Path, &str, &[String]) -> Vec<String> + 'a;
 
 /// Prepares dependencies (npm/etc.) for a fresh worktree before any shell
 /// command runs in it -- injected the same way `ArbiterResolver` is,
 /// since `pact-vcs` has no dependency on `pact-deps` or `pact-core`. See
-/// DESIGN.md ("pact-vcs > merge_all's integration worktree needs
+/// docs/design/vcs.md ("merge_all's integration worktree needs
 /// dependencies too", issue #269) for why this exists: a fresh
 /// `git worktree add` has no `node_modules` any more than a fresh agent
 /// workspace would, but only agent workspaces got dependency prep before
 /// this.
 pub type DependencyPrepHook<'a> = dyn Fn(&Path) + 'a;
 
-/// Never auto-resolved, even under `--union` -- see DESIGN.md ("pact-vcs >
+/// Never auto-resolved, even under `--union` -- see docs/design/vcs.md ("
 /// Semantic auto-resolution").
 const NEVER_AUTO_RESOLVE: &[&str] = &[
     "package-lock.json",
@@ -288,7 +289,7 @@ const NEVER_AUTO_RESOLVE: &[&str] = &[
 /// (issue #159). Deliberately basename-based and modest in scope: this
 /// can't know a repo's own conventions (a project's actual barrel file
 /// could be named anything), so it only catches the common,
-/// cross-ecosystem cases. See DESIGN.md ("pact-vcs > Risk-aware merge
+/// cross-ecosystem cases. See docs/design/vcs.md ("Risk-aware merge
 /// ordering") for the weights and what was deliberately left out.
 const CENTRAL_FILE_BASENAMES: &[&str] = &[
     "package.json",
@@ -715,17 +716,14 @@ impl WorkspaceManager {
 
     /// Removes a workspace's worktree and, unless `keep_branch` is set,
     /// the `pact/<id>` branch created for it. Refuses on uncommitted
-    /// changes unless `force` is set -- see DESIGN.md ("pact-vcs >
+    /// changes unless `force` is set -- see docs/design/vcs.md ("
     /// Workspace teardown").
     pub fn remove_workspace(&self, id: &str, keep_branch: bool, force: bool) -> Result<()> {
         let workspace = self.get_workspace(id)?;
 
-        // Shared-tree batch (issue #315): the worktree belongs to the batch
-        // and every lane. A lane's own teardown only drops its metadata
-        // while other members remain; whoever goes last takes the worktree
-        // with it. Tearing down the batch id directly refuses while any
-        // lane still exists, so a lane's agent is never pulled out from
-        // under it by a teardown aimed at the batch.
+        // Shared-tree batch (issue #315): tearing down the batch id refuses
+        // while any lane still exists, so a lane's agent is never pulled
+        // out from under it by a teardown aimed at the batch.
         if workspace.shared_batch.is_none() {
             let lanes = self.lanes_of(id)?;
             if !lanes.is_empty() {
@@ -819,8 +817,8 @@ impl WorkspaceManager {
     }
 
     /// A workspace's changes relative to the point it was branched from --
-    /// "what did this agent actually do" in one call. See DESIGN.md
-    /// ("pact-vcs > Workspace lifecycle") for the merge-base assumption
+    /// "what did this agent actually do" in one call. See docs/design/vcs.md
+    /// ("Workspace lifecycle") for the merge-base assumption
     /// this relies on.
     pub fn workspace_diff(&self, id: &str) -> Result<WorkspaceDiff> {
         let workspace = self.get_workspace(id)?;
@@ -862,7 +860,7 @@ impl WorkspaceManager {
 
     /// The merge-base a workspace's branch forked from, plus the set of
     /// files it has touched since. Used to detect cross-workspace file
-    /// overlap (issue #8) -- see DESIGN.md ("pact-vcs > Workspace
+    /// overlap (issue #8) -- see docs/design/vcs.md ("Workspace
     /// lifecycle").
     pub fn workspace_changes(&self, id: &str) -> Result<WorkspaceChanges> {
         let workspace = self.get_workspace(id)?;
@@ -962,11 +960,11 @@ impl WorkspaceManager {
     }
 
     /// Removes a worktree directory, tolerating two Windows failure modes
-    /// -- see DESIGN.md ("pact-vcs > Workspace teardown"). Unlinks every
+    /// -- see docs/design/vcs.md ("Workspace teardown"). Unlinks every
     /// top-level reparse point (junction, directory symlink) first: `git
     /// worktree remove` follows them and deletes the *target's* contents,
     /// which for a linked `node_modules` means the repo's own install --
-    /// confirmed by hand, see DESIGN.md ("pact-vcs > Reparse points and
+    /// confirmed by hand, see docs/design/vcs.md ("Reparse points and
     /// worktree removal", issue #283).
     fn remove_worktree_retrying(&self, path: &std::path::Path) -> Result<()> {
         for unlinked in unlink_top_level_reparse_points(path) {
@@ -1038,7 +1036,7 @@ impl WorkspaceManager {
     }
 
     /// Stages and commits everything in a workspace's working tree with a
-    /// message derived from its task text -- see DESIGN.md ("pact-vcs >
+    /// message derived from its task text -- see docs/design/vcs.md ("
     /// commit_all"). Returns `Ok(false)` without running `git commit` at
     /// all if the workspace is already clean.
     pub fn commit_all(&self, id: &str) -> Result<bool> {
@@ -1084,13 +1082,13 @@ impl WorkspaceManager {
     }
 
     /// Closes the loop from "N workspaces are dirty" to "one clean
-    /// integration branch" -- see DESIGN.md ("pact-vcs > merge_all") for
+    /// integration branch" -- see docs/design/vcs.md ("merge_all") for
     /// the phase breakdown and the trial report this is built against.
     /// `ids`, if given, restricts the run to those workspaces instead of
     /// every active one. `require_passing_tests`, if given, gates each
     /// workspace's *clean* merge on this command passing in the
-    /// integration worktree before it's accepted -- see DESIGN.md
-    /// ("pact-vcs > Test-gated merge (issue #65)").
+    /// integration worktree before it's accepted -- see docs/design/vcs.md
+    /// ("Test-gated merge (issue #65)").
     #[allow(clippy::too_many_arguments)]
     pub fn merge_all(
         &self,
@@ -1420,7 +1418,7 @@ impl WorkspaceManager {
     }
 
     /// Retries merging `workspace_id`'s branch into `target_branch` -- the
-    /// "resumable conflict" verb, see DESIGN.md ("pact-vcs > Persisted
+    /// "resumable conflict" verb, see docs/design/vcs.md ("Persisted
     /// conflicts (issue #85)"). `target_branch` must already exist as a
     /// real branch (it does, for anything `merge_all` reported as
     /// conflicted -- see `ConflictedWorkspace::target_branch` -- since
@@ -1488,7 +1486,7 @@ impl WorkspaceManager {
 
     /// Merges `branch` into whatever's checked out in `worktree_path`
     /// (always the throwaway integration worktree, never the repo's own
-    /// checkout) -- see DESIGN.md ("pact-vcs > Semantic auto-resolution").
+    /// checkout) -- see docs/design/vcs.md ("Semantic auto-resolution").
     fn merge_branch_into(
         &self,
         worktree_path: &Path,
@@ -1609,7 +1607,7 @@ impl WorkspaceManager {
     }
 
     /// Tries to auto-resolve one conflicted file, returning `true` and
-    /// staging it (`git add`) if it resolved -- see DESIGN.md ("pact-vcs >
+    /// staging it (`git add`) if it resolved -- see docs/design/vcs.md ("
     /// Semantic auto-resolution"). Dispatches to the first
     /// `semantic_resolvers::SemanticResolver` whose `can_handle` matches
     /// (issue #151) rather than a hardcoded `if`/`else if` per resolver.
@@ -1700,7 +1698,7 @@ impl WorkspaceManager {
     }
 
     /// Temporarily resolves `file`'s conflicted index entry (git's "UU"
-    /// status) to a single plain staged blob -- see DESIGN.md ("pact-core >
+    /// status) to a single plain staged blob -- see docs/design/core-orchestrator.md ("
     /// Arbiter Write-fresh redesign", issue #106) for why: confirmed by
     /// hand, a real agent refuses to write to a file git still reports as
     /// unmerged, even under the strongest permission override, regardless
@@ -1788,7 +1786,7 @@ impl WorkspaceManager {
     }
 
     /// Temporarily removes `worktree_path`'s repo-level "mid-merge" markers
-    /// (`MERGE_HEAD`/`MERGE_MSG`/`MERGE_MODE`) -- see DESIGN.md ("pact-core >
+    /// (`MERGE_HEAD`/`MERGE_MSG`/`MERGE_MODE`) -- see docs/design/core-orchestrator.md ("
     /// Arbiter merge-state neutralization", issue #185) for why:
     /// `neutralize_conflict`'s per-file index fix (issue #106) wasn't
     /// sufficient on its own -- a real agent's Write tool was still denied
@@ -1967,7 +1965,7 @@ fn truncate_for_subject(line: &str, max: usize) -> String {
 
 /// If `workspace` has a live agent process recorded, kills its whole
 /// process tree before the worktree it's running in gets removed out from
-/// under it -- see DESIGN.md ("pact-agents > Process group kill").
+/// under it -- see docs/design/agents-adapters.md ("Process group kill").
 /// Best-effort: a dead/already-exited PID is silently ignored, not an
 /// error.
 fn kill_if_alive(workspace: &Workspace) {
@@ -2006,8 +2004,8 @@ fn kill_if_alive(workspace: &Workspace) {
 /// `worktree` that is a reparse point -- an NTFS junction or a directory
 /// symlink on Windows, a symlink on Unix -- and returns the paths unlinked.
 /// `symlink_metadata` reports junctions as symlinks, and `remove_dir` on a
-/// junction removes only the link; both confirmed by hand (see DESIGN.md
-/// ("pact-vcs > Reparse points and worktree removal", issue #283)). Best-
+/// junction removes only the link; both confirmed by hand (see docs/design/vcs.md
+/// ("Reparse points and worktree removal", issue #283)). Best-
 /// effort: an unreadable directory or a failed unlink is skipped, since
 /// the caller is about to remove the whole tree anyway and a leftover
 /// link is the lesser risk.
@@ -2055,8 +2053,8 @@ fn tail_lines(text: &str) -> String {
 }
 
 /// The result of running a `--require-passing-tests` gate command once,
-/// with enough detail to actually diagnose a failure -- see DESIGN.md
-/// ("pact-vcs > Test-gated merge (issue #65)", "Gate diagnosability (issue
+/// with enough detail to actually diagnose a failure -- see docs/design/vcs.md
+/// ("Test-gated merge (issue #65)", "Gate diagnosability (issue
 /// #232)"). Replaces a bare `Result<bool>` that collapsed "your code
 /// failed" and "the environment couldn't even run the command" into the
 /// same false signal.
@@ -2087,7 +2085,7 @@ impl GateOutcome {
 
 /// Runs `cmd` as a shell command in `dir` (`cmd /C` on Windows, `sh -c`
 /// elsewhere) and captures enough about the result to actually diagnose a
-/// failure -- see DESIGN.md ("pact-vcs > Test-gated merge (issue #65)"). A
+/// failure -- see docs/design/vcs.md ("Test-gated merge (issue #65)"). A
 /// local copy of the same small helper `pact-core`'s Arbiter uses
 /// (`run_shell`), not shared: this crate has no dependency on `pact-core`
 /// and the alternative -- adding one just for a small function -- would be
@@ -2255,7 +2253,7 @@ fn leading_phrase(text: &str) -> &str {
 /// `MAX_SLUG_LEN` -- deliberately conservative on length: this id becomes
 /// part of every file path under the workspace (`state_dir/workspaces/<id>/...`),
 /// and Windows' MAX_PATH has already bitten this codebase once (see
-/// DESIGN.md, the npm content store fallback). Non-ASCII task text (most
+/// docs/design/vcs.md, the npm content store fallback). Non-ASCII task text (most
 /// non-Latin scripts) slugifies to an empty string -- `workspace_id`
 /// falls back to the random suffix alone in that case, exactly like the
 /// pre-#122 behavior for every workspace.
