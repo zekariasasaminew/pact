@@ -5,6 +5,7 @@ use std::process::Command;
 mod acp_runtime;
 mod admission;
 pub mod fleet;
+pub mod gc;
 mod land;
 pub mod ownership;
 pub mod run;

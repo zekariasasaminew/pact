@@ -2650,6 +2650,26 @@ the same migration is not an error. The alternative, rejecting those
 names in `validate_workspace_name`, would have left `pact run` unable to
 use a planner's perfectly reasonable unit name.
 
+### Pruning the state directory: `pact gc` (issue #351)
+
+Nothing removed state once written: after about ten benchmark runs one
+state directory held 100 MB, three quarters of it lane and planner
+logs and a quarter ACP lean homes (each with Copilot's own session
+events and its own copy of installed plugins). `teardown` is right to
+leave a workspace's log and records, because `inspect` and the UI read
+them after the agent is gone, so pruning is a separate command. The
+rules come from who reads each item. A workspace's own state (its log,
+home, MCP config and sidecar records, matched by name) is read only
+while the workspace exists, so it goes once the workspace is gone and
+the item is older than `--older-than`. State shared by a run (planner
+and arbiter logs, ACP homes, briefs, verification logs, merge scratch)
+has no owner to outlive, so age alone decides. Age is the newest
+modification anywhere inside the item, so a home an ACP batch is still
+writing is never old. Plans are never pruned: they are the artefact a
+user edits and reruns with `--plan`. The default cutoff is a week,
+long enough to come back to yesterday's run. `--dry-run` lists every
+item with its size.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
