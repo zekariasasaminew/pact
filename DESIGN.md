@@ -5627,6 +5627,12 @@ checkout of `HEAD`, so this is a fair approximation unless the repo root's
 own working tree has uncommitted package-manager-file changes that
 wouldn't carry over), and calls the real `AgentAdapter::build_command` so
 the printed command can never drift from what a real spawn would launch.
+The arguments are printed shell-quoted for the platform (issue #303):
+joined with bare spaces, a task text such as `unit A` and a rule such
+as `shell(npm install:*)` read as several arguments and could not be
+pasted back into a shell. Windows gets double quotes with `\"` inside,
+the convention `CommandLineToArgvW` reads; elsewhere single quotes.
+`inspect` prints a run record's command the same way.
 
 That last part has a side effect to account for: `build_command` for the
 Claude Code, Copilot, and Gemini adapters (not Codex, which inlines its
