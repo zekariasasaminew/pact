@@ -1235,6 +1235,24 @@ any other kind or the end of the turn, so a lane's message reads as the
 process runtime's complete `assistant.message` does. The per-lane JSONL
 log is written before either and keeps every raw update.
 
+Sharing one process means sharing its failures (issue #412). When
+`copilot --acp` exited (a crash, an OOM kill, an expired login), the
+lane mid-turn failed, and so did every lane queued behind it, each
+failing to open a session on a process that was gone: one fault in
+lane 1 of 12 threw away the run. `AcpBatch` now keeps each agent's
+process behind a lock and `live_runtime` replaces it when a lane about
+to open a session finds it exited, so the queued lanes run on the
+replacement. The lane that was mid-turn stays failed, reported by name
+as "exited mid-turn" with its partial writes left in the tree, since
+resuming it would need `session/load`. A process that keeps dying is
+replaced at most twice per batch (`MAX_ACP_RESTARTS`); after that the
+remaining lanes fail with a message that says so, because a third
+death points at the environment (auth, memory) rather than at one
+lane's turn. The batch's closing line says how many restarts happened.
+A turn that fails while its process is still alive is now that lane's
+failed outcome too, rather than a launch error that lost the lane's
+name in the report.
+
 ### `pact run`: pact owns the split (issue #305)
 
 Everything above made execution cheap; the judgement still lived
@@ -1638,9 +1656,8 @@ those files are not run. `repo` resolves through `git rev-parse
 directory beside the repository root.
 
 **Process lanes only.** An ACP batch is one agent process bound to one
-repository's coordination server, and it cannot set a model per lane yet
-(#374). Per-task models are the point of a fleet, so every task is its
-own process whatever the agent.
+repository's coordination server, and a fleet's tasks span repositories,
+so every task is its own process whatever the agent.
 
 **The worker report contract.** A process exit code says the CLI did not
 crash; it does not say the task is finished: an agent that stops to ask
@@ -2633,6 +2650,26 @@ the same migration is not an error. The alternative, rejecting those
 names in `validate_workspace_name`, would have left `pact run` unable to
 use a planner's perfectly reasonable unit name.
 
+### Pruning the state directory: `pact gc` (issue #351)
+
+Nothing removed state once written: after about ten benchmark runs one
+state directory held 100 MB, three quarters of it lane and planner
+logs and a quarter ACP lean homes (each with Copilot's own session
+events and its own copy of installed plugins). `teardown` is right to
+leave a workspace's log and records, because `inspect` and the UI read
+them after the agent is gone, so pruning is a separate command. The
+rules come from who reads each item. A workspace's own state (its log,
+home, MCP config and sidecar records, matched by name) is read only
+while the workspace exists, so it goes once the workspace is gone and
+the item is older than `--older-than`. State shared by a run (planner
+and arbiter logs, ACP homes, briefs, verification logs, merge scratch)
+has no owner to outlive, so age alone decides. Age is the newest
+modification anywhere inside the item, so a home an ACP batch is still
+writing is never old. Plans are never pruned: they are the artefact a
+user edits and reruns with `--plan`. The default cutoff is a week,
+long enough to come back to yesterday's run. `--dry-run` lists every
+item with its size.
+
 ## pact-agents — adapters and process supervision
 
 ### AgentEvent normalization
@@ -2755,6 +2792,23 @@ while holding the lock (e.g. inside another thread's own cleanup) must not
 make every other live child unkillable on Ctrl-C. A failure to install the
 handler at all (e.g. an outer caller already installed one) is logged, not
 fatal -- the agent process(es) just won't be killed on Ctrl-C in that case.
+
+That "logged, not fatal" case turned out to be the normal one (issue
+#366). `ctrlc` allows one handler per process, and `pact run` creates
+several supervisors in one process (the planner's, one per
+`spawn_many_in`, one per repair round), so only the first supervisor's
+children were reachable; every lane's agent survived a Ctrl-C. The ACP
+runtime's shared agent process was never registered anywhere, and
+`std::process::exit(130)` runs no destructors, so its `kill_on_drop`
+never fired either. Now every `Supervisor` is a handle on one
+process-wide registry, created with the handler on first use, and the
+registry also holds bare pids (`register_pid`, used for each shared ACP
+process from start to shutdown) that the handler kills with their whole
+tree. The handler's body is `kill_everything`, tested directly in its
+own test binary since sending a real Ctrl-C to a test process would
+reach the test runner too. Slots are indices into the shared registry
+and are never reused, so a long `pact ui` session accumulates one empty
+slot per finished lane; that is a few bytes each.
 
 ### Orphaned grandchild cleanup, and a deeper pipe-inheritance root cause (issue #237)
 
@@ -3536,12 +3590,34 @@ unknown or lacks the task's agent fails the command: falling back to the
 CLI default would silently run at the price the user was trying to avoid.
 
 ACP lanes share one agent process per agent kind, so a model is a
-per-session setting there (`session/set_config_option`, #374), not a
-launch flag. Until that lands, a requested model turns `--runtime auto`
-into `process` (more memory per lane, but the model the user asked for)
-and refuses an explicit `--runtime acp`; `spawn_with_supervisor` also
-refuses an ACP lane with a model, so a library caller cannot get the
-silent default either.
+per-session setting there (`session/set_config_option`), not a launch
+flag. Until #374 a requested model turned `--runtime auto` into
+`process` and refused `--runtime acp`. That fallback hid a cost of its
+own (issue #415): `pact run --tier cheap` silently became the
+process runtime, with three times the per-lane memory reserve and so
+far fewer planned units, the configuration the benchmark shows losing.
+
+### The model a lane actually ran on (issue #374)
+
+On 2026-10-02 every `pact run` lane ran on `claude-haiku-4.5` while
+everyone believed it was `claude-opus-5`: Copilot's catalog had dropped
+the requested id and the agent swapped in a default at session start,
+announcing it only in a `config_option_update` pact threw away. ACP
+sessions describe their model as a config option (id `model`, or
+category `model`), with the values on offer and `currentValue`. So an
+ACP lane with a model now selects it with `session/set_config_option`
+after `session/new`; a model the agent does not offer is an error, and
+`spawn_many_in` checks every requested (agent, model) pair on a
+throwaway session before any lane launches, so a typo or a retired id
+costs nothing. Every lane, and the planner, records the model the agent
+reports: the value after selection, replaced by any later
+`config_option_update` during the turn. When that differs from the
+request the lane prints a warning and the run record keeps both
+(`model` and `effective_model`, shown by `pact inspect` and `pact list
+--json`). Process lanes still pass `--model` and record only the
+request, since a process CLI reports no model in a form pact parses.
+With selection in place the fallback above is gone: `auto` stays ACP
+when a model is set.
 
 ## pact-coord — MCP coordination server
 
