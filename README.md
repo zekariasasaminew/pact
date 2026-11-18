@@ -82,7 +82,10 @@ starts, and on the combined result. The pair decides the verdict:
 
 Workers check only their own files; the project-wide checks run once, by
 pact, on the combined result. Twelve lanes each running a full type-check
-was the bottleneck pact removed this way (issue #361).
+was the bottleneck pact removed this way (issue #361). Before committing,
+pact checks that each lane wrote only its own unit's files; a lane that
+wrote someone else's, or a file no unit owns, fails the run (exit 1) and
+is named in the report.
 
 The lanes share one agent process through the
 [Agent Client Protocol](https://agentclientprotocol.com) (Copilot CLI's
