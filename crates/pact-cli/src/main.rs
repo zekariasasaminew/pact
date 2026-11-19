@@ -1193,7 +1193,7 @@ fn main() -> Result<()> {
             });
 
             let report = SpawnManyReport::new(requested, results);
-            let mut batch_usage: Option<(f64, f64)> = None;
+            let mut batch_usage: Option<pact_core::Usage> = None;
             for outcome in &report.outcomes {
                 match &outcome.result {
                     Ok((workspace, run)) => {
@@ -1214,8 +1214,11 @@ fn main() -> Result<()> {
                             println!("  duration: {}s", meta.ended_at.saturating_sub(meta.started_at));
                             if let Some(usage) = &meta.usage {
                                 println!("  usage: {usage}");
-                                let (requests, usd) = batch_usage.unwrap_or((0.0, 0.0));
-                                batch_usage = Some((requests + usage.premium_requests, usd + usage.usd));
+                                let total = batch_usage.get_or_insert(pact_core::Usage { premium_requests: None, usd: 0.0, model: None });
+                                total.usd += usage.usd;
+                                if let Some(requests) = usage.premium_requests {
+                                    *total.premium_requests.get_or_insert(0.0) += requests;
+                                }
                             }
                         }
                         if let Some(reports) = orchestrator.dependency_prep_report(&workspace.id) {
@@ -1237,8 +1240,8 @@ fn main() -> Result<()> {
             // bool tracked alongside the loop above) makes it structurally
             // impossible to report 0 while requested != created.
             println!("{}", report.summary_line());
-            if let Some((requests, usd)) = batch_usage {
-                println!("batch usage: {requests} premium requests, {usd:.3} USD");
+            if let Some(usage) = &batch_usage {
+                println!("batch usage: {usage}");
             }
             let exit_code = report.exit_code();
             if exit_code != 0 {

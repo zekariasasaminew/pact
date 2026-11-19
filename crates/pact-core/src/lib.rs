@@ -52,14 +52,47 @@ pub struct ArbiterConfig {
 /// A run's cost as the agent reported it (issue #300).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
-    pub premium_requests: f64,
-    /// `totalNanoAiu / 1e11`: one AI credit is 0.01 USD.
+    /// Copilot's premium-request count; Claude Code has none (issue #454).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premium_requests: Option<f64>,
+    /// Copilot: `totalNanoAiu / 1e11` (one AI credit is 0.01 USD). Claude
+    /// Code: its own `total_cost_usd`.
     pub usd: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
 
 impl Usage {
+    /// The usage on one raw agent output line: a Copilot CLI
+    /// `session.usage_checkpoint` or a Claude Code `result` event. Lines
+    /// that cannot hold either are skipped without being parsed.
+    pub fn from_line(line: &str) -> Option<Usage> {
+        if !line.contains("session.usage_checkpoint") && !line.contains("\"total_cost_usd\"") {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        Self::from_copilot_checkpoint(&value).or_else(|| Self::from_claude_result(&value))
+    }
+
+    /// Claude Code's `result` event: `total_cost_usd`, and the model that
+    /// cost the most in `modelUsage`.
+    fn from_claude_result(value: &serde_json::Value) -> Option<Usage> {
+        if value.get("type")?.as_str()? != "result" {
+            return None;
+        }
+        let usd = value.get("total_cost_usd")?.as_f64()?;
+        let model = value.get("modelUsage").and_then(|v| v.as_object()).and_then(|models| {
+            models
+                .iter()
+                .max_by(|a, b| {
+                    let cost = |v: &serde_json::Value| v.get("costUSD").and_then(|c| c.as_f64()).unwrap_or(0.0);
+                    cost(a.1).total_cmp(&cost(b.1))
+                })
+                .map(|(name, _)| name.clone())
+        });
+        Some(Usage { premium_requests: None, usd, model })
+    }
+
     /// The cumulative usage in a Copilot CLI `session.usage_checkpoint`
     /// event, `None` for any other line.
     pub fn from_copilot_checkpoint(value: &serde_json::Value) -> Option<Usage> {
@@ -72,7 +105,7 @@ impl Usage {
             .find_map(|pointer| data.pointer(pointer).and_then(|v| v.as_str()))
             .map(str::to_string);
         Some(Usage {
-            premium_requests: data.get("totalPremiumRequests").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            premium_requests: Some(data.get("totalPremiumRequests").and_then(|v| v.as_f64()).unwrap_or(0.0)),
             usd: data.get("totalNanoAiu").and_then(|v| v.as_f64()).unwrap_or(0.0) / 1e11,
             model,
         })
@@ -81,7 +114,10 @@ impl Usage {
 
 impl std::fmt::Display for Usage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} premium requests, {:.3} USD", self.premium_requests, self.usd)?;
+        if let Some(requests) = self.premium_requests {
+            write!(f, "{requests} premium requests, ")?;
+        }
+        write!(f, "{:.3} USD", self.usd)?;
         if let Some(model) = &self.model {
             write!(f, " ({model})")?;
         }
@@ -125,7 +161,8 @@ pub struct RunMetadata {
     #[serde(default)]
     pub model: Option<String>,
     /// What the run cost, from the agent's own accounting (issue #300):
-    /// Copilot CLI's last `session.usage_checkpoint`. `None` for agents
+    /// Copilot CLI's last `session.usage_checkpoint`, or Claude Code's
+    /// `result` event (issue #454). `None` for agents
     /// that report nothing pact parses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
@@ -1299,7 +1336,7 @@ impl Orchestrator {
         };
         let started_at = unix_now();
         on_event(&AgentEvent::Phase("running agent".to_string()));
-        let mut last_usage: Option<Usage> = None;
+        let last_usage: std::cell::RefCell<Option<Usage>> = std::cell::RefCell::new(None);
         let run_result = pact_agents::run_and_stream(
             supervisor,
             &launch.program,
@@ -1307,16 +1344,16 @@ impl Orchestrator {
             &launch.env,
             &workspace.path,
             &log_path,
-            |line| adapter.parse_line(line),
+            |line| {
+                if let Some(usage) = Usage::from_line(line) {
+                    *last_usage.borrow_mut() = Some(usage);
+                }
+                adapter.parse_line(line)
+            },
             |event| {
                 if let AgentEvent::CoordStatus { name, status } = event {
                     if name == coord_name {
                         coord_last_status = Some(status.clone());
-                    }
-                }
-                if let AgentEvent::Other(value) = event {
-                    if let Some(usage) = Usage::from_copilot_checkpoint(value) {
-                        last_usage = Some(usage);
                     }
                 }
                 on_event(event);
@@ -1361,7 +1398,7 @@ impl Orchestrator {
             },
             coord_status: coord_last_status,
             model: options.model.map(str::to_string),
-            usage: last_usage,
+            usage: last_usage.into_inner(),
             effective_model: None,
             final_message: run_result.as_ref().ok().and_then(|run| run.final_text.clone()),
             runtime: LaneRuntime::Process.as_str().to_string(),
@@ -3105,6 +3142,25 @@ mod tests {
         let metadata: RunMetadata = serde_json::from_str(legacy).unwrap();
         assert!(metadata.env.is_empty());
         assert_eq!(metadata.session_id, None);
+    }
+
+    #[test]
+    fn a_claude_code_result_reads_as_dollars_and_its_costliest_model() {
+        let line = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "done",
+            "total_cost_usd": 0.00755623,
+            "modelUsage": {
+                "claude-haiku-5-5": {"costUSD": 0.0075},
+                "claude-haiku-4-5": {"costUSD": 0.00005}
+            }
+        })
+        .to_string();
+        let usage = Usage::from_line(&line).unwrap();
+        assert_eq!(usage.premium_requests, None);
+        assert_eq!(usage.to_string(), "0.008 USD (claude-haiku-5-5)");
+        assert_eq!(Usage::from_line(r#"{"type":"assistant","message":{}}"#), None);
     }
 
     #[test]

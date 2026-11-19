@@ -1004,3 +1004,16 @@ reasoning or tool progress (the analogues of the suppressed ACP kinds),
 or metadata, so all join the list. The rule is unchanged: a type stays
 visible until a real run shows it is noise, and the lane log and
 `--verbose` keep everything.
+
+### Claude Code's cost in the run record (issue #454)
+
+Claude Code's `result` event carries what the run cost
+(`total_cost_usd`, and `modelUsage` per model with its `costUSD`; seen
+live on Claude Code 2.1.328), so its process lanes now record `usage`
+too: USD and the costliest model, with no premium-request count, which
+made `premium_requests` optional (old records still parse). Usage is now
+read from the raw output line, before the adapter turns Claude's
+`result` into a `Result` event, and only lines that mention
+`session.usage_checkpoint` or `"total_cost_usd"` are parsed a second
+time. The `spawn-many` batch total adds premium requests only when some
+lane reported them.
