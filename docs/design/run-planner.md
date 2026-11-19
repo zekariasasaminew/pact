@@ -15,7 +15,7 @@ Steps, in order:
 7. **Verify.** `verify` is a list (`--verify` is repeatable and replaces the plan's list, #360). Each command has a baseline on the untouched tree and a verdict after: pass/pass `Passed`, fail/pass `Fixed`, pass/fail `Regressed`, fail/fail `Inconclusive` (exit 3), fail with no baseline `Failed`. `worst_verdict` sets the exit code. Each command runs under `--verify-timeout` (default 20 min) with `CI=true`, stdin closed, output to `meta/verify/<run>/`, and its process tree is killed at the deadline (#410). A timed-out baseline counts as no baseline.
 8. **Repair.** `Regressed` or `Failed` starts repair rounds, `--repair-attempts` (default 1, 0 disables). `failing_files` finds the files each check names (#373), `route_repairs` sends each to the unit that owns it, and the round's lanes run in parallel, each editing only its own files (#372). One extra lane takes unowned failures and timeouts, and may edit touched files no unit holds. Untouched files are never editable. Each round commits once and reruns every check. `Inconclusive` never triggers repair.
 
-`pact fleet` runs unrelated tasks across repositories (#388): `run_fleet` opens one `Orchestrator` per repository and one thread per task, all through `spawn_with_supervisor`, with one shared `Admission` and `Supervisor`. The file carries its own `[defaults]`, `[tiers]` and `[[task]]` list; the repositories' own `pact.toml` files are ignored. Fleet lanes are always process lanes. `report_contract` appends a five-field `STATUS:` report request, and `parse_worker_report` reads the last one; a missing report is `unreported`, which counts as not done. `pact land <id>` (#389) commits the workspace and runs `git merge --no-edit` in the user's checkout (fast-forward when possible, aborted on conflict, no Arbiter); `--pr` pushes and opens a pull request through `gh`. It refuses a live agent or a shared-tree member. `pact discard` is `teardown --force` plus a count. `pact list --json` serializes `Orchestrator::entries`, with `state` derived from the pid and run record.
+`pact fleet` runs unrelated tasks across repositories (#388): `run_fleet` opens one `Orchestrator` per repository and one thread per task, all through `spawn_with_supervisor`, with one shared `Admission` and `Supervisor`. The file carries its own `[defaults]`, `[tiers]` and `[[task]]` list; the repositories' own `pact.toml` files are ignored. Fleet lanes are always process lanes. `report_contract` appends a five-field `STATUS:` report request, and `parse_worker_report` reads the last one; a missing report is `unreported`, which counts as not done. `pact land <id>` (#389) commits the workspace and runs `git merge --no-edit` in the user's checkout (fast-forward when possible, aborted on conflict, no Arbiter); `--pr` pushes and opens a pull request through `gh`. It refuses a live agent or a single shared-tree lane; a batch, such as a `pact run` result, lands whole with its lanes removed (#440). `pact discard` is `teardown --force` plus a count. `pact list --json` serializes `Orchestrator::entries`, with `state` derived from the pid and run record.
 
 ```mermaid
 flowchart TD
@@ -45,6 +45,7 @@ flowchart TD
 - One repair lane fixing every failure from a 40-line output tail (#362): superseded by #372 and #373, per-unit lanes fed by failing-file excerpts.
 - Plan names and lane writes trusted (#305): superseded by #414 (name validation) and #409 (ownership check).
 - Running against a dirty checkout without notice (#305): superseded by #411, refused unless `--allow-dirty`.
+- `land` refused a shared-tree batch along with its lanes, and `pact run` pointed at `merge-all` (#389): superseded by #440, the batch lands whole.
 
 ## History
 
@@ -548,3 +549,17 @@ CLI 1.0.106 and then 1.0.114 (it updated itself between runs).
   was not produced: told by its brief to also edit a file another unit
   owned, Haiku declined and reported it as left undone, so the violation
   report is still exercised by the fake agent only.
+
+### Landing a whole batch (issue #440)
+
+`pact run` ends with one verified commit in a shared-tree batch, and its
+closing line used to point at `merge-all`, which builds a
+`pact/merged-*` branch elsewhere and leaves a second `git merge` to the
+user. `land` refused the batch along with its lanes. The #389 reason,
+that the worktree holds other lanes' work, is about landing one lane;
+landing the batch lands all of it, the one result the run verified. So
+`prepare_landing` now refuses only a lane, naming its batch, and a batch
+lands like any workspace. `remove_landed` removes the lanes before the
+batch, because the batch's own teardown refuses while lanes remain, and
+`refuse_while_running` checks every lane's agent, not only the batch's.
+`pact run`'s closing line names `pact land <batch>`.

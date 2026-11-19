@@ -93,19 +93,23 @@ fn pr_body(task: &str, report: Option<&WorkerReport>) -> String {
 impl Orchestrator {
     fn refuse_while_running(&self, id: &str) -> Result<()> {
         let workspace = self.workspaces.get_workspace(id)?;
-        if let Some(pid) = workspace.agent_pid.filter(|pid| agent_process_alive(*pid)) {
-            bail!(
-                "workspace {id}'s agent is still running (pid {pid}). Wait for it to finish, \
-                 or stop it and drop its work with `pact discard {id}`."
-            );
+        for member in std::iter::once(workspace).chain(self.workspaces.lanes_of(id)?) {
+            if let Some(pid) = member.agent_pid.filter(|pid| agent_process_alive(*pid)) {
+                bail!(
+                    "workspace {}'s agent is still running (pid {pid}). Wait for it to finish, \
+                     or stop it and drop its work with `pact discard {id}`.",
+                    member.id
+                );
+            }
         }
         Ok(())
     }
 
-    /// Lands one workspace: commits it, then either merges its branch into
-    /// the repository's checked-out branch and removes the workspace, or
-    /// with `pr` pushes the branch to `origin`, opens a pull request with
-    /// `gh`, and removes only the worktree.
+    /// Lands one workspace, or a whole shared-tree batch with its lanes:
+    /// commits it, then either merges its branch into the repository's
+    /// checked-out branch and removes the workspace, or with `pr` pushes
+    /// the branch to `origin`, opens a pull request with `gh`, and removes
+    /// only the worktree.
     pub fn land(&self, id: &str, pr: bool) -> Result<LandOutcome> {
         self.refuse_while_running(id)?;
         let outcome = if pr { self.land_as_pull_request(id)? } else { self.workspaces.land_workspace(id)? };
@@ -146,7 +150,7 @@ impl Orchestrator {
         outcome.pr_url =
             String::from_utf8_lossy(&created.stdout).lines().rev().find(|l| l.contains("://")).map(|l| l.trim().to_string());
         outcome.kind = LandKind::PullRequest;
-        self.workspaces.remove_workspace(id, true, false)?;
+        self.workspaces.remove_landed(id, true)?;
         Ok(outcome)
     }
 

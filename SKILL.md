@@ -43,8 +43,10 @@ pact run --agent copilot --plan saved-plan.json "Add Vitest tests for every file
   `--max-concurrent` caps lanes running together.
 - `--dry-run` plans and writes the briefs without spawning: show the user
   the plan, then run it (or their edit of it) with `--plan`.
-- The result is the batch branch named in the report; plans persist under
-  the state directory's `meta/plans/`.
+- The result is the batch named in the report. `pact diff <batch>` shows it;
+  `pact land <batch>` puts it on the user's checked-out branch (`--pr` opens
+  a pull request instead). Plans persist under the state directory's
+  `meta/plans/`.
 
 ## Lanes by hand
 

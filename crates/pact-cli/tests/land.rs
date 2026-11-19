@@ -174,6 +174,43 @@ fn land_pr_pushes_the_branch_and_leaves_the_workspace_when_gh_cannot_open_the_pu
 }
 
 #[test]
+fn land_takes_a_whole_shared_tree_batch_and_refuses_a_single_lane() {
+    let repo = init_repo("batch");
+    let shim = shim_dir();
+    let script = |path: &str, content: &str| serde_json::json!({ "writes": { path: content }, "summary": "done" }).to_string();
+    let (task_a, task_b) = (script("alpha.txt", "ALPHA"), script("beta.txt", "BETA"));
+    let spawn = pact(
+        &repo,
+        &shim,
+        &[
+            "spawn-many", "--agent", "claude", "--shared-tree", "--stagger-ms", "0", "--min-free-mem-mb", "0",
+            "--name", "lane-a", "--name", "lane-b", "--task", &task_a, "--task", &task_b,
+        ],
+    );
+    assert!(spawn.status.success(), "{}", text(&spawn));
+    let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
+    let batch = manager.list_workspaces().unwrap().into_iter().find(|w| w.shared_batch.is_none()).expect("a batch");
+
+    let lane = pact(&repo, &shim, &["land", "lane-a"]);
+    let out = text(&lane);
+    assert_eq!(lane.status.code(), Some(1), "{out}");
+    assert!(out.contains(&format!("Land the whole batch with `pact land {}`", batch.id)), "{out}");
+
+    let landed = pact(&repo, &shim, &["land", &batch.id]);
+    let out = text(&landed);
+    assert!(landed.status.success(), "{out}");
+    assert!(out.contains(&format!("landed {} on main: fast-forwarded 1 commit(s)", batch.id)), "{out}");
+    assert_eq!(std::fs::read_to_string(repo.join("alpha.txt")).unwrap(), "ALPHA");
+    assert_eq!(std::fs::read_to_string(repo.join("beta.txt")).unwrap(), "BETA");
+    assert!(!branch_exists(&repo, &batch.branch));
+    assert!(manager.list_workspaces().unwrap().is_empty(), "the lanes go with the batch");
+    assert_eq!(run_git(&repo, &["status", "--porcelain"]), "");
+
+    cleanup(&repo);
+    let _ = std::fs::remove_dir_all(&shim);
+}
+
+#[test]
 fn discard_removes_uncommitted_and_committed_work() {
     let repo = init_repo("discard");
     let shim = shim_dir();
