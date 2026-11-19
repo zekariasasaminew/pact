@@ -82,9 +82,11 @@ starts, and on the combined result. The pair decides the verdict:
 | fails | fails | inconclusive: cannot judge the run | 3 |
 | no baseline | fails | failed: repair lanes run | 1 if still failing |
 
-Workers check only their own files; the project-wide checks run once, by
+Workers check their own files before finishing, but only through the
+`run_check` coordination tool, which queues every check behind a few
+machine-wide slots (issue #461); the project-wide checks also run once, by
 pact, on the combined result. Twelve lanes each running a full type-check
-was the bottleneck pact removed this way (issue #361). Before committing,
+at once was the bottleneck (issue #361). Before committing,
 pact checks that each lane wrote only its own unit's files; a lane that
 wrote someone else's, or a file no unit owns, fails the run (exit 1) and
 is named in the report.
@@ -174,10 +176,13 @@ pact teardown <id>
   and skips (not aborts) a conflicting workspace for `pact resolve`.
 - `--dry-run` previews any spawn without creating or launching anything.
 
-Every agent gets seven coordination tools from pact's MCP server
-(`claim_files`, `release_files`, `send_message`, `check_messages`,
-`request_handoff`, `check_handoffs`, `respond_handoff`). Leases are
-advisory: they make overlapping work visible, they do not lock files.
+Every agent gets nine coordination tools from pact's MCP server
+(`claim_files`, `release_files`, `list_claims`, `send_message`,
+`check_messages`, `request_handoff`, `check_handoffs`, `respond_handoff`,
+`run_check`). Leases are advisory: they make overlapping work visible,
+they do not lock files. `run_check` runs a test, type-check or lint only
+while one of a few machine-wide check slots is free (`--check-slots`,
+default 2), so parallel lanes do not all run their checks at once.
 
 ## Configuration
 
@@ -201,6 +206,7 @@ prepare = ["npx next typegen"]
 | `min_free_mem_mb` | free memory required before another agent starts | 1500 |
 | `per_lane_reserve_mb` | memory held back for each running agent | 400 ACP, 1200 process |
 | `stagger_ms` | gap between agent launches | 2000 |
+| `check_slots` | lane checks (`run_check`) running at once on this machine; env `PACT_CHECK_SLOTS` | 2 |
 | `verify_timeout` | longest one `run` verification command may take (`90s`, `20m`, `1h`) | `20m` |
 
 ## Safety

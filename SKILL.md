@@ -34,7 +34,8 @@ pact run --agent copilot --plan saved-plan.json "Add Vitest tests for every file
   later wave after they are committed, and is skipped (exit 1) when one fails.
 - `--verify` is repeatable and names the project-wide checks. pact runs each
   once on the untouched tree (baseline) and once on the combined result;
-  workers check only their own files.
+  workers check their own files through the `run_check` tool, at most
+  `--check-slots` checks at once on the machine (default 2).
 - A regressed or failed check starts repair lanes in the same tree: each
   failing file goes to the unit that owns it, the units' lanes run in
   parallel, and failures in files no unit owns go to one extra lane.
@@ -86,11 +87,12 @@ pact teardown <workspace-id>
 
 ## Inside a lane: coordination tools
 
-Every lane gets seven MCP tools with no setup: `claim_files`,
-`release_files`, `send_message`, `check_messages`, `request_handoff`,
-`check_handoffs`, `respond_handoff`. Your CLI prefixes them (Claude Code:
-`mcp__pact-coord__claim_files`; Copilot CLI: `pact-coord-claim_files`), and
-the bare name fails lookup, so use the name in your own tool list.
+Every lane gets nine MCP tools with no setup: `claim_files`,
+`release_files`, `list_claims`, `send_message`, `check_messages`,
+`request_handoff`, `check_handoffs`, `respond_handoff`, `run_check`. Your
+CLI prefixes them (Claude Code: `mcp__pact-coord__claim_files`; Copilot
+CLI: `pact-coord-claim_files`), and the bare name fails lookup, so use the
+name in your own tool list.
 
 1. Claim the globs you will edit before writing.
 2. Leases are advisory: `accepted` is always true. Read `has_conflicts` and
@@ -101,6 +103,11 @@ the bare name fails lookup, so use the name in your own tool list.
    returns a typed status (`pending`, `accepted`, `rejected`, `narrowed`,
    `expired`, `cancelled`) and does not block: poll `check_handoffs`. To
    accept a narrowed offer, send a new `request_handoff` for those files.
+6. Run tests, type-checks and lints through `run_check`, not your shell.
+   It waits for a free machine-wide check slot, then returns `exit_code`
+   (null when killed at `timeout_seconds`), `timed_out`, `waited_ms`,
+   `ran_ms` and the output's last 200 lines. A failing check is a normal
+   result; read `exit_code`.
 
 ## Task-file templates
 

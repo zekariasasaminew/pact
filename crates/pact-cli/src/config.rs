@@ -27,6 +27,7 @@ struct Defaults {
     min_free_mem_mb: Option<u64>,
     stagger_ms: Option<u64>,
     per_lane_reserve_mb: Option<u64>,
+    check_slots: Option<usize>,
     runtime: Option<String>,
     model: Option<String>,
     verify_timeout: Option<String>,
@@ -86,6 +87,13 @@ impl PactConfig {
 
     pub fn default_stagger_ms(&self) -> Option<u64> {
         self.defaults.stagger_ms
+    }
+
+    /// `defaults.check_slots`, else the `PACT_CHECK_SLOTS` environment
+    /// variable: how many `run_check` commands run at once on this
+    /// machine (issue #461).
+    pub fn default_check_slots(&self) -> Option<usize> {
+        self.defaults.check_slots.or_else(|| std::env::var("PACT_CHECK_SLOTS").ok().and_then(|value| value.trim().parse().ok()))
     }
 
     /// `defaults.per_lane_reserve_mb`: memory each running lane is
@@ -207,10 +215,11 @@ mod tests {
         let dir = scratch_dir();
         std::fs::write(
             dir.join(PactConfig::FILE_NAME),
-            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\ndeps = \"link\"\nmax_concurrent = 3\nmin_free_mem_mb = 0\nstagger_ms = 500\nper_lane_reserve_mb = 900\n",
+            "[defaults]\nagent = \"copilot\"\nsafety = \"acceptEdits\"\ndeps = \"link\"\nmax_concurrent = 3\nmin_free_mem_mb = 0\nstagger_ms = 500\nper_lane_reserve_mb = 900\ncheck_slots = 4\n",
         )
         .unwrap();
         let config = PactConfig::load(&dir).unwrap();
+        assert_eq!(config.default_check_slots(), Some(4));
         assert_eq!(config.default_agent(), Some("copilot"));
         assert_eq!(config.default_safety(), Some("acceptEdits"));
         assert_eq!(config.default_deps(), Some("link"));

@@ -346,6 +346,15 @@ enum Command {
         #[arg(long)]
         per_lane_reserve_mb: Option<u64>,
 
+        /// Most `run_check` commands (tests, type-checks, lints a lane runs
+        /// through the coordination server) running at once on this
+        /// machine, across every pact process (issue #461); the rest wait
+        /// for a slot. Default 2. Falls back to `pact.toml`'s
+        /// `defaults.check_slots`, then the `PACT_CHECK_SLOTS` environment
+        /// variable.
+        #[arg(long)]
+        check_slots: Option<usize>,
+
         /// Run every lane in ONE shared worktree instead of one worktree
         /// per task (issue #315). For a batch whose tasks touch disjoint
         /// files this removes per-lane isolation and the entire merge
@@ -498,6 +507,10 @@ enum Command {
         stagger_ms: Option<u64>,
         #[arg(long)]
         per_lane_reserve_mb: Option<u64>,
+        /// Same as on spawn-many: most `run_check` commands running at
+        /// once on this machine (issue #461).
+        #[arg(long)]
+        check_slots: Option<usize>,
         #[arg(long)]
         runtime: Option<String>,
         /// Same as `spawn --prepare`: run in the shared tree before the
@@ -823,6 +836,10 @@ enum Command {
         agent_id: String,
         #[arg(long)]
         workspace: PathBuf,
+        /// Machine-wide `run_check` slots; omitted, resolved like
+        /// `spawn-many --check-slots`.
+        #[arg(long)]
+        check_slots: Option<usize>,
     },
     /// Print a shell completion script for `pact` to stdout -- e.g. `pact
     /// completions bash > /etc/bash_completion.d/pact` (or wherever your
@@ -916,7 +933,8 @@ fn main() -> Result<()> {
 
     let config = PactConfig::load(&repo_root)?;
 
-    if let Command::McpServe { agent_id, workspace } = cli.command {
+    if let Command::McpServe { agent_id, workspace, check_slots } = cli.command {
+        let check_slots = resolve_check_slots(check_slots, &config)?;
         // A current-thread runtime, not the default multi-threaded one --
         // see docs/design/coord.md ("mcp-serve startup latency", issue
         // #105) for why this matters specifically under concurrent
@@ -925,7 +943,7 @@ fn main() -> Result<()> {
         // real OS thread/CPU contention exactly when N of these subprocesses
         // start at once.
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        return runtime.block_on(pact_coord::serve(&repo_root, agent_id, workspace));
+        return runtime.block_on(pact_coord::serve(&repo_root, agent_id, workspace, check_slots));
     }
 
     let orchestrator = Orchestrator::open(repo_root)?;
@@ -997,6 +1015,7 @@ fn main() -> Result<()> {
                 prepare: &prepare,
                 model: model.as_deref(),
                 report_contract: false,
+                check_slots: resolve_check_slots(None, &config)?,
             };
             let (workspace, outcome) = orchestrator.spawn(kind, &task, name.as_deref(), &spawn_options, |event| {
                 print_event(event, verbose)
@@ -1026,6 +1045,7 @@ fn main() -> Result<()> {
             min_free_mem_mb,
             stagger_ms,
             per_lane_reserve_mb,
+            check_slots,
             shared_tree,
             allow_overlap,
             runtime,
@@ -1037,6 +1057,7 @@ fn main() -> Result<()> {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;
             let prepare = resolve_prepare(prepare, &config);
+            let check_slots = resolve_check_slots(check_slots, &config)?;
             // The reserve default depends on what a lane is (issue #332): a
             // whole agent process, or a session sharing one. That is only
             // known once the batch's agents are, below.
@@ -1188,6 +1209,7 @@ fn main() -> Result<()> {
                 prepare: &prepare,
                 model: None,
                 report_contract: false,
+                check_slots,
             };
             let results = orchestrator.spawn_many(batch, &spawn_options, |index, agent, event| {
                 print_event_labeled(&format!("{}:{index}", agent_label(*agent)), event, verbose);
@@ -1269,6 +1291,7 @@ fn main() -> Result<()> {
             min_free_mem_mb,
             stagger_ms,
             per_lane_reserve_mb,
+            check_slots,
             runtime,
             prepare,
             model,
@@ -1298,6 +1321,7 @@ fn main() -> Result<()> {
             let deps = resolve_deps_mode(deps, no_deps, &config)?;
             let requested_runtime = resolve_runtime(runtime, &config)?;
             let prepare = resolve_prepare(prepare, &config);
+            let check_slots = resolve_check_slots(check_slots, &config)?;
             let agent_name = resolve_default_agent(agent, &config)
                 .ok_or_else(|| anyhow::anyhow!("no agent given: pass --agent or set defaults.agent in pact.toml"))?;
             let kind = AgentKind::parse(&agent_name).ok_or_else(|| {
@@ -1345,6 +1369,7 @@ fn main() -> Result<()> {
                 prepare: &prepare,
                 model: model.as_deref(),
                 report_contract: false,
+                check_slots,
             };
             let run_options = pact_core::run::RunOptions {
                 agent: kind,
@@ -2745,6 +2770,7 @@ fn run_init(repo_root: &Path, force: bool, register_skill: bool) -> Result<()> {
          # min_free_mem_mb = 1500  # spawn-many: wait for this much free memory before each launch; 0 disables\n\
          # stagger_ms = 2000  # spawn-many: minimum gap between two launches\n\
          # per_lane_reserve_mb = 1200  # spawn-many: memory each running agent is reserved to grow into; default 1200 (process) or 400 (acp); 0 disables\n\
+         # check_slots = 2  # run/spawn-many: run_check commands (lane tests, type-checks, lints) running at once on this machine\n\
          # runtime = \"auto\"  # auto (acp when every agent in the batch supports it, else process), process, or acp\n\
          # prepare = [\"npx next typegen\"]  # shell commands run in every new workspace after dependency prep, for generated gitignored files\n\
          # model = \"sonnet\"  # --model for every agent when neither --model nor --tier is given\n\
@@ -2917,6 +2943,15 @@ fn resolve_runtime(flag: Option<String>, config: &PactConfig) -> Result<pact_cor
         Some(value) => pact_core::LaneRuntime::parse(value)
             .ok_or_else(|| anyhow::anyhow!("--runtime: unknown value '{value}' (expected auto, process or acp)")),
         None => Ok(pact_core::LaneRuntime::Auto),
+    }
+}
+
+/// `--check-slots`, then `defaults.check_slots`, then `PACT_CHECK_SLOTS`,
+/// then 2 (issue #461).
+fn resolve_check_slots(flag: Option<usize>, config: &PactConfig) -> Result<usize> {
+    match flag.or_else(|| config.default_check_slots()).unwrap_or(pact_coord::DEFAULT_CHECK_SLOTS) {
+        0 => bail!("--check-slots must be at least 1"),
+        slots => Ok(slots),
     }
 }
 

@@ -71,7 +71,7 @@ pub fn prunable_dirs(cutoff: std::time::SystemTime) -> Result<Vec<PrunableDir>> 
     let mut found = Vec::new();
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        if !path.is_dir() {
+        if !path.is_dir() || entry.file_name() == crate::checks::CHECK_SLOTS_DIR {
             continue;
         }
         let repo = std::fs::read_to_string(path.join(OWNER_FILE)).ok().map(|text| PathBuf::from(text.trim()));
@@ -277,6 +277,9 @@ mod tests {
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         let ours = |found: &[PrunableDir]| found.iter().any(|d| d.path == dir);
         assert!(!ours(&prunable_dirs(later).unwrap()), "the repository still exists");
+        let slots = crate::checks::slot_dir().unwrap();
+        std::fs::create_dir_all(&slots).unwrap();
+        assert!(!prunable_dirs(later).unwrap().iter().any(|d| d.path == slots), "check slots are machine-wide, not a repository's (issue #461)");
         std::fs::remove_dir_all(&repo_root).unwrap();
         assert!(!ours(&prunable_dirs(std::time::SystemTime::UNIX_EPOCH).unwrap()), "too recent for the cutoff");
         let found = prunable_dirs(later).unwrap();

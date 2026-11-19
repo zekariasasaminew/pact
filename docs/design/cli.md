@@ -1049,3 +1049,14 @@ collapsed, cut on a character boundary to 160 characters including the
 terminal lines. Nothing is lost: the full text stays in the lane log,
 the run record and `pact inspect`. `pact ui` shows the full report in
 its own panel and is unchanged.
+
+### An 8 MiB main-thread stack on Windows (issue #461)
+
+Adding `--check-slots` to `run` and `spawn-many` made every debug-build
+`pact` command, `--version` included, die with "thread 'main' has
+overflowed its stack" on Windows. The main thread there gets 1 MiB, and
+the debug-build frames on the way through `main` and clap's derived
+parser had grown to slightly under it; patching the built binary's stack
+reserve to 1.1 MiB was enough. `build.rs` now links the `pact-cli`
+binaries with an 8 MiB stack on Windows, the common Unix default, so the
+next flag does not trip the same limit.
