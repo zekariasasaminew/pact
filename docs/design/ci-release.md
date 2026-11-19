@@ -8,7 +8,7 @@ Three GitHub workflows, one test harness and two package-manager listings make u
 - **`release.yml`** (a pushed `v*` tag): builds `pact` for x86_64 Windows, x86_64 Linux, x86_64 macOS and aarch64 macOS and publishes the versioned release. There is no Linux aarch64 build. Cut manually, when a headline feature merges.
 - **`edge-release.yml`** (every push to `main` and manual dispatch): same four targets, builds with `PACT_EDGE_SHA` set, force-moves the `edge` tag and republishes one rolling prerelease; `cancel-in-progress` keeps overlapping pushes from colliding. It is additive and leaves `release.yml` alone.
 - **Version string** (#86): `pact-cli/build.rs` turns `PACT_EDGE_SHA` into `PACT_VERSION`, so an edge build reports `<version>-edge.<short sha>` and a tagged build reports the plain Cargo version.
-- **Packaging** (#125, #126): the Homebrew personal tap `zekariasasaminew/homebrew-pact` and the winget manifest `zekariasasaminew.pact` (PR microsoft/winget-pkgs#407420) both pin v0.3.0 and are bumped by hand per release. Neither was live-verified with a real `brew install` or `winget install`. The winget PR needs the account owner to sign the Microsoft CLA.
+- **Packaging** (#125, #126): the Homebrew personal tap `zekariasasaminew/homebrew-pact` and the winget package `zekariasasaminew.pact` both serve v0.5.0, bumped by hand per release. winget is live-verified: `winget install` gives a working `pact 0.5.0`. The tap has not been through a real `brew install`.
 
 Tests and the test environment:
 - **Fake agent harness** (#157): `crates/pact-cli/src/bin/fake_agent.rs` impersonates Claude Code. Its `-p` argument is a JSON script (`writes`, `sleep_ms`, `summary`, `success`, `exit_code`) and it prints real `stream-json`. Tests in `fake_agent_e2e.rs` copy it onto a scratch `PATH` as `claude` and run the real `pact` binary, so spawn, stream, parse, commit, merge and teardown run for real at no cost. Tests never launch a real agent CLI. Arbiter round-trip scenarios through the fake agent are not covered.
@@ -38,6 +38,7 @@ flowchart TD
 - Releases only on a `v*` tag: supplemented, not replaced, by the rolling `edge` prerelease. `cargo-dist` and raw CI artifacts were considered and rejected.
 - The #195 fix patched only `demo::run`'s cleanup; the test suite's own leak (about 5800 directories) was fixed separately in #225.
 - Homebrew and winget automated bumps (WinGet Releaser, a tap workflow) are noted as follow-ups, not built.
+- The winget PR waiting on the owner's CLA (#126): merged 2026-08-20; the package has since reached 0.5.0.
 
 ## History
 
@@ -356,3 +357,14 @@ owned-`String` concatenation in a `const` context without a crate like
 `const_format`), so computing the final string at build time and handing
 it to the binary via `env!` was the simplest path that needed no new
 dependency.
+
+### Packaging status check (2026-11-18)
+
+The tap's formula still pinned 0.3.0 while v0.5.0 was the latest
+release; it now points at the v0.5.0 assets, with SHA-256 sums taken
+from the downloaded tarballs (each holds `pact` at its root), and its
+description no longer says worktrees (zekariasasaminew/homebrew-pact#1).
+Still not run through `brew install`. winget needed nothing: the first
+manifest PR merged on 2026-08-20, `winget show zekariasasaminew.pact`
+lists 0.5.0, and the copy winget installed on the Windows dev machine
+reports `pact 0.5.0`.
