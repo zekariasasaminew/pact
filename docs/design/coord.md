@@ -4,16 +4,17 @@
 
 `pact-coord` is the advisory coordination layer between agents in one repo session: glob-based, TTL-expiring file leases plus a threaded message log and a typed handoff protocol. It never blocks or enforces anything; it records and reports. It is an MCP server (`rmcp`) backed by one SQLite database per repo. The database lives under the platform data directory keyed by a hash of the repo root, not under `.pact-<repo>/`, so a stray relative path in a workspace cannot reach it. `PACT_COORD_DIR` overrides the root, each directory records its repo in `repo.txt`, and `pact gc` removes directories whose repo is gone (#416). Opens use WAL plus a 5 s `busy_timeout` because every agent runs its own process against the same file.
 
-**Tools (8).** `claim_files`, `release_files`, `list_claims`, `send_message`, `check_messages`, `request_handoff`, `check_handoffs`, `respond_handoff`.
+**Tools (9).** `claim_files`, `release_files`, `list_claims`, `send_message`, `check_messages`, `request_handoff`, `check_handoffs`, `respond_handoff`, `run_check`.
 - `claim_files` always records the claim and returns `accepted: true` with `has_conflicts` and the `conflicts` list. `fail_on_conflict: true` instead returns an error before writing anything (#162). Claims are deduplicated per holder and pattern, `ttl_seconds` is bounded to (0, 24h] (default 15 min), and release matches by exact pattern or by glob overlap on disk (#31, #32, #36, #30). A literal path that does not exist yet resolves to itself so two agents claiming the same new file still conflict (#235). `list_claims` returns every active lease (#149).
 - Messages use per-agent read cursors, so broadcasts reach each recipient once. `check_messages` skips the caller's own broadcasts (#25).
 - Handoffs follow a Contract Net shape: `pending` to `accepted`, `rejected`, `narrowed` (with `narrowed_files`), `expired` or `cancelled`. Nothing blocks, callers poll. Rows mutate in place, so the cursor tracks `activity_seq`, not row id. Expiry is lazy, a requester only sees its own request once it leaves `pending`, and `pact teardown` cancels pending requests addressed to the removed workspace (#163).
+- `run_check { command, timeout_seconds? }` is the one tool that waits (#461). It takes one of N machine-wide check slots, OS file locks on `<coord root>/check-slots/slot-<i>.lock` shared by every pact process (and skipped by `pact gc`), polling every 500 ms while all are held, then runs the command through `cmd /S /C` or `sh -c` in the lane's tree with `CI=true` and stdin closed, and kills the process tree at the timeout (default 600 s, at most 1800). It returns `exit_code`, `timed_out`, `waited_ms`, `ran_ms`, `slots` and the last 200 lines (20,000 characters) of combined output; a failing check is a normal result. N comes from `--check-slots` on `run`/`spawn-many`, `defaults.check_slots`, `PACT_CHECK_SLOTS`, then 2, and reaches `mcp-serve` as `--check-slots` and the HTTP server as an argument. Each call logs a `check` operation.
 
 **Transports.** The process runtime launches `pact mcp-serve` per agent over stdio. A line-level shim answers any request before `initialize` with -32601 so Copilot's `server/discover` probe does not kill the handshake (#291). The ACP runtime instead runs `pact_coord::http::serve` inside the orchestrating process: one Streamable HTTP server on `127.0.0.1:0`, one route `/lanes/<agent-id>` per lane added with `add_lane`, so identity comes from the URL and the model never chooses it (#329).
 
-**Observability.** `operations` is an append-only log (`claim`, `release`, `broadcast`, `message`, `coord_connect`, `merge_all`, `arbiter_decision`, `teardown`, `conflict_resolve`) behind `pact history` (#84, #235). `pact coord-status` reads leases, pending counts and connected agents without moving any cursor, and warns when a finished workspace never connected (#64, #235). `conflicts` stores unresolved `merge-all` conflicts (`open`, `resolved`, `abandoned`) for `pact resolve` (#85). `pact clear-leases` wipes all leases on request (#209).
+**Observability.** `operations` is an append-only log (`claim`, `release`, `broadcast`, `message`, `check`, `coord_connect`, `merge_all`, `arbiter_decision`, `teardown`, `conflict_resolve`) behind `pact history` (#84, #235, #461). `pact coord-status` reads leases, pending counts and connected agents without moving any cursor, and warns when a finished workspace never connected (#64, #235). `conflicts` stores unresolved `merge-all` conflicts (`open`, `resolved`, `abandoned`) for `pact resolve` (#85). `pact clear-leases` wipes all leases on request (#209).
 
-**Clients.** Python and TypeScript SDKs (`bindings/`) wrap the official MCP client SDKs, spawn `pact mcp-serve` and raise `PactCoordError` on `isError`; they are repo-local and mirror the tool surface (#127). The VS Code extension renders `pact history --json` (#128).
+**Clients.** Python and TypeScript SDKs (`bindings/`) wrap the official MCP client SDKs, spawn `pact mcp-serve` and raise `PactCoordError` on `isError`; they are repo-local and mirror the tool surface except `run_check` (#127, #461). The VS Code extension renders `pact history --json` (#128).
 
 **Known limits.** `expand_glob` walks the whole workspace on every call (#72). A wildcard that matches nothing on disk cannot conflict (#235). Some agents still end up without a connected `pact-coord` under concurrent launches, an open issue made rarer by #184 (#105). The `operations` table has no retention.
 
@@ -21,7 +22,7 @@
 flowchart TD
     A["Agent CLI"] -->|"stdio, process runtime"| B["pact mcp-serve"]
     A2["ACP lane"] -->|"HTTP /lanes/agent-id"| C["http::serve in orchestrator"]
-    B --> D["CoordServer<br/>8 tools"]
+    B --> D["CoordServer<br/>9 tools"]
     C --> D
     D --> E[("SQLite, WAL<br/>leases, messages, handoffs")]
     D --> F[("operations log")]
@@ -40,7 +41,7 @@ flowchart TD
 - Reusing `messages`' id-based cursor for handoffs: superseded within #163 by `activity_seq`.
 - Coord database cleanup left to nothing: superseded by `PACT_COORD_DIR`, `repo.txt` and `pact gc` (#416).
 - "No standing network-facing coordination server" (SDK design, #127): superseded for the orchestrator by the loopback HTTP server (#329). The SDKs still speak stdio only.
-- SDK "four methods": superseded as the tool surface grew to eight (#149, #163).
+- SDK "four methods": superseded as the tool surface grew to eight (#149, #163), then nine with `run_check` (#461), which the SDKs do not wrap.
 - `expand_glob` returning nothing for a not-yet-created literal path: superseded by self-resolution (#235).
 - A multi-threaded tokio runtime for `mcp-serve`: replaced by a current-thread runtime (#105), which did not change the connection-status failure rate.
 - Strategic question of keeping advisory leases at all versus `pact conflicts` diffing: undecided, tracked on #227.
@@ -875,3 +876,47 @@ database), so its database is not opened at all, which covers every
 directory past the default 7-day cutoff; and age ignores `-shm` files
 and empty `-wal` files. The same dry run now takes 3 s and finds the
 same 6,405 directories.
+
+### run_check and check slots (issue #461)
+
+Decided on #371 and #320: a check-slot tool rather than a shared
+incremental check service or a pause/resume memory governor. Arm R5
+showed workers barred from type-check and lint ship broken code (136
+lint errors, a tsc syntax error); arm R3 showed every lane running them
+at once costs 80 to 150 s per eslint call; arm P showed 8 lanes peaking
+together left 112 MB free. All three come from unbounded concurrent
+checks, not from checks as such, so `run_check` bounds the concurrency
+and gives the feedback back.
+
+Slots are OS file locks (`File::try_lock`) on `check-slots/slot-<i>.lock`
+under `coord_root()`, not rows in a repo's database: the limit is the
+machine's, so two batches in two repositories share it, and the OS
+releases a lock when its holder dies, so a crashed agent never leaks a
+slot and nothing has to expire. The lock files are never deleted, and
+`prunable_dirs` skips `check-slots`, since it has no `repo.txt` and would
+otherwise look like an orphaned coordination directory; on Unix a
+deleted lock file would let the next caller lock a new inode while the
+old holder still runs. The wait is a 500 ms `tokio::time::sleep` poll
+over the N files, and the command runs on `tokio::process`: `mcp-serve`
+is a current-thread runtime (#105) and the HTTP server serves every ACP
+lane from two worker threads, so a blocking wait in one lane's call
+would stall every other lane's tools. Stdout and stderr are read
+concurrently into one buffer, so the tail is in arrival order; only the
+last megabyte is kept while it runs. When the shell exits but something
+it started still holds the pipes, reading stops after 2 s.
+
+On Windows the command goes to cmd as `/S /C "<command>"` through
+`raw_arg`, so quotes a model writes reach cmd unchanged; Rust's own
+argument quoting would have escaped them. The timeout kills the tree
+with `taskkill /T /F` on Windows and `kill -KILL -<pgid>` on Unix, where
+the shell is started in its own process group; pact-coord does not
+depend on pact-agents, whose group-kill helper is synchronous.
+
+A non-zero exit is a normal result (`isError: false`); `isError` is
+reserved for a bad timeout, an empty command, or a command that cannot
+start, matching the other tools' convention. N is a server parameter
+(`CoordServer::with_check_slots`), passed to `pact mcp-serve` as
+`--check-slots` and to `http::serve` for ACP lanes. `pact spawn`
+resolves it from `pact.toml` and the environment like `run`, as does an
+`mcp-serve` started without the flag (the SDKs); `pact fleet` and `pact
+ui` use the default.

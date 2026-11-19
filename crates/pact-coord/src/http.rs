@@ -50,6 +50,7 @@ type LaneService = StreamableHttpService<CoordServer, LocalSessionManager>;
 #[derive(Clone)]
 struct Registry {
     repo_root: PathBuf,
+    check_slots: usize,
     cancel: CancellationToken,
     lanes: Arc<RwLock<HashMap<String, LaneService>>>,
 }
@@ -78,12 +79,13 @@ impl HttpCoordServer {
     /// would. Registering an id again replaces the previous route.
     pub fn add_lane(&self, lane: LaneRoute) -> String {
         let repo_root = self.registry.repo_root.clone();
+        let check_slots = self.registry.check_slots;
         let agent_id = lane.agent_id.clone();
         let workspace_root = lane.workspace_root;
         let service = StreamableHttpService::new(
             move || {
                 let conn = crate::db::open(&repo_root).map_err(|err| std::io::Error::other(format!("{err:#}")))?;
-                Ok(CoordServer::new(conn, agent_id.clone(), workspace_root.clone()))
+                Ok(CoordServer::new(conn, agent_id.clone(), workspace_root.clone()).with_check_slots(check_slots))
             },
             Arc::new(LocalSessionManager::default()),
             StreamableHttpServerConfig { cancellation_token: self.registry.cancel.child_token(), ..Default::default() },
@@ -134,9 +136,15 @@ async fn dispatch(State(registry): State<Registry>, request: Request<Body>) -> R
 
 /// Binds `bind` (use port 0 for an ephemeral port) and serves pact-coord
 /// for `repo_root` until [`HttpCoordServer::shutdown`]. Lanes are added
-/// with [`HttpCoordServer::add_lane`].
-pub async fn serve(repo_root: &Path, bind: SocketAddr) -> Result<HttpCoordServer> {
-    let registry = Registry { repo_root: repo_root.to_path_buf(), cancel: CancellationToken::new(), lanes: Arc::default() };
+/// with [`HttpCoordServer::add_lane`]; every lane's `run_check` shares the
+/// machine's `check_slots` (issue #461).
+pub async fn serve(repo_root: &Path, bind: SocketAddr, check_slots: usize) -> Result<HttpCoordServer> {
+    let registry = Registry {
+        repo_root: repo_root.to_path_buf(),
+        check_slots,
+        cancel: CancellationToken::new(),
+        lanes: Arc::default(),
+    };
     let router = axum::Router::new().fallback(dispatch).with_state(registry.clone());
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -178,7 +186,7 @@ mod tests {
         let transport = StreamableHttpClientTransport::from_uri(url);
         let client = ().serve(transport).await.expect("MCP handshake over HTTP");
         let tools = client.list_tools(Default::default()).await.unwrap();
-        assert!(tools.tools.iter().any(|t| t.name == "claim_files"), "tools: {:?}", tools.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>());
+        assert!(["claim_files", "run_check"].iter().all(|name| tools.tools.iter().any(|t| t.name == *name)), "tools: {:?}", tools.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>());
         let result = client
             .call_tool(CallToolRequestParams {
                 meta: None,
@@ -199,7 +207,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn each_lane_route_acts_as_its_own_agent() {
         let repo_root = temp_repo("two-lanes");
-        let server = serve(&repo_root, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let server = serve(&repo_root, "127.0.0.1:0".parse().unwrap(), crate::DEFAULT_CHECK_SLOTS).await.unwrap();
         assert_ne!(server.local_addr().port(), 0, "an ephemeral port must be reported");
         // Lanes join after the server is up, as spawn-many's threads will.
         let url_a = server.add_lane(LaneRoute { agent_id: "lane-a".into(), workspace_root: repo_root.clone() });
@@ -233,7 +241,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unknown_or_removed_lane_path_is_not_found() {
         let repo_root = temp_repo("unknown");
-        let server = serve(&repo_root, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let server = serve(&repo_root, "127.0.0.1:0".parse().unwrap(), crate::DEFAULT_CHECK_SLOTS).await.unwrap();
         let url_a = server.add_lane(LaneRoute { agent_id: "lane-a".into(), workspace_root: repo_root.clone() });
 
         let transport = StreamableHttpClientTransport::from_uri(server.lane_url("nobody"));

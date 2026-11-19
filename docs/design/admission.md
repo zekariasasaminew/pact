@@ -16,7 +16,9 @@ Defaults, from `AdmissionPolicy::for_runtime`: `max_concurrent` 2, `min_free_mem
 
 The same arithmetic sizes `pact run` plans (#356): `lanes_that_fit` counts the lanes whose reserves fit above the floor, plus one, exactly as `decide` will at launch time. `suggested_units` caps that by logical cores and clamps it to 2..16.
 
-Limits kept on purpose: no cap on a test runner's own parallelism, no coordination across two concurrent `pact` invocations on different repos (each batch has its own `Admission`, except `pact fleet`, which shares one across repositories), and no steady-state governor that pauses a lane that outgrows its reserve (open on #320). The reserve is a projection and double-counts a lane that has already grown, which errs toward fewer lanes.
+Limits kept on purpose: no cap on a test runner's own parallelism, no coordination across two concurrent `pact` invocations on different repos (each batch has its own `Admission`, except `pact fleet`, which shares one across repositories), and no steady-state governor that pauses a lane that outgrows its reserve. The reserve is a projection and double-counts a lane that has already grown, which errs toward fewer lanes.
+
+Concurrent checks, the memory peaks #320 measured, are bounded separately and machine-wide: lanes run their tests, type-checks and lints through pact-coord's `run_check`, which waits for one of `--check-slots` OS-lock slots (default 2) shared by every pact process (#461, see coord.md). That is what #320's "cap on concurrent verification commands" proposed; the pause/resume governor is not built.
 
 ```mermaid
 flowchart TD

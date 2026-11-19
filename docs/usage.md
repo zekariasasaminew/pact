@@ -61,7 +61,9 @@ those units' repair lanes run in parallel, a failure no unit owns goes to
 one extra lane, and `--repair-attempts` bounds the rounds. Before the
 commit pact also checks ownership: a lane that wrote another unit's file,
 or a file no unit owns, is named with the file and its owner, and the
-run fails (exit 1) without reverting anything.
+run fails (exit 1) without reverting anything. Workers check their own
+files before finishing, but only through the `run_check` tool, which
+queues checks behind a machine-wide limit (`--check-slots`, below).
 The shared tree, its
 dependencies and those baselines are prepared while the planner works.
 Plans and briefs are
@@ -279,8 +281,8 @@ pact list                          # [dirty]/[clean] per workspace, plus agent p
 `spawn` creates the worktree, prepares dependencies, then launches the
 chosen agent CLI (`--agent claude` by default) headlessly -- with a
 generated coordination config giving it `claim_files`/`release_files`/
-`send_message`/`check_messages`/`request_handoff`/`check_handoffs`/
-`respond_handoff` tools automatically, no extra setup needed -- and
+`list_claims`/`send_message`/`check_messages`/`request_handoff`/
+`check_handoffs`/`respond_handoff`/`run_check` tools automatically, no extra setup needed -- and
 blocks until it finishes, streaming `[init]`/`[coord]`/`[assistant]`/
 `[tool]`/`[other]` lines live and printing a final done/failed summary.
 
@@ -394,8 +396,21 @@ memory, or `--min-free-mem-mb 0` to disable the memory check. Without
 the flag or a `pact.toml` value, the `PACT_MIN_FREE_MEM_MB` environment
 variable sets the floor, which suits CI and containers.
 
+Checks are paced too (issue #461). A lane runs its tests, type-checks and
+lints through the `run_check` coordination tool, which runs the command
+only while one of `--check-slots` machine-wide slots is free (default 2)
+and queues it otherwise; the slots are shared by every pact process on
+the machine, so two batches do not double the number of test suites
+running at once. `run_check` runs the command in the lane's tree with
+`CI=true` and stdin closed, kills its whole process tree at its timeout
+(default 10 minutes, at most 30), and returns the exit code, how long it
+waited and ran, and the last 200 lines of output. `--check-slots` is on
+`run` and `spawn-many`; without it, `pact.toml`'s `defaults.check_slots`,
+then the `PACT_CHECK_SLOTS` environment variable, then 2 apply.
+
 ```sh
 pact spawn-many --agent copilot --task "..." --task "..." --task "..." --max-concurrent 3
+pact spawn-many --agent copilot --task "..." --task "..." --check-slots 1
 ```
 
 **`--shared-tree` runs every lane in one worktree instead of one per

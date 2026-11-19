@@ -12,7 +12,7 @@ http = ["rmcp/transport-streamable-http-server", "dep:axum", "dep:tokio-util", "
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 rmcp.workspace = true
 rusqlite.workspace = true
 globset.workspace = true

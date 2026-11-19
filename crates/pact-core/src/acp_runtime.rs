@@ -88,7 +88,7 @@ pub(crate) struct CoordHttp {
 }
 
 impl CoordHttp {
-    fn start(repo_root: &Path) -> Result<Self> {
+    fn start(repo_root: &Path, check_slots: usize) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("pact-coord-http")
@@ -96,7 +96,7 @@ impl CoordHttp {
             .build()
             .context("starting the coordination server's runtime")?;
         let server = runtime
-            .block_on(pact_coord::http::serve(repo_root, "127.0.0.1:0".parse().unwrap()))
+            .block_on(pact_coord::http::serve(repo_root, "127.0.0.1:0".parse().unwrap(), check_slots))
             .context("starting the in-process coordination server")?;
         Ok(CoordHttp { runtime, server })
     }
@@ -164,9 +164,10 @@ impl AcpBatch {
         homes_dir: &Path,
         agents: &[AgentKind],
         lean: bool,
+        check_slots: usize,
         on_event: &mut impl FnMut(&AgentEvent),
     ) -> Result<Self> {
-        let coord = CoordHttp::start(repo_root)?;
+        let coord = CoordHttp::start(repo_root, check_slots)?;
         let mut runtimes = HashMap::new();
         let mut launches = HashMap::new();
         let batch_tag = uuid::Uuid::new_v4().to_string()[..8].to_string();

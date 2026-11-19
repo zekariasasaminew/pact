@@ -10,7 +10,7 @@ Steps, in order:
 2. **Plan.** `plan_task` runs the planner in the repo root with no workspace through `converse`: one ACP session in a throwaway process when the agent has ACP, else fresh headless processes. `planner_prompt` carries the rules, the JSON shape, up to six tracked test files to imitate (`discover_test_anchors`) and a unit count. Workers get the task verbatim, so the prompt tells the planner to restate nothing and keep briefs to two or three sentences (#347, #352). A planner that modifies the repo is refused. Every update goes to `logs/planner-<stamp>.jsonl` with a `t` timestamp (#348, #358).
 3. **Validate.** `validate_plan` (pure) rejects shared files, duplicate or unsafe names (`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 48 characters, unique by slug, #414), absolute or `..` paths, empty briefs, too many units, and `depends_on` naming an unknown unit, the unit itself or a cycle (#462). Violations go back to the same conversation, up to `--plan-retries` (default 2, #413). Under the process runtime the retry resends the whole prompt.
 4. **Size and prepare.** Unit count and `--max-concurrent` default from `suggested_units` and the unit count (see admission, #356). While the planner works, the shared tree, its dependency prep and the baselines are prepared on a second thread (#353). `prepare` commands run once per tree (#301).
-5. **Execute, in waves.** `render_brief` gives every unit its files, the planner's words and `shared_context`, the units it depends on with their files (already committed, read-only), and rules. When the plan has project-wide checks the brief tells workers not to run them and to run only scoped checks, since pact runs them once on the combined result (#361). The batch is a shared tree under the default runtime (#315, #337). `wave_groups` puts a unit with no `depends_on` in wave 1 and any other one wave after its latest dependency (#462); each wave is one `spawn_many_in` call into the batch. A unit depending, directly or not, on a failed lane is skipped, reported, and fails the run. A plan without `depends_on` is one wave, as before.
+5. **Execute, in waves.** `render_brief` gives every unit its files, the planner's words and `shared_context`, the units it depends on with their files (already committed, read-only), and rules. Workers run every check only through the `run_check` tool of `pact-coord`, which queues it behind a machine-wide slot limit, and before finishing type-check and lint their own files and run their own tests (and the unit's `verify`) through it; when the plan has project-wide checks the brief also says pact runs them once on the combined result (#461, replacing #361's "do not run them"). The batch is a shared tree under the default runtime (#315, #337). `wave_groups` puts a unit with no `depends_on` in wave 1 and any other one wave after its latest dependency (#462); each wave is one `spawn_many_in` call into the batch. A unit depending, directly or not, on a failed lane is skipped, reported, and fails the run. A plan without `depends_on` is one wave, as before.
 6. **Ownership check and commit, per wave.** After a wave's units finish and before its commit, `changed_since` the wave's starting commit is compared with the plan (#409): unowned files from the tree, cross-unit writes from ACP `locations` in the lane log, and for process lanes from hashes of each unit's files. Violations fail the run (exit 1), nothing is reverted, and later waves still run. Each wave is committed, so the next starts from its work.
 7. **Verify.** `verify` is a list (`--verify` is repeatable and replaces the plan's list, #360). Each command has a baseline on the untouched tree and a verdict after: pass/pass `Passed`, fail/pass `Fixed`, pass/fail `Regressed`, fail/fail `Inconclusive` (exit 3), fail with no baseline `Failed`. `worst_verdict` sets the exit code. Each command runs under `--verify-timeout` (default 20 min) with `CI=true`, stdin closed, output to `meta/verify/<run>/`, and its process tree is killed at the deadline (#410). A timed-out baseline counts as no baseline.
 8. **Repair.** `Regressed` or `Failed` starts repair rounds, `--repair-attempts` (default 1, 0 disables). `failing_files` finds the files each check names (#373), `route_repairs` sends each to the unit that owns it, and the round's lanes run in parallel, each editing only its own files (#372). One extra lane takes unowned failures and timeouts, and may edit touched files no unit holds. Untouched files are never editable. Each round commits once and reruns every check. `Inconclusive` never triggers repair.
@@ -49,6 +49,7 @@ flowchart TD
 - Running against a dirty checkout without notice (#305): superseded by #411, refused unless `--allow-dirty`.
 - `land` refused a shared-tree batch along with its lanes, and `pact run` pointed at `merge-all` (#389): superseded by #440, the batch lands whole.
 - One wave only, with dependent units left to #282's 12-piece epic: closed for this. #462 runs units in waves by `depends_on`.
+- Workers told not to run the project-wide checks or any whole test suite, type-check or lint (#361): superseded by #461, every check runs through `run_check` under machine-wide slots and workers check their own files before finishing.
 
 ## History
 
@@ -627,3 +628,21 @@ waves run one after another and each costs wall-clock time. The fake
 ACP agent gained `require_files`, which ends a turn with `refusal` when
 a file is missing, so the end-to-end test proves a second-wave lane sees
 the first wave's file.
+### Workers check through run_check (issue #461)
+
+Arm R5 (#371) showed what #361's rule cost: workers that never saw a
+type or lint error shipped 136 lint errors and a tsc syntax error, and
+the repair lane could not close them all. Arm R3 had shown the opposite
+extreme, every lane running eslint at once at 80 to 150 s a call. The
+rule now sits between them: a worker runs every check, project-wide ones
+included, but only through pact-coord's `run_check`, which holds it until
+one of the machine's check slots is free (see coord.md, "run_check and
+check slots"). Before finishing it type-checks and lints the files it
+owns and runs its own tests (and the unit's `verify`) through the tool;
+when the plan has project-wide checks the brief still names them and
+says pact runs them once on the combined result, so the baseline verdict
+is unchanged. The brief names the tool with the `pact-coord` server name
+and the Copilot-style `pact-coord-run_check` example, as the shared-tree
+preamble does for `claim_files`; every adapter uses that server name.
+With no project checks but a unit `verify`, the brief asks for that
+check through `run_check`.

@@ -307,6 +307,9 @@ pub struct SpawnOptions<'a> {
     /// Append `fleet::REPORT_CONTRACT` to the prompt and record the
     /// parsed report in the run metadata (issue #388).
     pub report_contract: bool,
+    /// How many `run_check` commands may run at once on this machine,
+    /// handed to every lane's coordination server (issue #461).
+    pub check_slots: usize,
 }
 
 impl Default for SpawnOptions<'_> {
@@ -322,6 +325,7 @@ impl Default for SpawnOptions<'_> {
             prepare: &[],
             model: None,
             report_contract: false,
+            check_slots: pact_coord::DEFAULT_CHECK_SLOTS,
         }
     }
 }
@@ -730,6 +734,7 @@ impl Orchestrator {
         workspace: &Workspace,
         server_name: &str,
         coord_override: Option<&CoordServerOverride>,
+        check_slots: usize,
     ) -> Result<CoordConfig> {
         let config_path = self
             .workspaces
@@ -759,6 +764,8 @@ impl Orchestrator {
                 workspace.id.clone(),
                 "--workspace".to_string(),
                 workspace.path.to_string_lossy().to_string(),
+                "--check-slots".to_string(),
+                check_slots.to_string(),
             ],
             config_path,
         })
@@ -801,7 +808,7 @@ impl Orchestrator {
         on_event: &mut impl FnMut(&AgentEvent),
     ) -> Result<AcpBatch> {
         let homes_dir = self.workspaces.state_dir().join("homes");
-        AcpBatch::start(&self.repo_root, &homes_dir, agents, options.lean, on_event)
+        AcpBatch::start(&self.repo_root, &homes_dir, agents, options.lean, options.check_slots, on_event)
     }
 
     /// Runs every `(agent, task)` pair in `tasks` concurrently, one
@@ -1023,7 +1030,7 @@ impl Orchestrator {
         };
         let coord_name = adapter.coord_server_name();
         let coord = self
-            .coord_config(&preview_workspace, coord_name, coord_override)
+            .coord_config(&preview_workspace, coord_name, coord_override, pact_coord::DEFAULT_CHECK_SLOTS)
             .ok();
 
         let safety = pact_agents::resolve_safety_profile(agent, safety_override);
@@ -1274,7 +1281,7 @@ impl Orchestrator {
     ) -> Result<(Workspace, RunOutcome)> {
         let adapter = pact_agents::adapter(agent);
         let coord_name = adapter.coord_server_name();
-        let coord = match self.coord_config(&workspace, coord_name, options.coord_override) {
+        let coord = match self.coord_config(&workspace, coord_name, options.coord_override, options.check_slots) {
             Ok(c) => Some(c),
             Err(err) => {
                 tracing::warn!(

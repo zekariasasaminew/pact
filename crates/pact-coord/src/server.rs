@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::{handoffs, leases, messages, operations};
+use crate::{checks, handoffs, leases, messages, operations};
 use crate::handoffs::HandoffDecision;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -71,11 +71,25 @@ pub struct SendMessageParams {
     pub body: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunCheckParams {
+    /// The check to run, as one shell command line (cmd on Windows, sh
+    /// elsewhere), e.g. "npx tsc --noEmit" or "cargo test -p mycrate".
+    pub command: String,
+    /// Kill the command and everything it started after this many
+    /// seconds. Defaults to 600; at most 1800.
+    pub timeout_seconds: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct CoordServer {
     conn: Arc<Mutex<Connection>>,
     agent_id: String,
     workspace_root: PathBuf,
+    check_slots: usize,
+    /// Where check slots live; `None` means `checks::slot_dir()`, shared
+    /// by every pact process on the machine. Tests use their own.
+    check_slot_dir: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -111,8 +125,63 @@ impl CoordServer {
             conn: Arc::new(Mutex::new(conn)),
             agent_id,
             workspace_root,
+            check_slots: checks::DEFAULT_CHECK_SLOTS,
+            check_slot_dir: None,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// How many `run_check` commands may run at once on this machine.
+    pub fn with_check_slots(mut self, slots: usize) -> Self {
+        self.check_slots = slots.max(1);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_check_slot_dir(mut self, dir: PathBuf) -> Self {
+        self.check_slot_dir = Some(dir);
+        self
+    }
+
+    #[tool(
+        description = "Run a check (tests, type-check, lint, build or any other verification command) in your working directory. Run every check through this tool, never directly in your shell: other agents on this machine run checks too, and this tool waits for a free check slot so they do not all run at once. The command runs with CI=true and no stdin, and is killed with everything it started after timeout_seconds (default 600, at most 1800). Returns JSON with exit_code (null when killed), timed_out, waited_ms (time spent waiting for a slot), ran_ms, slots and output (the last 200 lines of stdout and stderr combined). A failing check is a normal result: read exit_code."
+    )]
+    async fn run_check(&self, Parameters(params): Parameters<RunCheckParams>) -> Result<CallToolResult, McpError> {
+        let timeout_seconds = params.timeout_seconds.unwrap_or(checks::DEFAULT_TIMEOUT_SECONDS);
+        if timeout_seconds == 0 || timeout_seconds > checks::MAX_TIMEOUT_SECONDS {
+            return error_result(format!(
+                "error: timeout_seconds must be between 1 and {}, got {timeout_seconds}",
+                checks::MAX_TIMEOUT_SECONDS
+            ));
+        }
+        if params.command.trim().is_empty() {
+            return error_result("error: command is empty".to_string());
+        }
+        let slot_dir = match &self.check_slot_dir {
+            Some(dir) => dir.clone(),
+            None => match checks::slot_dir() {
+                Ok(dir) => dir,
+                Err(e) => return error_result(format!("error: {e:#}")),
+            },
+        };
+        let timeout = std::time::Duration::from_secs(timeout_seconds);
+        let report = match checks::run_check(&slot_dir, self.check_slots, &params.command, &self.workspace_root, timeout).await {
+            Ok(report) => report,
+            Err(e) => return error_result(format!("error: {e:#}")),
+        };
+        log_op(
+            &self.conn.lock().unwrap(),
+            "check",
+            &self.agent_id,
+            serde_json::json!({
+                "command": params.command,
+                "exit_code": report.exit_code,
+                "timed_out": report.timed_out,
+                "waited_ms": report.waited_ms,
+                "ran_ms": report.ran_ms,
+            }),
+        );
+        text_result(serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("error serializing result: {e}")))
     }
 
     #[tool(
@@ -315,8 +384,8 @@ impl ServerHandler for CoordServer {
     }
 }
 
-pub async fn serve(conn: Connection, agent_id: String, workspace_root: PathBuf) -> anyhow::Result<()> {
-    let server = CoordServer::new(conn, agent_id, workspace_root);
+pub async fn serve(conn: Connection, agent_id: String, workspace_root: PathBuf, check_slots: usize) -> anyhow::Result<()> {
+    let server = CoordServer::new(conn, agent_id, workspace_root).with_check_slots(check_slots);
     serve_with_io(server, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
@@ -661,7 +730,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(false));
 
-        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), tool_router: CoordServer::tool_router() };
+        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), check_slots: 1, check_slot_dir: None, tool_router: CoordServer::tool_router() };
         let incoming = target.check_handoffs().unwrap();
         assert_eq!(incoming.is_error, Some(false));
         let requests: Vec<handoffs::HandoffRequest> = serde_json::from_str(result_text(&incoming)).unwrap();
@@ -677,7 +746,7 @@ mod tests {
             .request_handoff(Parameters(RequestHandoffParams { to: "agent-b".to_string(), files: vec!["x.txt".to_string()], message: "please".to_string(), ttl_seconds: None }))
             .unwrap();
 
-        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), tool_router: CoordServer::tool_router() };
+        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), check_slots: 1, check_slot_dir: None, tool_router: CoordServer::tool_router() };
         let result = target
             .respond_handoff(Parameters(RespondHandoffParams { request_id: 1, decision: "maybe".to_string(), narrowed_files: None, message: None }))
             .unwrap();
@@ -691,7 +760,7 @@ mod tests {
             .request_handoff(Parameters(RequestHandoffParams { to: "agent-b".to_string(), files: vec!["x.txt".to_string()], message: "please".to_string(), ttl_seconds: None }))
             .unwrap();
 
-        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), tool_router: CoordServer::tool_router() };
+        let target = CoordServer { conn: requester.conn.clone(), agent_id: "agent-b".to_string(), workspace_root: std::env::temp_dir(), check_slots: 1, check_slot_dir: None, tool_router: CoordServer::tool_router() };
         let response = target
             .respond_handoff(Parameters(RespondHandoffParams { request_id: 1, decision: "accept".to_string(), narrowed_files: None, message: Some("go ahead".to_string()) }))
             .unwrap();
@@ -708,5 +777,84 @@ mod tests {
             Some(content) => content.as_text().map(|t| t.text.as_str()).unwrap_or_default(),
             None => "",
         }
+    }
+
+    fn check_server(slots: usize) -> (CoordServer, PathBuf) {
+        let slot_dir = std::env::temp_dir().join(format!("pact-check-slots-{}", uuid::Uuid::new_v4()));
+        let server = CoordServer::new(test_conn(), "agent-a".to_string(), std::env::temp_dir())
+            .with_check_slots(slots)
+            .with_check_slot_dir(slot_dir.clone());
+        (server, slot_dir)
+    }
+
+    async fn check(server: &CoordServer, command: &str, timeout_seconds: Option<u64>) -> (CallToolResult, serde_json::Value) {
+        let result = server.run_check(Parameters(RunCheckParams { command: command.to_string(), timeout_seconds })).await.unwrap();
+        let json = serde_json::from_str(result_text(&result)).unwrap_or(serde_json::Value::Null);
+        (result, json)
+    }
+
+    /// `seconds` of wall time, without quoting (cmd and sh differ there).
+    fn sleep_command(seconds: u32) -> String {
+        if cfg!(windows) { format!("ping -n {} 127.0.0.1 >NUL", seconds + 1) } else { format!("sleep {seconds}") }
+    }
+
+    /// Issue #461: with one slot, two checks called together run one after
+    /// the other, and on a current-thread runtime, so the waiting call
+    /// never blocks the other.
+    #[tokio::test]
+    async fn run_check_with_one_slot_runs_concurrent_checks_one_at_a_time() {
+        let (server, slot_dir) = check_server(1);
+        let command = sleep_command(1);
+        let ((first, a), (second, b)) = tokio::join!(check(&server, &command, None), check(&server, &command, None));
+        assert_eq!(first.is_error, Some(false));
+        assert_eq!(second.is_error, Some(false));
+        let (waiter, runner) = if a["waited_ms"].as_u64() > b["waited_ms"].as_u64() { (&a, &b) } else { (&b, &a) };
+        assert!(runner["ran_ms"].as_u64().unwrap() >= 500, "the sleep must take real time: {runner}");
+        assert!(
+            waiter["waited_ms"].as_u64().unwrap() + 100 >= runner["ran_ms"].as_u64().unwrap(),
+            "the second check must wait out the first: waiter {waiter}, runner {runner}"
+        );
+        assert_eq!(a["exit_code"], 0);
+        assert_eq!(a["slots"], 1);
+
+        let conn = server.conn.lock().unwrap();
+        let logged = operations::query_operations(&conn, &operations::HistoryFilter { op_type: Some("check".into()), ..Default::default() }).unwrap();
+        assert_eq!(logged.len(), 2);
+        assert_eq!(logged[0].detail["command"], command);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(slot_dir);
+    }
+
+    #[tokio::test]
+    async fn run_check_returns_a_failing_checks_exit_code_and_output_tail_as_a_normal_result() {
+        let (server, slot_dir) = check_server(2);
+        let command = if cfg!(windows) {
+            "(for /L %i in (1,1,250) do @echo line %i) & echo boom 1>&2 & exit /b 3"
+        } else {
+            "for i in $(seq 1 250); do echo line $i; done; echo boom >&2; exit 3"
+        };
+        let (result, json) = check(&server, command, None).await;
+        assert_eq!(result.is_error, Some(false), "a failing check is not a tool failure");
+        assert_eq!(json["exit_code"], 3, "{json}");
+        assert_eq!(json["timed_out"], false);
+        let output = json["output"].as_str().unwrap();
+        assert!(output.starts_with("[51 earlier lines cut]\n"), "{output}");
+        assert!(output.contains("line 250") && output.contains("boom"), "stdout and stderr both land in the output: {output}");
+        let _ = std::fs::remove_dir_all(slot_dir);
+    }
+
+    #[tokio::test]
+    async fn run_check_kills_a_check_at_its_timeout_and_rejects_a_timeout_over_the_maximum() {
+        let (server, slot_dir) = check_server(2);
+        let started = std::time::Instant::now();
+        let (result, json) = check(&server, &sleep_command(8), Some(1)).await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(json["timed_out"], true, "{json}");
+        assert!(json["exit_code"].is_null(), "{json}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the check must be killed, not waited out: {:?}", started.elapsed());
+
+        let (too_long, _) = check(&server, "echo hi", Some(checks::MAX_TIMEOUT_SECONDS + 1)).await;
+        assert_eq!(too_long.is_error, Some(true));
+        let _ = std::fs::remove_dir_all(slot_dir);
     }
 }

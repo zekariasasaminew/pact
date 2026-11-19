@@ -7,6 +7,7 @@
 //! not run in-process by the orchestrator) speaking MCP via `rmcp`, backed
 //! by a SQLite database shared across every agent in one repo's session.
 
+mod checks;
 mod db;
 mod handoffs;
 #[cfg(feature = "http")]
@@ -17,6 +18,7 @@ mod operations;
 mod persisted_conflicts;
 mod server;
 
+pub use checks::DEFAULT_CHECK_SLOTS;
 pub use db::{coord_root, prunable_dirs, PrunableDir, OWNER_FILE};
 pub use handoffs::{HandoffDecision, HandoffRequest, HandoffRequestResult, HandoffStatus};
 pub use leases::{ActiveLease, Conflict, ClaimResult};
@@ -93,10 +95,11 @@ pub fn status(repo_root: &Path) -> Result<CoordStatus> {
 /// Opens the shared coordination database and serves the MCP protocol over
 /// stdio until the client (the agent CLI) disconnects. Blocks for the
 /// lifetime of the connection -- this is the entire job of the
-/// `pact mcp-serve` subcommand.
-pub async fn serve(repo_root: &Path, agent_id: String, workspace_root: PathBuf) -> Result<()> {
+/// `pact mcp-serve` subcommand. `check_slots` bounds how many `run_check`
+/// commands run at once on the machine (issue #461).
+pub async fn serve(repo_root: &Path, agent_id: String, workspace_root: PathBuf, check_slots: usize) -> Result<()> {
     let conn = db::open(repo_root)?;
-    server::serve(conn, agent_id, workspace_root).await
+    server::serve(conn, agent_id, workspace_root, check_slots).await
 }
 
 /// Every lease (active or already expired) whose glob pattern matches

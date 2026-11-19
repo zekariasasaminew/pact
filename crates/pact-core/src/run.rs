@@ -513,23 +513,26 @@ pub fn render_brief(plan: &Plan, unit: &PlanUnit) -> String {
     );
     let unit_check = unit.verify.as_deref().map(str::trim).filter(|v| !v.is_empty());
     let project_checks: Vec<&str> = plan.verify.iter().map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
+    // Issue #461: workers check their work, but only through run_check, so
+    // a machine-wide slot pool spaces the checks of every lane out.
+    const RUN_CHECK: &str = "only through the `run_check` tool of the `pact-coord` MCP server (your CLI namespaces it, \
+         e.g. `pact-coord-run_check`), never directly in your shell: it queues your check behind other agents' checks on this machine";
     if project_checks.is_empty() {
         if let Some(verify) = unit_check {
-            brief.push_str(&format!("- Check your own work before finishing with: `{verify}`\n"));
+            brief.push_str(&format!("- Check your own work before finishing with `{verify}`, run {RUN_CHECK}.\n"));
         }
     } else {
-        // Issue #361: project-wide checks are pact's, once, on the combined
-        // result. Workers running them from every lane at once is what made
-        // finer splits no faster (arm R3).
         brief.push_str(&format!(
-            "- pact runs the project-wide checks once on the combined result after every unit finishes: {}. Do not run them yourself, \
-             and do not run the whole test suite, type-check or lint in any form: every lane doing so at once slows every lane. ",
+            "- Run every check (tests, type-check, lint) {RUN_CHECK}, so they do not all run at once. Before finishing, \
+             type-check and lint the files you own and run your own tests through it"
+        ));
+        if let Some(verify) = unit_check {
+            brief.push_str(&format!(", including your unit's check: `{verify}`"));
+        }
+        brief.push_str(&format!(
+            ". pact also runs {} once on the combined result after every unit finishes.\n",
             project_checks.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
         ));
-        match unit_check {
-            Some(verify) => brief.push_str(&format!("Check only your own files, with: `{verify}`\n")),
-            None => brief.push_str("Check only your own files (run your own test files alone, not the suite).\n"),
-        }
     }
     brief.push_str("- When finished, reply DONE followed by two lines: what you produced and anything left undone.\n");
     brief
@@ -1765,25 +1768,32 @@ mod tests {
         }
     }
 
-    /// Issue #361: with project-wide checks on the plan, the brief says
-    /// pact runs them and the worker checks only its own files; without
-    /// any, the unit's own check is all the brief can ask for.
+    /// Issue #461 (replacing #361's "do not run them yourself"): with
+    /// project-wide checks on the plan, the brief has the worker run every
+    /// check through run_check, check its own files before finishing, and
+    /// says pact also runs the project checks; without any, the unit's
+    /// own check still goes through run_check.
     #[test]
-    fn briefs_hand_the_project_wide_checks_to_pact_and_scope_the_worker_to_its_own_files() {
+    fn briefs_send_every_worker_check_through_run_check_and_name_the_project_checks_pact_runs() {
         let mut p = plan(vec![PlanUnit { name: "u".into(), files: vec!["a.ts".into()], brief: "x".into(), verify: Some("npx vitest run a".into()), depends_on: vec![] }, unit("v", &["b.ts"])]);
         p.verify = vec!["npm test".into(), "npm run typecheck".into(), " ".into()];
         let with_check = render_brief(&p, &p.units[0]);
-        assert!(with_check.contains("pact runs the project-wide checks once on the combined result after every unit finishes: `npm test`, `npm run typecheck`."), "{with_check}");
-        assert!(with_check.contains("do not run the whole test suite, type-check or lint in any form"), "{with_check}");
-        assert!(with_check.contains("Check only your own files, with: `npx vitest run a`"), "{with_check}");
-        assert!(!with_check.contains("Check your own work before finishing"), "{with_check}");
+        for expected in [
+            "Run every check (tests, type-check, lint) only through the `run_check` tool of the `pact-coord` MCP server",
+            "never directly in your shell",
+            "type-check and lint the files you own and run your own tests through it, including your unit's check: `npx vitest run a`.",
+            "pact also runs `npm test`, `npm run typecheck` once on the combined result",
+        ] {
+            assert!(with_check.contains(expected), "missing {expected:?} in:\n{with_check}");
+        }
+        assert!(!with_check.contains("Do not run them yourself"), "{with_check}");
         let without_check = render_brief(&p, &p.units[1]);
-        assert!(without_check.contains("Check only your own files (run your own test files alone, not the suite)."), "{without_check}");
+        assert!(without_check.contains("run your own tests through it. pact also runs"), "{without_check}");
 
         p.verify = Vec::new();
         let no_project_checks = render_brief(&p, &p.units[0]);
-        assert!(no_project_checks.contains("Check your own work before finishing with: `npx vitest run a`"), "{no_project_checks}");
-        assert!(!no_project_checks.contains("pact runs the project-wide checks"), "no promise pact cannot keep:\n{no_project_checks}");
+        assert!(no_project_checks.contains("Check your own work before finishing with `npx vitest run a`, run only through the `run_check` tool"), "{no_project_checks}");
+        assert!(!no_project_checks.contains("pact also runs"), "no promise pact cannot keep:\n{no_project_checks}");
     }
 
     #[test]
