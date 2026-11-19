@@ -972,3 +972,18 @@ flag. Until #374 a requested model turned `--runtime auto` into
 own (issue #415): `pact run --tier cheap` silently became the
 process runtime, with three times the per-lane memory reserve and so
 far fewer planned units, the configuration the benchmark shows losing.
+
+### PATH order for shim resolution (issue #445)
+
+`windows_shim::resolve_in` looked for `<program>.exe` in every PATH
+directory before it looked for any `.cmd`, so on a machine with VS
+Code's `bin\copilot-shim\copilot.exe` later on PATH than npm's
+`copilot.cmd`, pact launched VS Code's shim. That shim forwards to the
+npm `.cmd` and refuses an argument holding a newline
+("UnsupportedWindowsCommandValue"), which every process-lane prompt has,
+so every Copilot process lane (`pact fleet`, `pact ui`, `--runtime
+process`) exited with code 1 in about a second. ACP lanes escaped only
+because `--acp` arguments hold no newline. Resolution now follows
+Windows: PATH directories in order, `.exe` before `.cmd` and `.bat`
+within one directory. Found in a live `pact fleet` run against Copilot
+CLI 1.0.114; the same fleet then ran to completion.

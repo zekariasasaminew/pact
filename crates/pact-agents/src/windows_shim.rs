@@ -35,12 +35,17 @@ pub fn resolve(program: &str) -> Option<Resolved> {
 /// `std::env::set_var` isn't isolated between Rust's parallel test
 /// threads, so a test that mutated it for real could flake against
 /// unrelated tests reading `PATH` concurrently.
+///
+/// Resolution follows Windows: directories in PATH order, and within one
+/// directory `.exe` before `.cmd` and `.bat`, so the first directory that
+/// has the program wins (issue #445: VS Code's `copilot-shim\copilot.exe`
+/// later on PATH must not beat npm's `copilot.cmd` earlier on it).
 fn resolve_in(program: &str, dirs: &[PathBuf]) -> Option<Resolved> {
-    if let Some(exe) = find_in(program, &["exe"], dirs) {
-        return Some(Resolved { program: exe, leading_args: Vec::new() });
+    let found = find_in(program, &["exe", "cmd", "bat"], dirs)?;
+    if found.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) {
+        return Some(Resolved { program: found, leading_args: Vec::new() });
     }
-    let shim = find_in(program, &["cmd", "bat"], dirs)?;
-    let (interpreter, script) = parse_npm_cmd_shim(&shim)?;
+    let (interpreter, script) = parse_npm_cmd_shim(&found)?;
     Some(Resolved { program: interpreter, leading_args: vec![script] })
 }
 
@@ -186,6 +191,23 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\n
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(resolved.program, dir.join("myagent.exe"));
         assert!(resolved.leading_args.is_empty());
+    }
+
+    #[test]
+    fn resolve_in_takes_an_earlier_directorys_cmd_shim_over_a_later_directorys_exe() {
+        let shim_path = shim_fixture("resolve-in-path-order", "node_modules\\@github\\copilot\\npm-loader.js", true);
+        let npm_dir = shim_path.parent().unwrap().to_path_buf();
+        std::fs::rename(&shim_path, npm_dir.join("myagent.cmd")).unwrap();
+        let later_dir = std::env::temp_dir().join("pact-windows-shim-test-path-order-later");
+        std::fs::create_dir_all(&later_dir).unwrap();
+        std::fs::write(later_dir.join("myagent.exe"), "fixture").unwrap();
+
+        let resolved = resolve_in("myagent", &[npm_dir.clone(), later_dir.clone()]).unwrap();
+
+        let _ = std::fs::remove_dir_all(&npm_dir);
+        let _ = std::fs::remove_dir_all(&later_dir);
+        assert_eq!(resolved.program, npm_dir.join("node.exe"));
+        assert!(resolved.leading_args[0].ends_with("npm-loader.js"));
     }
 
     #[test]
