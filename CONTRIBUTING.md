@@ -60,7 +60,9 @@ macos and windows, plus the Python, TypeScript and VS Code binding jobs.
   GETTING_STARTED.md and docs/usage.md against the real CLI.
 - `.cargo/config.toml` sets `PACT_COORD_DIR` to `target/pact-coord` for
   everything cargo runs, so tests never write coordination databases into
-  your real data directory; `cargo run` uses it too.
+  your real data directory; `cargo run` uses it too. It also sets
+  `PACT_MIN_FREE_MEM_MB=0`, so tests that launch lanes do not queue behind
+  the admission memory floor on a machine with under 1.5 GB free.
 
 ## Build footprint
 

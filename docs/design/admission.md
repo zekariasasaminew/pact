@@ -162,3 +162,18 @@ only when neither the flag nor `pact.toml` sets a reserve, and the dry
 run says which default it took. The unit test replays arm Q's numbers
 through `decide` for both runtimes. The figure is a measured point, not
 a derivation: the next benchmark on a bigger suite recalibrates it.
+
+### `PACT_MIN_FREE_MEM_MB` and the test suite (issue #451)
+
+Admission applies to every real lane launch, and about 40 test call
+sites launch lanes without `--min-free-mem-mb 0`. On CI that is fine; on
+the dev machine, below 1.5 GB free, those tests queued forever
+("queued: 1131 MB of memory available, need 1500 MB"), and one
+`cargo test --test acp_runtime` held the machine's shared build gate for
+40 minutes. Rather than repeat the flag at every call site, the floor
+gained an environment default below the flag and `pact.toml`:
+`PACT_MIN_FREE_MEM_MB`, which `.cargo/config.toml` sets to 0 for
+everything cargo runs, the same way `PACT_COORD_DIR` isolates the
+coordination databases (#416). It also lets CI and containers, whose
+memory readings are often misleading, set the floor without a
+`pact.toml`. `pact ui` keeps its own flag default.

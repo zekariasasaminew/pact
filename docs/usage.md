@@ -364,7 +364,9 @@ something frees up, which is the point (measured per-process peaks on a
 build` 1.9 GB). All four have `pact.toml` `[defaults]` keys; `--dry-run`
 prints the effective policy. Raise the cap when you have the memory for
 it, `--per-lane-reserve-mb 0` to size purely on instantaneous free
-memory, or `--min-free-mem-mb 0` to disable the memory check.
+memory, or `--min-free-mem-mb 0` to disable the memory check. Without
+the flag or a `pact.toml` value, the `PACT_MIN_FREE_MEM_MB` environment
+variable sets the floor, which suits CI and containers.
 
 ```sh
 pact spawn-many --agent copilot --task "..." --task "..." --task "..." --max-concurrent 3

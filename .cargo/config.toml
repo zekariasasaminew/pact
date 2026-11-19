@@ -1,5 +1,8 @@
 # Keeps every coordination database cargo's processes create (tests, and
-# `cargo run`) out of the real per-user data directory (issue #416). An
-# installed `pact` binary does not read this file.
+# `cargo run`) out of the real per-user data directory (issue #416), and
+# turns off the admission memory floor so a dev machine low on memory does
+# not queue every test's lanes forever (issue #451). An installed `pact`
+# binary does not read this file.
 [env]
 PACT_COORD_DIR = { value = "target/pact-coord", relative = true }
+PACT_MIN_FREE_MEM_MB = "0"
