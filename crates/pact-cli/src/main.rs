@@ -3368,15 +3368,21 @@ fn should_print_other(value: &serde_json::Value, verbose: bool) -> bool {
     }
 }
 
+/// The coordination server's name in every adapter's MCP config. Copilot
+/// reports every MCP server it knows, most of them the user's own and
+/// disabled in a lean home, so only this one prints unless `--verbose`.
+const COORD_SERVER: &str = "pact-coord";
+
 /// Same event formatting as `print_event`, prefixed with `label` so N
 /// interleaved concurrent agents' output stays attributable -- see
 /// docs/design/cli.md for the line-granularity locking note.
 fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[{label}] [init] session {session_id}"),
-        AgentEvent::CoordStatus { name, status } => {
+        AgentEvent::CoordStatus { name, status } if verbose || name == COORD_SERVER => {
             println!("[{label}] [coord] {name}: {status}")
         }
+        AgentEvent::CoordStatus { .. } => {}
         AgentEvent::AssistantText(text) => println!("[{label}] [assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[{label}] [tool] {name} {input}"),
         AgentEvent::Result { .. } => {}
@@ -3399,7 +3405,8 @@ fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
 fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[init] session {session_id}"),
-        AgentEvent::CoordStatus { name, status } => println!("[coord] {name}: {status}"),
+        AgentEvent::CoordStatus { name, status } if verbose || name == COORD_SERVER => println!("[coord] {name}: {status}"),
+        AgentEvent::CoordStatus { .. } => {}
         AgentEvent::AssistantText(text) => println!("[assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[tool] {name} {input}"),
         AgentEvent::Result { .. } => {} // surfaced by the caller as the final outcome instead
