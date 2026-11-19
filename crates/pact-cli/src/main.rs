@@ -3255,7 +3255,7 @@ fn agent_label(kind: AgentKind) -> &'static str {
 
 /// Raw `type` values that are real but uninteresting to a human watching
 /// the stream live -- see docs/design/cli.md ("streamed event filtering")
-/// for the measurements that justified suppressing these two specifically.
+/// for the measurements that justified suppressing each group.
 /// Suppressed only from the live terminal view by default; `--verbose`
 /// restores them, and the full unfiltered stream is always in the
 /// workspace's log file regardless (`run_and_stream` writes every raw line
@@ -3302,6 +3302,34 @@ const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
     "acp.config_option_update",
     "acp.session_info_update",
     "acp.current_mode_update",
+    // Copilot CLI 1.0.114's process-lane stream (issue #449): about 560 of
+    // 724 printed lines in a two-task fleet plus a two-unit run. Streaming
+    // fragments of `assistant.message`, which pact already prints as
+    // `[assistant]` and `[tool]` lines; reasoning text and tool progress,
+    // the analogues of the ACP kinds above; and turn, model-call and
+    // session lifecycle metadata.
+    "assistant.message_delta",
+    "assistant.message_start",
+    "assistant.reasoning_delta",
+    "assistant.reasoning",
+    "assistant.turn_start",
+    "assistant.turn_end",
+    "assistant.idle",
+    "model.call_start",
+    "model.call_final_result",
+    "model.call_finished",
+    "tool.execution_start",
+    "tool.execution_complete",
+    "tool.shell_output",
+    "user.message",
+    "instruction.update",
+    "session.start",
+    "session.tools_updated",
+    "session.indexed_search",
+    "session.extensions_loaded",
+    "session.mcp_server_tools_loaded",
+    "session.custom_agents_updated",
+    "session.managed_settings_resolved",
 ];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`

@@ -991,3 +991,16 @@ SQLite read, so a refresh loop is straightforward to add later, but it's
 a distinct small design surface (when to exit, terminal clear/reprint
 vs. a plain `--refresh N`-and-exit) left for a follow-up rather than
 folded into the first cut.
+
+### Copilot CLI 1.0.114's new stream events (issue #449)
+
+A two-task `pact fleet` and a two-unit `pact run --runtime process` on
+Copilot CLI 1.0.114 printed 724 lines, about 560 of them raw `[other]`
+JSON from types the list had never seen: `assistant.message_delta` (223)
+and `assistant.reasoning_delta` (121) led, then tool start and complete
+events, model-call and turn lifecycle events, and session metadata. Each
+is a streaming fragment of an `assistant.message` pact already prints,
+reasoning or tool progress (the analogues of the suppressed ACP kinds),
+or metadata, so all join the list. The rule is unchanged: a type stays
+visible until a real run shows it is noise, and the lane log and
+`--verbose` keep everything.
