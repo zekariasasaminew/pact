@@ -2185,10 +2185,12 @@ fn status_hints(rows: &[StatusWorkspaceRow], open_conflicts: &[pact_coord::Persi
     let running = rows.iter().filter(|r| r.agent_alive == Some(true)).count();
     let zero_files: Vec<&str> = rows.iter().filter(|r| r.no_files_touched).map(|r| r.workspace.id.as_str()).collect();
     // Only a *finished* agent that never connected is worth flagging --
-    // a still-running one may just not have launched mcp-serve yet.
+    // a still-running one may just not have launched mcp-serve yet. A
+    // shared-tree batch runs no agent of its own; its lanes do.
+    let batches: Vec<&str> = rows.iter().filter_map(|r| r.workspace.shared_batch.as_deref()).collect();
     let never_connected: Vec<&str> = rows
         .iter()
-        .filter(|r| !r.coord_connected && r.agent_alive != Some(true))
+        .filter(|r| !r.coord_connected && r.agent_alive != Some(true) && !batches.contains(&r.workspace.id.as_str()))
         .map(|r| r.workspace.id.as_str())
         .collect();
 
@@ -2210,7 +2212,11 @@ fn status_hints(rows: &[StatusWorkspaceRow], open_conflicts: &[pact_coord::Persi
         hints.push(format!("{} open conflict(s) -- pact resolve --list", open_conflicts.len()));
     }
     if !rows.is_empty() && running == 0 && open_conflicts.is_empty() {
-        hints.push("all workspaces idle, no open conflicts -- consider `pact merge-all` when ready".to_string());
+        hints.push(
+            "all workspaces idle, no open conflicts: land one on your branch with `pact land <id>` \
+             (a `pact run` batch lands whole), or combine several with `pact merge-all`"
+                .to_string(),
+        );
     }
     hints
 }
@@ -3571,6 +3577,15 @@ mod tests {
         // A running agent may just not have launched mcp-serve yet -- not
         // worth flagging until it's actually finished.
         let rows = vec![fake_status_row("ws-a", Some(true), false)];
+        let hints = status_hints(&rows, &[]);
+        assert!(!hints.iter().any(|h| h.contains("without ever connecting")), "got: {hints:?}");
+    }
+
+    #[test]
+    fn status_hints_does_not_flag_a_shared_tree_batch_whose_lanes_ran_the_agents() {
+        let mut lane = fake_status_row("lane-a", Some(false), true);
+        lane.workspace.shared_batch = Some("batch-1".to_string());
+        let rows = vec![fake_status_row("batch-1", None, false), lane];
         let hints = status_hints(&rows, &[]);
         assert!(!hints.iter().any(|h| h.contains("without ever connecting")), "got: {hints:?}");
     }
