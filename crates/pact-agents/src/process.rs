@@ -35,6 +35,10 @@ const CHILD_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(500);
 pub struct RunOutcome {
     pub success: bool,
     pub summary: String,
+    /// The agent's last assistant message. Claude Code's result event
+    /// carries it as `summary` too, but Copilot's carries only an exit code
+    /// and an ACP turn only a stop reason (issue #447).
+    pub final_text: Option<String>,
 }
 
 /// How a `run_shell_logged` command ended.
@@ -241,6 +245,7 @@ pub fn run_and_stream(
     });
 
     let mut saw_result: Option<RunOutcome> = None;
+    let mut final_text: Option<String> = None;
     // Set once the direct child is observed to have exited -- from that
     // point on, a still-open pipe is a leaked grandchild's problem, not
     // this loop's. Not an immediate break, though: the exit is observed
@@ -256,10 +261,14 @@ pub fn run_and_stream(
         match stdout_rx.recv_timeout(poll_interval) {
             Ok(line) => {
                 for parsed in parse_line(&line) {
+                    if let AgentEvent::AssistantText(text) = &parsed {
+                        final_text = Some(text.clone());
+                    }
                     if let AgentEvent::Result { success, summary } = &parsed {
                         saw_result = Some(RunOutcome {
                             success: *success,
                             summary: summary.clone(),
+                            final_text: None,
                         });
                     }
                     on_event(&parsed);
@@ -307,18 +316,21 @@ pub fn run_and_stream(
         None => None, // already reaped by the ctrlc handler
     };
 
-    Ok(saw_result.unwrap_or_else(|| {
+    let outcome = saw_result.unwrap_or_else(|| {
         // No adapter-level Result event -- see docs/design/agents-adapters.md ("
         // run_and_stream") for why the exit code is the fallback signal.
         match status {
             Some(status) => RunOutcome {
                 success: status.success(),
                 summary: format!("process exited ({status}) without emitting a result event"),
+                final_text: None,
             },
             None => RunOutcome {
                 success: false,
                 summary: "process was interrupted before emitting a result event".to_string(),
+                final_text: None,
             },
         }
-    }))
+    });
+    Ok(RunOutcome { final_text, ..outcome })
 }

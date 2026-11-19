@@ -95,6 +95,12 @@ fn report_field(line: &str) -> Option<(String, String)> {
     Some((label, value.to_string()))
 }
 
+/// The report in a run's summary, else in the agent's last message: only
+/// Claude Code puts its final text in the summary (issue #447).
+pub fn report_in(run: &pact_agents::RunOutcome) -> Option<WorkerReport> {
+    parse_worker_report(&run.summary).or_else(|| run.final_text.as_deref().and_then(parse_worker_report))
+}
+
 /// Reads the worker report out of an agent's final message. The last
 /// `STATUS:` line wins, so a report quoted earlier in the message (the
 /// contract itself, say) is ignored; the other fields are read from the
@@ -331,7 +337,7 @@ fn run_task(
     };
     match result {
         Ok((workspace, run)) => {
-            let report = parse_worker_report(&run.summary);
+            let report = report_in(&run);
             let seconds = orchestrator
                 .run_metadata(&workspace.id)
                 .map(|meta| meta.ended_at.saturating_sub(meta.started_at))
@@ -342,7 +348,7 @@ fn run_task(
                 status: status_of(run.success, report.as_ref()),
                 workspace: Some(workspace),
                 report,
-                summary: run.summary,
+                summary: run.final_text.unwrap_or(run.summary),
                 seconds,
             }
         }
@@ -388,6 +394,18 @@ mod tests {
         .unwrap();
         assert_eq!(report.status, ReportStatus::Done);
         assert_eq!(report.notes, "second attempt");
+    }
+
+    #[test]
+    fn report_in_falls_back_to_the_final_message_when_the_summary_is_only_an_exit_code() {
+        let run = pact_agents::RunOutcome {
+            success: true,
+            summary: "exit code 0".to_string(),
+            final_text: Some("Added mul.\n\nSTATUS: done\nCHANGED: calc.py".to_string()),
+        };
+        let report = report_in(&run).unwrap();
+        assert_eq!(report.status, ReportStatus::Done);
+        assert_eq!(report.changed, "calc.py");
     }
 
     #[test]
