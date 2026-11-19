@@ -1017,3 +1017,11 @@ read from the raw output line, before the adapter turns Claude's
 `session.usage_checkpoint` or `"total_cost_usd"` are parsed a second
 time. The `spawn-many` batch total adds premium requests only when some
 lane reported them.
+
+### Codex's start and turn events (issue #456)
+
+A one-task live `pact fleet` with Codex CLI 0.144.3 printed 13 raw lines
+among 48: eleven `item.started`, each repeating the command or file
+change that its `item.completed` prints as a `[tool]` line, and
+`turn.started`/`turn.completed`, which carry token counts and no cost.
+All three join the suppressed list.
