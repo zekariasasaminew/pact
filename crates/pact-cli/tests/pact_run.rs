@@ -137,6 +137,10 @@ fn run_plans_briefs_executes_commits_and_verifies_from_one_task() {
     assert!(text.contains("(committed)"), "{text}");
     assert!(text.contains(": passed (it failed on the base commit, so this run fixed it) (exit 0"), "verification ran, with the baseline telling the story:\n{text}");
     assert!(text.contains("run: OK"), "{text}");
+    // Issue #463: the verdicts and the diff stat lead, the plan follows.
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("no `{needle}` in:\n{text}"));
+    assert!(at("verify `") < at("changed: 2 files, +2 -0") && at("changed: 2 files") < at("plan: 2 units"), "{text}");
+    assert!(at("  alpha.txt  +1 -0") < at("run: OK") && at("  beta.txt   +1 -0") < at("run: OK"), "{text}");
 
     // Issue #348: the planner's session is logged like a lane's, one JSON
     // line per update, opened by pact's attempt marker.

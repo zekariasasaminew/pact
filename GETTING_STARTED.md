@@ -63,11 +63,17 @@ What happens, in order:
    tree, one per unit whose files it names, running in parallel; then the
    checks run again.
 
-The last lines are the verdicts and where the result is:
+The report opens with the verdicts and the diff stat, and ends with where
+the result is:
 
 ```
-result: branch pact/batch-<id> in <state dir>/workspaces/batch-<id> (committed)
 verify `npm test`: passed (exit 0, 31.2s)
+changed: 2 files, +48 -3
+  src/lib/math.test.ts   +40 -0
+  src/lib/parse.test.ts  +8 -3
+plan: 2 units (1 planner attempt, 41s), saved to <state dir>/meta/plans/<stamp>-<slug>.json
+...
+result: branch pact/batch-<id> in <state dir>/workspaces/batch-<id> (committed)
 run: OK. Review with `pact diff batch-<id>`, then land it on your branch with `pact land batch-<id>` (add --pr for a pull request)
 ```
 

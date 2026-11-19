@@ -268,32 +268,39 @@ fn print_table(outcomes: &[FleetOutcome], rows: &[(PathBuf, String)]) {
         outcomes.len() - done
     );
     let branch = |o: &FleetOutcome| o.workspace.as_ref().map(|w| w.branch.clone()).unwrap_or_else(|| "-".to_string());
+    let changes = |o: &FleetOutcome| o.changes.as_deref().map(crate::report::changes_summary).unwrap_or_else(|| "-".to_string());
     let width = |header: &str, cell: &dyn Fn(usize) -> usize| (0..outcomes.len()).map(cell).max().unwrap_or(0).max(header.len());
     let name_w = width("TASK", &|i| outcomes[i].name.len());
+    let changes_w = width("CHANGES", &|i| changes(&outcomes[i]).len());
     let agent_w = width("AGENT/MODEL", &|i| rows[i].1.len());
     let branch_w = width("BRANCH", &|i| branch(&outcomes[i]).len());
     println!(
-        "  {:name_w$}  {:10}  {:>5}  {:agent_w$}  {:branch_w$}  REPO",
-        "TASK", "STATUS", "SECS", "AGENT/MODEL", "BRANCH"
+        "  {:name_w$}  {:10}  {:changes_w$}  {:>5}  {:agent_w$}  {:branch_w$}  REPO",
+        "TASK", "STATUS", "CHANGES", "SECS", "AGENT/MODEL", "BRANCH"
     );
     for (outcome, (repo, agent)) in outcomes.iter().zip(rows) {
         println!(
-            "  {:name_w$}  {:10}  {:>5}  {:agent_w$}  {:branch_w$}  {}",
+            "  {:name_w$}  {:10}  {:changes_w$}  {:>5}  {:agent_w$}  {:branch_w$}  {}",
             outcome.name,
             outcome.status.as_str(),
+            changes(outcome),
             outcome.seconds,
             agent,
             branch(outcome),
             repo.display()
         );
+        let id = outcome.workspace.as_ref().map(|w| w.id.as_str()).unwrap_or(&outcome.name);
         let notes = outcome.report.as_ref().map(|r| r.notes.as_str()).filter(|n| !n.is_empty());
         match outcome.status {
             FleetStatus::Done => {}
             FleetStatus::Blocked | FleetStatus::Failed => {
-                println!("      NOTES: {}", notes.unwrap_or("(none given)"));
+                println!("      NOTES: {}", notes.map(|n| crate::report::cap_prose(n, id)).unwrap_or_else(|| "(none given)".to_string()));
             }
             FleetStatus::Unreported => {
-                println!("      no STATUS report in the agent's final message, which began: {}", first_line(&outcome.summary));
+                println!(
+                    "      no STATUS report in the agent's final message, which began: {}",
+                    crate::report::cap_prose(first_line(&outcome.summary), id)
+                );
             }
             FleetStatus::Error => println!("      error: {}", outcome.summary),
         }

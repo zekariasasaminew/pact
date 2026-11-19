@@ -69,6 +69,14 @@ persisted under the state dir (`meta/plans/`, `briefs/`), the planner's
 session under `logs/planner-*.jsonl`; the result is
 a batch to review with `pact diff <batch>` and put on your branch with
 `pact land <batch>` (or `--pr` for a pull request).
+The closing report leads with code facts (issue #463): each check's
+verdict with the files a failing one names, then
+`changed: N files, +A -B` with up to 20 `path  +a -b` lines (the run's
+commits against its base commit; a binary file shows `-`), then the plan,
+each unit's outcome and the repair lanes, and `run: OK` or the failure
+last. An agent's summary is cut to one line of at most 160 characters,
+ending `... (pact inspect <unit>)` when cut; the full text stays in the
+lane's log.
 Measured on the benchmark (arm R2, issue #308): `pact run` on a 39-file
 test-writing task finished in 12.5 min against 15.8 for Copilot's own
 in-process sub-agents, 21% cheaper, with higher coverage, 26% less peak
@@ -138,7 +146,12 @@ process succeeded and it reported `STATUS: done`; an agent that stops to
 ask a question reports `blocked` and its question is printed under its
 row of the closing table, and one that ends with no report is listed as
 `unreported`. The command exits 1 when any task is not done. The parsed
-report is kept in the task's run record (`meta/runs/<name>.json`). Each
+report is kept in the task's run record (`meta/runs/<name>.json`). The
+closing table's `CHANGES` column holds each task's diff stat,
+`N files +A -B`, committed and uncommitted together against the commit
+its workspace started from (`-` when it has no workspace). A report
+field printed under a row is cut to one line of at most 160 characters,
+ending `... (pact inspect <task>)` when cut. Each
 task's changes are left uncommitted in its workspace, like `spawn`:
 `pact --repo <repo> diff <name>` shows them.
 

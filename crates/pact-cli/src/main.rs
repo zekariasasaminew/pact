@@ -11,6 +11,7 @@ use pact_core::{
 mod config;
 mod demo;
 mod fleet;
+mod report;
 mod ui;
 use config::PactConfig;
 
@@ -2963,9 +2964,18 @@ fn human_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// `pact run`'s end-of-run listing (issue #305): the plan as decided, each
-/// unit's outcome, the commit and the verification, then what to do next.
+/// `pact run`'s end-of-run listing (issue #305): the verification verdicts
+/// and the diff stat first (issue #463), then the plan as decided, each
+/// unit's outcome and the commit, then what to do next.
 fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestrator) {
+    if !report.dry_run {
+        print_run_verdicts(report);
+        if report.batch.is_some() {
+            for line in report::diff_stat_lines(&report.diff_stat, 20) {
+                println!("{line}");
+            }
+        }
+    }
     println!(
         "plan: {} unit{} ({} planner attempt{}{}), saved to {}",
         report.plan.units.len(),
@@ -3012,7 +3022,7 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                     .run_metadata(&workspace.id)
                     .map(|m| format!(" in {}s", m.ended_at.saturating_sub(m.started_at)))
                     .unwrap_or_default();
-                println!("unit {}: {}{duration}: {}", workspace.id, if run.success { "done" } else { "failed" }, run.summary);
+                println!("unit {}: {}{duration}: {}", workspace.id, if run.success { "done" } else { "failed" }, report::cap_prose(&run.summary, &workspace.id));
             }
             Err(err) => {
                 let unit = report.plan.units.get(outcome.index).map(|unit| unit.name.trim().to_string()).unwrap_or_else(|| format!("#{}", outcome.index));
@@ -3040,7 +3050,7 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                 println!(
                     "{lane}: {}{duration}: {} ({})",
                     if run.success { "done" } else { "failed" },
-                    run.summary,
+                    report::cap_prose(&run.summary, &workspace.id),
                     if repair.committed { "committed" } else { "nothing committed" }
                 );
             }
@@ -3059,6 +3069,27 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
             }
         );
     }
+    if report.succeeded() {
+        if let Some(batch) = &report.batch {
+            println!("run: OK. Review with `pact diff {0}`, then land it on your branch with `pact land {0}` (add --pr for a pull request)", batch.id);
+        }
+    } else if !report.ownership.is_empty() {
+        println!(
+            "run: FAILED. {} file(s) were written by a lane that does not own them (listed above). Nothing was reverted; review the result with `pact diff <id>` before landing it",
+            report.ownership.len()
+        );
+    } else if report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive) {
+        println!(
+            "run: INCONCLUSIVE. The lanes finished but a verification command fails on the base commit too, so it cannot judge them; \
+             judge the result yourself (`pact diff <id>`), or fix the command (a repo-declared prepare step for generated files, issue #301) and re-run with --plan"
+        );
+    } else {
+        println!("run: FAILED. Workspaces are kept for inspection: `pact list`, `pact diff <id>`, `pact teardown` when done");
+    }
+}
+
+/// Each verification command's verdict, with the files a failing one names.
+fn print_run_verdicts(report: &pact_core::run::RunReport) {
     if report.verify.is_empty() {
         println!("verify: no command (pass --verify or set `verify` in the plan)");
     }
@@ -3088,23 +3119,6 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
             }
             println!("    full output: {}", v.log.display());
         }
-    }
-    if report.succeeded() {
-        if let Some(batch) = &report.batch {
-            println!("run: OK. Review with `pact diff {0}`, then land it on your branch with `pact land {0}` (add --pr for a pull request)", batch.id);
-        }
-    } else if !report.ownership.is_empty() {
-        println!(
-            "run: FAILED. {} file(s) were written by a lane that does not own them (listed above). Nothing was reverted; review the result with `pact diff <id>` before landing it",
-            report.ownership.len()
-        );
-    } else if report.worst_verdict() == Some(pact_core::run::Verdict::Inconclusive) {
-        println!(
-            "run: INCONCLUSIVE. The lanes finished but a verification command fails on the base commit too, so it cannot judge them; \
-             judge the result yourself (`pact diff <id>`), or fix the command (a repo-declared prepare step for generated files, issue #301) and re-run with --plan"
-        );
-    } else {
-        println!("run: FAILED. Workspaces are kept for inspection: `pact list`, `pact diff <id>`, `pact teardown` when done");
     }
 }
 
