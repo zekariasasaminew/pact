@@ -12,7 +12,7 @@ use crate::db::{self, DEFAULT_LEASE_TTL_SECONDS};
 /// permanent lock. 24 hours comfortably covers any real session while still
 /// catching the obviously-wrong case (a caller passing milliseconds where
 /// seconds were expected lands well past this).
-const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
+pub(crate) const MAX_LEASE_TTL_SECONDS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct Conflict {

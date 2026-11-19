@@ -54,11 +54,20 @@ pub struct PrunableDir {
 
 /// Coordination directories whose repository is gone (or was never
 /// recorded), that nothing has written to since `cutoff`, and that hold
-/// no unexpired lease (issue #416).
+/// no unexpired lease (issue #416). Claiming a lease writes the database
+/// and no lease outlives `MAX_LEASE_TTL_SECONDS`, so a directory untouched
+/// for longer cannot hold one and its database is not opened: opening one
+/// costs about 16 ms on Windows, and a long-used machine has thousands.
+/// Age ignores `-shm` files and empty `-wal` files: even a read-only open
+/// of a WAL database creates them, so counting them made one
+/// `gc --dry-run` reset the age of every directory it looked at.
 pub fn prunable_dirs(cutoff: std::time::SystemTime) -> Result<Vec<PrunableDir>> {
     let root = coord_root()?;
     let Ok(entries) = std::fs::read_dir(&root) else { return Ok(Vec::new()) };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let lease_horizon = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(crate::leases::MAX_LEASE_TTL_SECONDS as u64))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     let mut found = Vec::new();
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
@@ -74,7 +83,9 @@ pub fn prunable_dirs(cutoff: std::time::SystemTime) -> Result<Vec<PrunableDir>> 
         for file in std::fs::read_dir(&path).into_iter().flatten().filter_map(Result::ok) {
             if let Ok(meta) = file.metadata() {
                 bytes += meta.len();
-                if let Ok(modified) = meta.modified() {
+                let name = file.file_name().to_string_lossy().into_owned();
+                let reader_artifact = name.ends_with("-shm") || (name.ends_with("-wal") && meta.len() == 0);
+                if let Some(modified) = meta.modified().ok().filter(|_| !reader_artifact) {
                     newest = newest.max(modified);
                 }
             }
@@ -83,7 +94,8 @@ pub fn prunable_dirs(cutoff: std::time::SystemTime) -> Result<Vec<PrunableDir>> 
             continue;
         }
         let db = path.join("state.db");
-        let live_leases = db.exists()
+        let live_leases = newest >= lease_horizon
+            && db.exists()
             && Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .and_then(|conn| conn.query_row("SELECT COUNT(*) FROM leases WHERE expires_at > ?1", [now], |row| row.get::<_, i64>(0)))
                 .map(|count| count > 0)
@@ -276,6 +288,17 @@ mod tests {
             .execute("INSERT INTO leases (pattern, holder, created_at, expires_at) VALUES ('a', 'b', 0, ?1)", [leased])
             .unwrap();
         assert!(!ours(&prunable_dirs(later).unwrap()), "an unexpired lease keeps the directory");
+
+        let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+        for file in std::fs::read_dir(&dir).unwrap().filter_map(Result::ok) {
+            std::fs::File::options().write(true).open(file.path()).unwrap().set_modified(two_days_ago).unwrap();
+        }
+        std::fs::write(dir.join("state.db-shm"), [0u8; 32]).unwrap();
+        std::fs::write(dir.join("state.db-wal"), []).unwrap();
+        assert!(
+            ours(&prunable_dirs(later).unwrap()),
+            "untouched past the lease TTL cap, no lease can be live, and fresh reader artifacts do not count"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
