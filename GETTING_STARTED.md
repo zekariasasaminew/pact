@@ -68,7 +68,7 @@ The last lines are the verdicts and where the result is:
 ```
 result: branch pact/batch-<id> in <state dir>/workspaces/batch-<id> (committed)
 verify `npm test`: passed (exit 0, 31.2s)
-run: OK. Review with `pact diff batch-<id>`, land with `pact merge-all`, or push pact/batch-<id>
+run: OK. Review with `pact diff batch-<id>`, then land it on your branch with `pact land batch-<id>` (add --pr for a pull request)
 ```
 
 Exit code 0 means every check passed, 1 that a lane failed or a check
@@ -80,14 +80,18 @@ judge the run. To rerun a plan you edited:
 
 ```sh
 pact diff <id>
+pact land <id>
 pact list
 pact teardown
 ```
 
-Push the result branch and open a pull request as usual, or merge it
-locally. `pact teardown` without an id removes every workspace; it refuses
-to delete uncommitted work or commits no other branch reaches unless you
-pass `--force`.
+`pact land <id>` merges the result into the branch you have checked out
+(a fast-forward when your branch has not moved) and removes the
+workspace; a `pact run` batch lands whole, every lane with it. `--pr`
+pushes the branch and opens a pull request instead. A conflict aborts
+the merge and keeps the workspace. `pact teardown` without an id removes
+every workspace; it refuses to delete uncommitted work or commits no
+other branch reaches unless you pass `--force`.
 
 ## 6. When you already know the split
 
