@@ -134,6 +134,11 @@ pub struct RunMetadata {
     /// for ACP lanes only; `None` when the agent did not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model: Option<String>,
+    /// The agent's last assistant message, when it ran far enough to send
+    /// one (issue #447). `summary` holds it too for Claude Code, but only
+    /// an exit code for Copilot and a stop reason for an ACP lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_message: Option<String>,
     /// Which lane runtime ran this: `process` (its own agent CLI process)
     /// or `acp` (a session inside a shared agent process, issue #331).
     /// Empty for records written before the field existed.
@@ -1358,6 +1363,7 @@ impl Orchestrator {
             model: options.model.map(str::to_string),
             usage: last_usage,
             effective_model: None,
+            final_message: run_result.as_ref().ok().and_then(|run| run.final_text.clone()),
             runtime: LaneRuntime::Process.as_str().to_string(),
             // Fails closed (assumes touched) on a `git status` error,
             // matching `validate_arbiter_scope`'s existing "can't verify
@@ -1490,20 +1496,27 @@ impl Orchestrator {
                 });
                 let mut coalescer = acp_runtime::ChunkCoalescer::new();
                 let mut switched_to: Option<String> = None;
+                let mut final_text: Option<String> = None;
+                let mut emit = |event: &AgentEvent| {
+                    if let AgentEvent::AssistantText(text) = event {
+                        final_text = Some(text.clone());
+                    }
+                    on_event(event);
+                };
                 let outcome = runtime.prompt(&mut session, task, |update| {
                     let line = acp_runtime::log_line(&update);
                     let _ = writeln!(log, "{line}");
                     if let Some(model) = acp_runtime::model_in_update(&update) {
                         switched_to = Some(model);
                     }
-                    coalescer.push(&update, on_event);
+                    coalescer.push(&update, &mut emit);
                 });
-                coalescer.flush(on_event);
+                coalescer.flush(&mut emit);
                 stop_watching.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = watcher.join();
-                (outcome, switched_to)
+                (outcome, switched_to, final_text)
             });
-            let (stop, switched_to) = stop;
+            let (stop, switched_to, final_text) = stop;
             if let Some(model) = switched_to {
                 effective_model = Some(model);
             }
@@ -1527,7 +1540,7 @@ impl Orchestrator {
                 },
             };
             on_event(&AgentEvent::Result { success, summary: summary.clone() });
-            Ok(RunOutcome { success, summary })
+            Ok(RunOutcome { success, summary, final_text })
         })();
         drop(slot);
         let ended_at = unix_now();
@@ -1569,6 +1582,7 @@ impl Orchestrator {
             coord_status,
             model: requested_model.map(str::to_string),
             effective_model: effective_model.clone(),
+            final_message: run_result.as_ref().ok().and_then(|run| run.final_text.clone()),
             usage: None,
             runtime: LaneRuntime::Acp.as_str().to_string(),
             files_touched: pact_vcs::changed_paths(&workspace.path).map(|c| !c.is_empty()).unwrap_or(true),
@@ -2015,8 +2029,15 @@ enum ArbiterOutcome {
 }
 
 fn reported(report_contract: bool, run: &Result<RunOutcome>) -> Option<fleet::WorkerReport> {
-    let run = run.as_ref().ok().filter(|_| report_contract)?;
-    fleet::parse_worker_report(&run.summary)
+    fleet::report_in(run.as_ref().ok().filter(|_| report_contract)?)
+}
+
+impl RunMetadata {
+    /// What the agent last said: its final assistant message, else the
+    /// summary.
+    pub fn last_message(&self) -> &str {
+        self.final_message.as_deref().unwrap_or(&self.summary)
+    }
 }
 
 fn agent_kind_name(kind: AgentKind) -> &'static str {
@@ -2518,7 +2539,7 @@ mod tests {
             agent: AgentKind::Claude,
             result: Ok((
                 fake_workspace(id),
-                RunOutcome { success, summary: "ran".to_string() },
+                RunOutcome { success, summary: "ran".to_string(), final_text: None },
             )),
         }
     }
@@ -3056,6 +3077,7 @@ mod tests {
             model: None,
             usage: None,
             effective_model: None,
+            final_message: None,
             runtime: String::new(),
             files_touched: true,
             log_path: PathBuf::from("/tmp/state/logs/ws-1.jsonl"),
@@ -3122,6 +3144,7 @@ mod tests {
             model: None,
             usage: None,
             effective_model: None,
+            final_message: None,
             runtime: String::new(),
             files_touched: false,
             log_path: PathBuf::from("/tmp/state/logs/ws-2.jsonl"),

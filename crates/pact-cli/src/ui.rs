@@ -535,7 +535,7 @@ fn reply(app: &Arc<App>, request: ReplyRequest) -> Result<serde_json::Value> {
         });
     }
     let earlier = orchestrator.record_reply(&id, &request.answer)?;
-    let prompt = pact_core::fleet::reply_prompt(&workspace.task, &earlier, &run.summary, &request.answer);
+    let prompt = pact_core::fleet::reply_prompt(&workspace.task, &earlier, run.last_message(), &request.answer);
     let task = FleetTask { name: id.clone(), repo, agent, model: run.model, prompt };
     launch(app, task, config, pact_core::DepsMode::None, true);
     Ok(json!({ "id": id }))

@@ -196,7 +196,7 @@ impl Orchestrator {
                     model: meta.as_ref().and_then(|m| m.model.clone()),
                     effective_model: meta.as_ref().and_then(|m| m.effective_model.clone()),
                     seconds: meta.as_ref().map(|m| m.ended_at.saturating_sub(m.started_at)),
-                    summary: meta.as_ref().map(|m| m.summary.clone()),
+                    summary: meta.as_ref().map(|m| m.last_message().to_string()),
                     report: meta.and_then(|m| m.report),
                     id: workspace.id,
                     branch: workspace.branch,
