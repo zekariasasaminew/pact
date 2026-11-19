@@ -3255,7 +3255,7 @@ fn agent_label(kind: AgentKind) -> &'static str {
 
 /// Raw `type` values that are real but uninteresting to a human watching
 /// the stream live -- see docs/design/cli.md ("streamed event filtering")
-/// for the measurements that justified suppressing these two specifically.
+/// for the measurements that justified suppressing each group.
 /// Suppressed only from the live terminal view by default; `--verbose`
 /// restores them, and the full unfiltered stream is always in the
 /// workspace's log file regardless (`run_and_stream` writes every raw line
@@ -3302,6 +3302,34 @@ const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
     "acp.config_option_update",
     "acp.session_info_update",
     "acp.current_mode_update",
+    // Copilot CLI 1.0.114's process-lane stream (issue #449): about 560 of
+    // 724 printed lines in a two-task fleet plus a two-unit run. Streaming
+    // fragments of `assistant.message`, which pact already prints as
+    // `[assistant]` and `[tool]` lines; reasoning text and tool progress,
+    // the analogues of the ACP kinds above; and turn, model-call and
+    // session lifecycle metadata.
+    "assistant.message_delta",
+    "assistant.message_start",
+    "assistant.reasoning_delta",
+    "assistant.reasoning",
+    "assistant.turn_start",
+    "assistant.turn_end",
+    "assistant.idle",
+    "model.call_start",
+    "model.call_final_result",
+    "model.call_finished",
+    "tool.execution_start",
+    "tool.execution_complete",
+    "tool.shell_output",
+    "user.message",
+    "instruction.update",
+    "session.start",
+    "session.tools_updated",
+    "session.indexed_search",
+    "session.extensions_loaded",
+    "session.mcp_server_tools_loaded",
+    "session.custom_agents_updated",
+    "session.managed_settings_resolved",
 ];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
@@ -3340,15 +3368,21 @@ fn should_print_other(value: &serde_json::Value, verbose: bool) -> bool {
     }
 }
 
+/// The coordination server's name in every adapter's MCP config. Copilot
+/// reports every MCP server it knows, most of them the user's own and
+/// disabled in a lean home, so only this one prints unless `--verbose`.
+const COORD_SERVER: &str = "pact-coord";
+
 /// Same event formatting as `print_event`, prefixed with `label` so N
 /// interleaved concurrent agents' output stays attributable -- see
 /// docs/design/cli.md for the line-granularity locking note.
 fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[{label}] [init] session {session_id}"),
-        AgentEvent::CoordStatus { name, status } => {
+        AgentEvent::CoordStatus { name, status } if verbose || name == COORD_SERVER => {
             println!("[{label}] [coord] {name}: {status}")
         }
+        AgentEvent::CoordStatus { .. } => {}
         AgentEvent::AssistantText(text) => println!("[{label}] [assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[{label}] [tool] {name} {input}"),
         AgentEvent::Result { .. } => {}
@@ -3371,7 +3405,8 @@ fn print_event_labeled(label: &str, event: &AgentEvent, verbose: bool) {
 fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
         AgentEvent::Init { session_id } => println!("[init] session {session_id}"),
-        AgentEvent::CoordStatus { name, status } => println!("[coord] {name}: {status}"),
+        AgentEvent::CoordStatus { name, status } if verbose || name == COORD_SERVER => println!("[coord] {name}: {status}"),
+        AgentEvent::CoordStatus { .. } => {}
         AgentEvent::AssistantText(text) => println!("[assistant] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[tool] {name} {input}"),
         AgentEvent::Result { .. } => {} // surfaced by the caller as the final outcome instead
