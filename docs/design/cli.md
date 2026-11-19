@@ -14,7 +14,7 @@ How a command resolves its inputs:
 
 Read-only views are aggregation over existing accessors: `list`, `inspect <id>` (#16), `status [--json]` with pattern-matched hints (#221), `doctor [--json] [--fix-skill-dirs]` (#17, #304). `doctor` fails only when `git` is missing or older than 2.5; agent CLIs and package managers are informational.
 
-Output: events stream as one line each. `should_print_other` hides a list of confirmed-noise raw event types (Copilot, Claude Code, ACP) unless `--verbose`; the log file always keeps everything (#38, #100, #102, #300). Error messages end with a `try: pact doctor` style hint only where one next step is obvious (#123).
+Output: events stream as one line each. `should_print_other` hides a list of confirmed-noise raw event types (Copilot, Claude Code, ACP) unless `--verbose`; the log file always keeps everything (#38, #100, #102, #300). Error messages end with a `try: pact doctor` style hint only where one next step is obvious (#123). End-of-run reports lead with code facts: `pact run` prints the check verdicts and the run's diff stat before the plan and units, `pact fleet` has a `CHANGES` column, and agent prose in either is capped to one 160-character line pointing at `pact inspect` (`report.rs`, #463).
 
 `pact ui` (#390) is an axum server on a current-thread runtime serving one compiled-in `ui.html`, with no framework and no network fetches. It shares `FleetRunner` with `pact fleet`, so `--max-concurrent` and the memory floor are global. It binds 127.0.0.1 only; the `guard` middleware checks the `Host` header and a 244-bit `X-Pact-Token` on every `/api/` call; the page uses a nonce CSP and never `innerHTML`. Repositories are an allow list in `ui-repos.json`. State is not stored by the server: ended tasks are rebuilt from workspaces and run records, and only live tasks and their last 300 output lines are in memory. The page polls (2 s live, 6 s idle, 15 s or never when hidden, #404). The diff comes from `workspace_patch` using a throwaway index, capped at 400 KB. Reply reruns the same agent in the same workspace with `fleet::reply_prompt`, and replies are kept in `meta/replies/<id>.json` (#395, #400, #407). `--json` prints `{"url","token"}` for editor clients (#402).
 
@@ -1025,3 +1025,27 @@ among 48: eleven `item.started`, each repeating the command or file
 change that its `item.completed` prints as a `[tool]` line, and
 `turn.started`/`turn.completed`, which carry token counts and no cost.
 All three join the suppressed list.
+
+### Reports lead with facts (issue #463)
+
+From #396: a reviewer reads code faster than prose, so the end-of-run
+reports put what changed and what fails first. `pact run` prints the
+check verdicts with their failing files, then the diff stat, then the
+plan, units and repairs, with the `run:` line still last so a script or a
+human scanning the tail finds the outcome where it always was. The diff
+stat is `git diff --numstat --no-renames` of the batch's base commit
+against its branch, read after the last commit (`pact_vcs::diff_numstat`),
+so build output a check leaves in the tree is not counted; it is stored
+on `RunReport::diff_stat` so tests assert on data, not only on text.
+Renames count as a deletion and an addition, which keeps the parser to
+one record shape. `pact fleet` reads the same stat from the working tree
+against the workspace's `base_commit`, untracked files included (lines
+counted the way git counts them, a NUL byte in the first 8000 bytes
+marks a binary), because a fleet task's changes stay uncommitted.
+
+Agent prose in both reports goes through `report::cap_prose`: whitespace
+collapsed, cut on a character boundary to 160 characters including the
+`... (pact inspect <id>)` pointer, so a field never wraps into several
+terminal lines. Nothing is lost: the full text stays in the lane log,
+the run record and `pact inspect`. `pact ui` shows the full report in
+its own panel and is unchanged.

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use pact_agents::{AgentEvent, AgentKind, Supervisor};
-use pact_vcs::Workspace;
+use pact_vcs::{FileStat, Workspace};
 
 use crate::{Admission, LaneRuntime, Orchestrator, SpawnOptions};
 
@@ -171,6 +171,9 @@ pub struct FleetOutcome {
     pub summary: String,
     /// Seconds the agent ran, not counting time queued for admission.
     pub seconds: u64,
+    /// Lines added and removed per file in the workspace since its base
+    /// commit, committed or not (issue #463); `None` without a workspace.
+    pub changes: Option<Vec<FileStat>>,
 }
 
 fn status_of(process_succeeded: bool, report: Option<&WorkerReport>) -> FleetStatus {
@@ -293,6 +296,7 @@ fn error_outcome(index: usize, task: &FleetTask, summary: String) -> FleetOutcom
         report: None,
         summary,
         seconds: 0,
+        changes: None,
     }
 }
 
@@ -342,6 +346,10 @@ fn run_task(
                 .run_metadata(&workspace.id)
                 .map(|meta| meta.ended_at.saturating_sub(meta.started_at))
                 .unwrap_or(0);
+            let base = if workspace.base_commit.is_empty() { "HEAD" } else { &workspace.base_commit };
+            let changes = pact_vcs::diff_numstat(&workspace.path, base, None)
+                .inspect_err(|err| tracing::warn!("computing the diff stat of {}: {err:#}", workspace.id))
+                .ok();
             FleetOutcome {
                 index,
                 name: task.name.clone(),
@@ -350,6 +358,7 @@ fn run_task(
                 report,
                 summary: run.final_text.unwrap_or(run.summary),
                 seconds,
+                changes,
             }
         }
         Err(err) => error_outcome(index, task, format!("{err:#}")),

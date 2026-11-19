@@ -147,10 +147,12 @@ fn fleet_exits_1_and_prints_the_notes_when_a_task_is_blocked_or_unreported() {
         format!(
             "[[task]]\nname = \"asks\"\nagent = \"claude\"\nprompt = '{}'\n\n\
              [[task]]\nname = \"silent\"\nagent = \"claude\"\nprompt = '{}'\n\n\
-             [[task]]\nname = \"fine\"\nagent = \"claude\"\nprompt = '{}'\n",
+             [[task]]\nname = \"fine\"\nagent = \"claude\"\nprompt = '{}'\n\n\
+             [[task]]\nname = \"wordy\"\nagent = \"claude\"\nprompt = '{}'\n",
             script(&[], "STATUS: blocked\nNOTES: which database should this use?"),
             script(&[("x.txt", "x")], "I wrote the file."),
             script(&[("y.txt", "y")], &format!("ok{DONE_REPORT}")),
+            script(&[], &format!("STATUS: blocked\nNOTES: {}", "abc ".repeat(100))),
         ),
     )
     .unwrap();
@@ -158,10 +160,19 @@ fn fleet_exits_1_and_prints_the_notes_when_a_task_is_blocked_or_unreported() {
     let output = fleet(&repo, &shim, &file, &["--max-concurrent", "1"]);
     let out = text(&output);
     assert_eq!(output.status.code(), Some(1), "{out}");
-    assert!(out.contains("fleet: 3 tasks, 1 done, 2 not done"), "{out}");
+    assert!(out.contains("fleet: 4 tasks, 1 done, 3 not done"), "{out}");
     assert!(out.contains("NOTES: which database should this use?"), "{out}");
     assert!(out.contains("unreported"), "{out}");
     assert!(out.contains("no STATUS report"), "{out}");
+
+    // Issue #463: each row carries its diff stat, and a long report field
+    // is cut to one line that points at the full text.
+    let row = |name: &str| out.lines().find(|l| l.starts_with(&format!("  {name} "))).unwrap_or_else(|| panic!("no row for {name}:\n{out}"));
+    assert!(row("fine").contains("  1 file +1 -0  "), "{out}");
+    assert!(row("asks").contains("  0 files +0 -0  "), "{out}");
+    let notes = out.lines().find(|l| l.trim_start().starts_with("NOTES: abc")).unwrap_or_else(|| panic!("no long NOTES line:\n{out}"));
+    assert!(notes.ends_with("... (pact inspect wordy)"), "{notes}");
+    assert!(notes.trim_start().chars().count() <= "NOTES: ".len() + 160, "{notes}");
 
     cleanup(&repo);
     let _ = std::fs::remove_dir_all(&shim);

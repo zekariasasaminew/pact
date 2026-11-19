@@ -565,6 +565,9 @@ pub struct RunReport {
     /// Units never launched because a unit they depend on failed (issue
     /// #462); the run fails when there are any.
     pub skipped: Vec<SkippedUnit>,
+    /// Lines added and removed per file, base commit to the batch branch
+    /// (issue #463); empty for a dry run or when no tree was created.
+    pub diff_stat: Vec<pact_vcs::FileStat>,
 }
 
 pub struct SkippedUnit {
@@ -874,6 +877,15 @@ pub fn format_duration(duration: Duration) -> String {
 
 const PLANNER_LABEL: usize = usize::MAX;
 
+/// The run's diff stat for its report; a failure to compute it never
+/// fails the run.
+fn run_diff_stat(batch: &Workspace) -> Vec<pact_vcs::FileStat> {
+    pact_vcs::diff_numstat(&batch.path, &batch.base_commit, Some(&batch.branch)).unwrap_or_else(|err| {
+        tracing::warn!("computing the diff stat of {}: {err:#}", batch.id);
+        Vec::new()
+    })
+}
+
 impl Orchestrator {
     /// Plans, briefs, executes, commits and verifies `task`. Events are
     /// labelled by lane index; the planner's own events use
@@ -1075,6 +1087,7 @@ impl Orchestrator {
                 dirty_paths: Vec::new(),
                 ownership: Vec::new(),
                 skipped: Vec::new(),
+                diff_stat: Vec::new(),
             });
         }
 
@@ -1226,6 +1239,7 @@ impl Orchestrator {
             }
         }
 
+        let diff_stat = batch.as_ref().map(run_diff_stat).unwrap_or_default();
         Ok(RunReport {
             plan,
             plan_path,
@@ -1243,6 +1257,7 @@ impl Orchestrator {
             dirty_paths: Vec::new(),
             ownership,
             skipped,
+            diff_stat,
         })
     }
 
@@ -1596,6 +1611,7 @@ mod tests {
             dirty_paths: Vec::new(),
             ownership: vec![],
             skipped: vec![],
+            diff_stat: vec![],
         };
         assert_eq!(report(vec![]).worst_verdict(), None);
         assert_eq!(report(vec![outcome(true, Some(true)), outcome(true, Some(false))]).worst_verdict(), Some(Verdict::Fixed));

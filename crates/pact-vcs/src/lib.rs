@@ -2186,6 +2186,57 @@ pub fn changed_since(dir: &Path, base: &str) -> Result<Vec<String>> {
     Ok(files.into_iter().collect())
 }
 
+/// Lines added and removed in one file; `None` for a binary file, which
+/// git counts as `-`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStat {
+    pub path: String,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+}
+
+/// Parses `git diff --numstat -z --no-renames`: one `added\tremoved\tpath`
+/// record per NUL.
+pub fn parse_numstat(text: &str) -> Vec<FileStat> {
+    text.split('\0')
+        .filter_map(|record| {
+            let mut fields = record.splitn(3, '\t');
+            let added = fields.next()?;
+            let removed = fields.next()?;
+            let path = fields.next().filter(|p| !p.is_empty())?;
+            Some(FileStat { path: path.replace('\\', "/"), added: added.parse().ok(), removed: removed.parse().ok() })
+        })
+        .collect()
+}
+
+/// Per-file line counts of the changes from commit `base`. With `to`, the
+/// commits `base..to`; without, `dir`'s working tree, staged, unstaged and
+/// untracked files included (what `pact diff` shows for a workspace).
+pub fn diff_numstat(dir: &Path, base: &str, to: Option<&str>) -> Result<Vec<FileStat>> {
+    let mut args = vec!["diff", "--numstat", "-z", "--no-renames", base];
+    args.extend(to);
+    let output = Command::new("git").args(&args).current_dir(dir).output().context("failed to spawn `git diff --numstat`")?;
+    if !output.status.success() {
+        bail!("`git {}` failed in {}: {}", args.join(" "), dir.display(), String::from_utf8_lossy(&output.stderr));
+    }
+    let mut stats = parse_numstat(&String::from_utf8_lossy(&output.stdout));
+    if to.is_none() {
+        let output = Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard", "-z"])
+            .current_dir(dir)
+            .output()
+            .context("failed to spawn `git ls-files`")?;
+        for path in String::from_utf8_lossy(&output.stdout).split('\0').filter(|p| !p.is_empty()) {
+            let bytes = std::fs::read(dir.join(path)).unwrap_or_default();
+            let added = (!bytes.iter().take(8000).any(|b| *b == 0))
+                .then(|| bytes.iter().filter(|b| **b == b'\n').count() as u64 + u64::from(bytes.last().is_some_and(|b| *b != b'\n')));
+            stats.push(FileStat { path: path.replace('\\', "/"), added, removed: added.map(|_| 0) });
+        }
+        stats.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    Ok(stats)
+}
+
 fn short_id() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
 }
@@ -2327,6 +2378,20 @@ mod tests {
         assert!(diagnosis.contains("exit code 1"), "got: {diagnosis}");
         assert!(diagnosis.contains("1.5s"), "got: {diagnosis}");
         assert!(diagnosis.contains("AssertionError"), "got: {diagnosis}");
+    }
+
+    #[test]
+    fn parse_numstat_reads_counts_binary_files_and_odd_paths() {
+        let text = ["3\t1\tsrc/a.rs", "-\t-\timg/logo.png", "0\t2\tdir/with space\tand tab.txt", ""].join("\0");
+        assert_eq!(
+            parse_numstat(&text),
+            vec![
+                FileStat { path: "src/a.rs".into(), added: Some(3), removed: Some(1) },
+                FileStat { path: "img/logo.png".into(), added: None, removed: None },
+                FileStat { path: "dir/with space\tand tab.txt".into(), added: Some(0), removed: Some(2) },
+            ]
+        );
+        assert!(parse_numstat("").is_empty());
     }
 
     fn no_overlap() -> HashSet<String> {
