@@ -656,7 +656,7 @@ fn run_skips_the_units_that_depend_on_a_failed_one_and_runs_the_rest() {
     let plan_path = shim.join("plan.json");
     std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
 
-    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "x"]);
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--max-units", "4", "--plan", plan_path.to_str().unwrap(), "x"]);
     let text = stdout(&out);
     assert_eq!(out.status.code(), Some(1), "{text}\n{}", stderr(&out));
     assert!(text.contains("unit a: failed") && text.contains("unit c: done"), "{text}");
