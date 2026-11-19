@@ -563,3 +563,18 @@ lands like any workspace. `remove_landed` removes the lanes before the
 batch, because the batch's own teardown refuses while lanes remain, and
 `refuse_while_running` checks every lane's agent, not only the batch's.
 `pact run`'s closing line names `pact land <batch>`.
+
+### The worker report lives in the last message, not the summary (issue #447)
+
+Fleet (#388) read the `STATUS:` report from `RunOutcome::summary`,
+which the fake agent fills the way Claude Code does: with the final
+text. Copilot's `result` event carries only an exit code, so the
+summary was `exit code 0`, and an ACP lane's is `stop reason end_turn`.
+A live `pact fleet` with two Copilot tasks marked both `unreported`
+although each ended with a full report, and the ui and reply prompt
+quoted `exit code 0` as what the agent said. The process runner and
+the ACP lane now keep the last assistant message (`final_text`), the
+run record stores it as `final_message`, the report is read from the
+summary and then from it, and `RunMetadata::last_message` gives the ui
+and the reply prompt the message itself. The same fleet then reported
+both tasks done.
