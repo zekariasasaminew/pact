@@ -317,7 +317,8 @@ enum Command {
         /// Minimum available memory, in MiB, before another agent is
         /// admitted (issue #285); queued tasks wait, with a message every
         /// 15 s, rather than launch into paging. 0 disables the check.
-        /// Default 1500. Falls back to `pact.toml`'s `defaults.min_free_mem_mb`.
+        /// Default 1500. Falls back to `pact.toml`'s `defaults.min_free_mem_mb`,
+        /// then the `PACT_MIN_FREE_MEM_MB` environment variable.
         #[arg(long)]
         min_free_mem_mb: Option<u64>,
 

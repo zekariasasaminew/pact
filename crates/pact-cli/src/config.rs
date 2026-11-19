@@ -74,8 +74,14 @@ impl PactConfig {
         self.defaults.max_concurrent
     }
 
+    /// `defaults.min_free_mem_mb`, else the `PACT_MIN_FREE_MEM_MB`
+    /// environment variable (issue #451: the test suite sets it to 0 so a
+    /// machine low on memory does not hold every test's lanes in the
+    /// queue).
     pub fn default_min_free_mem_mb(&self) -> Option<u64> {
-        self.defaults.min_free_mem_mb
+        self.defaults.min_free_mem_mb.or_else(|| {
+            std::env::var("PACT_MIN_FREE_MEM_MB").ok().and_then(|value| value.trim().parse().ok())
+        })
     }
 
     pub fn default_stagger_ms(&self) -> Option<u64> {

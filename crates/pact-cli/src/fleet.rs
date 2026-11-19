@@ -53,7 +53,7 @@ pub struct FleetArgs {
 
     /// Free memory (MiB) required before another agent is launched; 0
     /// disables the check. Falls back to the file's
-    /// `defaults.min_free_mem_mb`, then 1500.
+    /// `defaults.min_free_mem_mb`, then `PACT_MIN_FREE_MEM_MB`, then 1500.
     #[arg(long)]
     min_free_mem_mb: Option<u64>,
 
