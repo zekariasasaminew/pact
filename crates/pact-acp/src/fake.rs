@@ -8,10 +8,13 @@
 //!
 //! ```json
 //! {"writes": {"a.txt": "A"}, "summary": "did a", "ask_permission": false,
-//!  "exit_mid_turn": false, "stop": "end_turn", "sleep_ms": 0}
+//!  "exit_mid_turn": false, "stop": "end_turn", "sleep_ms": 0,
+//!  "require_files": ["b.txt"]}
 //! ```
 //!
-//! Behaviour per prompt: emit a `usage_update`; if `ask_permission`, send
+//! Behaviour per prompt: emit a `usage_update`; if a `require_files` entry
+//! is missing from the session's cwd, end the turn with `refusal` and
+//! write nothing; if `ask_permission`, send
 //! `session/request_permission` and wait for the answer (a rejection or
 //! cancellation skips the writes); for each write emit `tool_call` (kind
 //! `edit`, with the file's absolute path in `locations`), write
@@ -178,6 +181,21 @@ impl Fake {
         }
 
         let mut allowed = true;
+        let missing: Vec<String> = task
+            .get("require_files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|file| !std::path::Path::new(&cwd).join(file).exists())
+            .map(str::to_string)
+            .collect();
+        if !missing.is_empty() {
+            let summary = format!("missing {}", missing.join(", "));
+            self.update(&session_id, json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": summary } }));
+            self.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "refusal" } }));
+            return;
+        }
         if task.get("ask_permission").and_then(Value::as_bool).unwrap_or(false) {
             self.next_request += 1;
             let request_id = json!(format!("perm-{}", self.next_request));
@@ -236,7 +254,7 @@ impl Fake {
 /// planner prompt embeds a JSON schema that must not be mistaken for a
 /// task. `None` for a prompt that carries no task object at all.
 fn parse_task(text: &str) -> Option<Value> {
-    const TASK_KEYS: &[&str] = &["writes", "summary", "ask_permission", "exit_mid_turn", "sleep_ms", "stop"];
+    const TASK_KEYS: &[&str] = &["writes", "summary", "ask_permission", "exit_mid_turn", "sleep_ms", "stop", "require_files"];
     let is_task = |value: &Value| value.as_object().is_some_and(|obj| TASK_KEYS.iter().any(|k| obj.contains_key(*k)));
     if let Ok(task) = serde_json::from_str::<Value>(text) {
         if is_task(&task) {

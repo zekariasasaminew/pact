@@ -15,8 +15,8 @@
 //! up to a few times, renders one self-contained brief per unit, runs
 //! the batch as a shared tree (disjoint by construction, so no isolation
 //! and no merge), commits once, runs the task-level verification in the
-//! batch worktree and reports. Dependent units (waves, #282) and
-//! gap-closing after a failed verification are deliberately not here.
+//! batch worktree and reports. Units that depend on other units run in
+//! later waves, each committed before the next starts (issue #462).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -77,6 +77,10 @@ pub struct PlanUnit {
     /// A unit-scoped check the worker runs on its own work.
     #[serde(default)]
     pub verify: Option<String>,
+    /// Names of the units whose work this one reads (issue #462): it runs
+    /// in a later wave, after they are committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 /// Mechanical plan checks, pure so they are unit-testable. Empty means
@@ -126,7 +130,120 @@ pub fn validate_plan(plan: &Plan, max_units: usize) -> Vec<String> {
     for (file, units) in overlaps {
         problems.push(format!("file {file:?} is owned by more than one unit ({}); give it to exactly one", units.join(", ")));
     }
+    problems.extend(dependency_problems(plan));
     problems
+}
+
+fn unit_index(plan: &Plan, name: &str) -> Option<usize> {
+    plan.units.iter().position(|unit| unit.name.trim() == name.trim())
+}
+
+/// Each unit's distinct dependencies as unit indices, itself and unknown
+/// names left out.
+fn dependency_indices(plan: &Plan) -> Vec<Vec<usize>> {
+    plan.units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            let mut deps: Vec<usize> = Vec::new();
+            for dep in unit.depends_on.iter().filter_map(|name| unit_index(plan, name)) {
+                if dep != index && !deps.contains(&dep) {
+                    deps.push(dep);
+                }
+            }
+            deps
+        })
+        .collect()
+}
+
+/// Unknown names, self-dependencies and cycles in `depends_on` (issue #462).
+fn dependency_problems(plan: &Plan) -> Vec<String> {
+    let mut problems = Vec::new();
+    for unit in &plan.units {
+        let name = unit.name.trim();
+        let mut named: Vec<&str> = Vec::new();
+        for dep in unit.depends_on.iter().map(|dep| dep.trim()) {
+            if named.contains(&dep) {
+                continue;
+            }
+            named.push(dep);
+            if dep == name {
+                problems.push(format!("unit {name:?} depends on itself; remove {dep:?} from its `depends_on`"));
+            } else if unit_index(plan, dep).is_none() {
+                problems.push(format!("unit {name:?} depends on {dep:?}, which is not a unit in this plan; use the exact name of another unit"));
+            }
+        }
+    }
+    let edges = dependency_indices(plan);
+    let mut state = vec![0u8; edges.len()];
+    let mut path = Vec::new();
+    let mut cycles: Vec<Vec<usize>> = Vec::new();
+    for start in 0..edges.len() {
+        find_cycles(start, &edges, &mut state, &mut path, &mut cycles);
+    }
+    for cycle in cycles {
+        let steps: Vec<String> = cycle
+            .iter()
+            .enumerate()
+            .map(|(position, &unit)| format!("{:?} depends on {:?}", plan.units[unit].name.trim(), plan.units[cycle[(position + 1) % cycle.len()]].name.trim()))
+            .collect();
+        problems.push(format!("units depend on each other in a cycle ({}); remove one of those dependencies", steps.join(", ")));
+    }
+    problems
+}
+
+/// Depth-first search that records each cycle once, as the path from the
+/// unit it returns to. `state`: 0 unvisited, 1 on the current path, 2 done.
+fn find_cycles(unit: usize, edges: &[Vec<usize>], state: &mut [u8], path: &mut Vec<usize>, cycles: &mut Vec<Vec<usize>>) {
+    if state[unit] != 0 {
+        return;
+    }
+    state[unit] = 1;
+    path.push(unit);
+    for &next in &edges[unit] {
+        match state[next] {
+            0 => find_cycles(next, edges, state, path, cycles),
+            1 => {
+                let start = path.iter().position(|&u| u == next).expect("on the path");
+                cycles.push(path[start..].to_vec());
+            }
+            _ => {}
+        }
+    }
+    path.pop();
+    state[unit] = 2;
+}
+
+/// Each unit's wave, in plan order (issue #462): 1 for a unit with no
+/// dependencies, else one more than the latest wave among them. Cycles
+/// are `validate_plan`'s to reject; here they only stop the relaxation.
+pub fn plan_waves(plan: &Plan) -> Vec<usize> {
+    let deps = dependency_indices(plan);
+    let mut waves = vec![1; plan.units.len()];
+    for _ in 0..plan.units.len() {
+        let mut changed = false;
+        for (index, unit_deps) in deps.iter().enumerate() {
+            let wave = 1 + unit_deps.iter().map(|&dep| waves[dep]).max().unwrap_or(0);
+            if wave != waves[index] {
+                waves[index] = wave;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    waves
+}
+
+/// The units' indices grouped by wave, first wave first, plan order within one.
+pub fn wave_groups(plan: &Plan) -> Vec<Vec<usize>> {
+    let waves = plan_waves(plan);
+    let last = waves.iter().copied().max().unwrap_or(0);
+    (1..=last)
+        .map(|wave| (0..waves.len()).filter(|&index| waves[index] == wave).collect::<Vec<_>>())
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 /// The longest unit name a plan may use (issue #414).
@@ -229,7 +346,8 @@ const PLAN_SCHEMA: &str = r#"{
       "name": "short-kebab-case-name",
       "files": ["repo/relative/path/this/unit/creates-or-edits.ts"],
       "brief": "two or three sentences: the existing file to imitate, the one or two non-obvious things you found, the acceptance criteria",
-      "verify": "optional cheap shell command scoped to this unit's own files (its test files alone); never the whole suite, type-check or lint"
+      "verify": "optional cheap shell command scoped to this unit's own files (its test files alone); never the whole suite, type-check or lint",
+      "depends_on": ["optional: names of the units whose new files this unit must read; leave it out for an independent unit"]
     }
   ]
 }"#;
@@ -265,6 +383,10 @@ pub fn planner_prompt(task: &str, max_units: usize, anchors: &[String]) -> Strin
          files fewer companions, and split a unit rather than let it hold more than two or three heavy ones.\n\
          - Each unit lists every file it will create or edit under `files`, repo-relative. No file may appear \
          in two units. Files a unit only reads are not listed.\n\
+         - Prefer independent units. Use `depends_on` only when a unit must read files another unit creates \
+         (it imports a new module, or tests code another unit writes). A unit with `depends_on` runs in a later \
+         wave, after the units it names are done, and waves run one after another, so every dependency costs \
+         wall-clock time.\n\
          - Shared files that several units would need to edit (barrels, setup, config, lockfiles) go to exactly \
          one unit, or the task is restructured so nobody edits them.\n\
          - Every worker receives the complete TASK text above verbatim, together with its own `files` list, \
@@ -344,6 +466,25 @@ fn retry_prompt(first_prompt: &str, keeps_context: bool, previous_json: &str, pr
     }
 }
 
+/// The brief section naming the units a dependent unit runs after and
+/// their files (issue #462); empty for an independent unit.
+fn dependency_section(plan: &Plan, unit: &PlanUnit) -> String {
+    let mut deps: Vec<&PlanUnit> = Vec::new();
+    for dep in unit.depends_on.iter().filter_map(|name| unit_index(plan, name)).map(|index| &plan.units[index]) {
+        if dep.name.trim() != unit.name.trim() && !deps.iter().any(|d| d.name == dep.name) {
+            deps.push(dep);
+        }
+    }
+    if deps.is_empty() {
+        return String::new();
+    }
+    let mut section = "\n## Work done before yours\n\nThese units ran before yours. Their files are already written and committed in this checkout: read them as you need, but do not edit them.\n".to_string();
+    for dep in deps {
+        section.push_str(&format!("- unit `{}`: {}\n", dep.name.trim(), dep.files.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")));
+    }
+    section
+}
+
 /// One unit's self-contained worker brief. The shared-tree preamble
 /// (claim your files, touch nothing else) is added by `spawn_many`.
 pub fn render_brief(plan: &Plan, unit: &PlanUnit) -> String {
@@ -356,6 +497,7 @@ pub fn render_brief(plan: &Plan, unit: &PlanUnit) -> String {
     for file in &unit.files {
         brief.push_str(&format!("- `{file}`\n"));
     }
+    brief.push_str(&dependency_section(plan, unit));
     brief.push_str(&format!(
         "\n## What to produce\n\nDo the task above for the files you own, and only those. The planner adds, for your unit:\n\n{}\n",
         unit.brief.trim()
@@ -420,6 +562,15 @@ pub struct RunReport {
     /// Files the units' lanes wrote outside their own (issue #409); the
     /// run fails when there are any. Nothing is reverted.
     pub ownership: Vec<OwnershipViolation>,
+    /// Units never launched because a unit they depend on failed (issue
+    /// #462); the run fails when there are any.
+    pub skipped: Vec<SkippedUnit>,
+}
+
+pub struct SkippedUnit {
+    pub unit: String,
+    /// Why, in report words: `depends on <failed unit>`.
+    pub reason: String,
 }
 
 pub struct RepairOutcome {
@@ -443,7 +594,7 @@ impl RunReport {
             && self.outcomes.iter().all(|o| matches!(&o.result, Ok((_, run)) if run.success));
         // An inconclusive verification is not a success: the user has to
         // judge the result some other way, and the exit code says so.
-        lanes_ok && self.ownership.is_empty() && self.verify.iter().all(|v| v.success)
+        lanes_ok && self.skipped.is_empty() && self.ownership.is_empty() && self.verify.iter().all(|v| v.success)
     }
 
     /// The verdict that decides the exit code: the worst across the
@@ -923,6 +1074,7 @@ impl Orchestrator {
                 verify: Vec::new(),
                 dirty_paths: Vec::new(),
                 ownership: Vec::new(),
+                skipped: Vec::new(),
             });
         }
 
@@ -946,33 +1098,84 @@ impl Orchestrator {
             None if verify_commands.is_empty() => Vec::new(),
             None => self.run_baselines(&batch, &verify_commands, verify_context, &planner_events)?,
         };
-        let snapshots = FinishSnapshots::default();
-        let lane_events = |index: usize, agent: &AgentKind, event: &AgentEvent| {
-            if let (AgentEvent::Result { .. }, Some(unit)) = (event, plan.units.get(index)) {
-                snapshots.record(index, &unit.files, &batch.path);
-            }
-            on_event(index, agent, event)
-        };
-        let outcomes = self.spawn_many_in(tasks, spawn_options, Some(batch.clone()), lane_events);
-        let batch = self.workspaces.get_workspace(&batch.id).ok();
-
+        let waves = wave_groups(&plan);
+        let mut pending: Vec<Option<SpawnManyTask>> = tasks.into_iter().map(Some).collect();
+        // Per unit, the failed unit that stops it: its own name when its
+        // lane failed, the inherited cause when it was skipped.
+        let mut blocked: Vec<Option<String>> = vec![None; plan.units.len()];
+        let mut outcomes = Vec::new();
+        let mut skipped = Vec::new();
         let mut committed = None;
+        let mut ownership = Vec::new();
+        let mut batch = Some(batch);
+        for (wave_index, wave) in waves.iter().enumerate() {
+            let Some(tree) = batch.clone() else { break };
+            let mut launch: Vec<usize> = Vec::new();
+            for &index in wave {
+                let unit = &plan.units[index];
+                match unit.depends_on.iter().find_map(|dep| unit_index(&plan, dep).and_then(|dep| blocked[dep].clone())) {
+                    Some(cause) => {
+                        planner_events(&AgentEvent::Phase(format!("skipping unit {}: it depends on {cause}, which failed", unit.name.trim())));
+                        skipped.push(SkippedUnit { unit: unit.name.trim().to_string(), reason: format!("depends on {cause}") });
+                        pending[index] = None;
+                        blocked[index] = Some(cause);
+                    }
+                    None => launch.push(index),
+                }
+            }
+            if launch.is_empty() {
+                continue;
+            }
+            let wave_label = if waves.len() > 1 { format!("wave {}/{} ", wave_index + 1, waves.len()) } else { String::new() };
+            if waves.len() > 1 {
+                let names: Vec<&str> = launch.iter().map(|&index| plan.units[index].name.trim()).collect();
+                planner_events(&AgentEvent::Phase(format!("{wave_label}starting: {}", names.join(", "))));
+            }
+            let base = if wave_index == 0 { tree.base_commit.clone() } else { head_commit(&tree.path)? };
+            let snapshots = FinishSnapshots::default();
+            let lane_events = |local: usize, agent: &AgentKind, event: &AgentEvent| {
+                let index = launch.get(local).copied().unwrap_or(local);
+                if let (AgentEvent::Result { .. }, Some(unit)) = (event, plan.units.get(index)) {
+                    snapshots.record(index, &unit.files, &tree.path);
+                }
+                on_event(index, agent, event)
+            };
+            let wave_tasks: Vec<SpawnManyTask> = launch.iter().map(|&index| pending[index].take().expect("each unit launches once")).collect();
+            let mut wave_outcomes = self.spawn_many_in(wave_tasks, spawn_options, Some(tree.clone()), lane_events);
+            for outcome in &mut wave_outcomes {
+                outcome.index = launch[outcome.index];
+                if !matches!(&outcome.result, Ok((_, run)) if run.success) {
+                    blocked[outcome.index] = Some(plan.units[outcome.index].name.trim().to_string());
+                }
+            }
+            batch = self.workspaces.get_workspace(&tree.id).ok();
+            if let Some(tree) = &batch {
+                let changed = pact_vcs::changed_since(&tree.path, &base).context("listing the files the lanes changed")?;
+                let logs = self.workspaces.state_dir().join("logs");
+                let lane_edits: Vec<(usize, Vec<String>)> = wave_outcomes
+                    .iter()
+                    .filter_map(|outcome| outcome.result.as_ref().ok().map(|(lane, _)| (outcome.index, edits_in_log(&logs.join(format!("{}.jsonl", lane.id)), &tree.path))))
+                    .collect();
+                let found = check_ownership(&plan, &launch, &changed, &lane_edits, snapshots, tree_hash(&tree.path));
+                for violation in &found {
+                    planner_events(&AgentEvent::Phase(format!("ownership: {violation}")));
+                }
+                ownership.extend(found);
+                planner_events(&AgentEvent::Phase(format!("committing {wave_label}the shared tree {}", tree.id)));
+                let wave_committed = self.workspaces.commit_all(&tree.id).context("committing the batch")?;
+                committed = Some(committed.unwrap_or(false) || wave_committed);
+            }
+            outcomes.extend(wave_outcomes);
+        }
+        for (index, task) in pending.iter().enumerate() {
+            if task.is_some() {
+                skipped.push(SkippedUnit { unit: plan.units[index].name.trim().to_string(), reason: "the shared tree was gone before its wave".to_string() });
+            }
+        }
+
         let mut repairs = Vec::new();
         let mut verify = Vec::new();
-        let mut ownership = Vec::new();
         if let Some(batch) = &batch {
-            let changed = pact_vcs::changed_since(&batch.path, &batch.base_commit).context("listing the files the lanes changed")?;
-            let logs = self.workspaces.state_dir().join("logs");
-            let lane_edits: Vec<(usize, Vec<String>)> = outcomes
-                .iter()
-                .filter_map(|outcome| outcome.result.as_ref().ok().map(|(lane, _)| (outcome.index, edits_in_log(&logs.join(format!("{}.jsonl", lane.id)), &batch.path))))
-                .collect();
-            ownership = check_ownership(&plan, &changed, &lane_edits, snapshots, tree_hash(&batch.path));
-            for violation in &ownership {
-                planner_events(&AgentEvent::Phase(format!("ownership: {violation}")));
-            }
-            planner_events(&AgentEvent::Phase(format!("committing the shared tree {}", batch.id)));
-            committed = Some(self.workspaces.commit_all(&batch.id).context("committing the batch")?);
             verify = self.verify_run(batch, &verify_commands, &baselines, verify_context, "after", &planner_events)?;
 
             let touched_files = self.workspaces.workspace_changes(&batch.id).context("finding files touched by the run")?.files;
@@ -1039,6 +1242,7 @@ impl Orchestrator {
             verify,
             dirty_paths: Vec::new(),
             ownership,
+            skipped,
         })
     }
 
@@ -1275,6 +1479,16 @@ fn append_log_line(path: &Path, line: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// The commit `dir` has checked out: the base of a later wave's
+/// ownership check (issue #462).
+fn head_commit(dir: &Path) -> Result<String> {
+    let output = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir).output().context("running `git rev-parse HEAD` in the shared tree")?;
+    if !output.status.success() {
+        bail!("`git rev-parse HEAD` failed in {}: {}", dir.display(), String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// The first ten of `paths`, then how many more.
 fn list_paths(paths: &[String]) -> String {
     const SHOWN: usize = 10;
@@ -1330,7 +1544,7 @@ mod tests {
     use super::*;
 
     fn unit(name: &str, files: &[&str]) -> PlanUnit {
-        PlanUnit { name: name.into(), files: files.iter().map(|f| f.to_string()).collect(), brief: format!("do {name}"), verify: None }
+        PlanUnit { name: name.into(), files: files.iter().map(|f| f.to_string()).collect(), brief: format!("do {name}"), verify: None, depends_on: vec![] }
     }
 
     fn plan(units: Vec<PlanUnit>) -> Plan {
@@ -1381,6 +1595,7 @@ mod tests {
             verify,
             dirty_paths: Vec::new(),
             ownership: vec![],
+            skipped: vec![],
         };
         assert_eq!(report(vec![]).worst_verdict(), None);
         assert_eq!(report(vec![outcome(true, Some(true)), outcome(true, Some(false))]).worst_verdict(), Some(Verdict::Fixed));
@@ -1427,7 +1642,7 @@ mod tests {
         let p = plan(vec![
             unit("a", &["src/shared.ts", "src/a.ts"]),
             unit("A", &["src/shared.ts", "../outside.ts", "C:/abs.ts"]),
-            PlanUnit { name: "---".into(), files: vec![], brief: "  ".into(), verify: None },
+            PlanUnit { name: "---".into(), files: vec![], brief: "  ".into(), verify: None, depends_on: vec![] },
         ]);
         let problems = validate_plan(&p, 8);
         let joined = problems.join("\n");
@@ -1461,6 +1676,58 @@ mod tests {
         assert!(validate_plan(&p, 2).iter().any(|m| m.contains("has 3 units; at most 2")));
     }
 
+    fn after(mut unit: PlanUnit, deps: &[&str]) -> PlanUnit {
+        unit.depends_on = deps.iter().map(|d| d.to_string()).collect();
+        unit
+    }
+
+    #[test]
+    fn dependencies_on_unknown_units_on_itself_or_in_a_cycle_are_each_named() {
+        let p = plan(vec![
+            after(unit("a", &["a.ts"]), &["b"]),
+            after(unit("b", &["b.ts"]), &["c", "c"]),
+            after(unit("c", &["c.ts"]), &["a"]),
+            after(unit("d", &["d.ts"]), &["d", "ghost", "a"]),
+        ]);
+        let problems = validate_plan(&p, 8);
+        let joined = problems.join("\n");
+        assert!(joined.contains("unit \"d\" depends on itself"), "{joined}");
+        assert!(joined.contains("unit \"d\" depends on \"ghost\", which is not a unit in this plan"), "{joined}");
+        assert!(
+            joined.contains("units depend on each other in a cycle (\"a\" depends on \"b\", \"b\" depends on \"c\", \"c\" depends on \"a\")"),
+            "{joined}"
+        );
+        assert_eq!(problems.len(), 3, "the duplicate `c` and the edge into the cycle add nothing:\n{joined}");
+        let fine = plan(vec![unit("a", &["a.ts"]), after(unit("b", &["b.ts"]), &["a", "a"])]);
+        assert!(validate_plan(&fine, 8).is_empty());
+    }
+
+    #[test]
+    fn a_units_wave_is_one_more_than_its_latest_dependency() {
+        let diamond = plan(vec![
+            after(unit("d", &["d"]), &["b", "c"]),
+            after(unit("b", &["b"]), &["a"]),
+            unit("a", &["a"]),
+            after(unit("c", &["c"]), &["a"]),
+        ]);
+        assert_eq!(plan_waves(&diamond), [3, 2, 1, 2]);
+        assert_eq!(wave_groups(&diamond), [vec![2], vec![1, 3], vec![0]], "plan order within a wave");
+        let chain = plan(vec![after(unit("c", &["c"]), &["b"]), after(unit("b", &["b"]), &["a"]), unit("a", &["a"])]);
+        assert_eq!(plan_waves(&chain), [3, 2, 1]);
+        let independent = plan(vec![unit("a", &["a"]), unit("b", &["b"])]);
+        assert_eq!(wave_groups(&independent), [vec![0, 1]], "no dependencies is one wave, as before #462");
+    }
+
+    #[test]
+    fn a_dependent_units_brief_names_the_units_before_it_and_their_files() {
+        let p = plan(vec![unit("core", &["src/calc.ts", "src/types.ts"]), after(unit("ui", &["src/view.ts"]), &["core"])]);
+        let brief = render_brief(&p, &p.units[1]);
+        assert!(brief.contains("## Work done before yours"), "{brief}");
+        assert!(brief.contains("already written and committed in this checkout: read them as you need, but do not edit them"), "{brief}");
+        assert!(brief.contains("- unit `core`: `src/calc.ts`, `src/types.ts`"), "{brief}");
+        assert!(!render_brief(&p, &p.units[0]).contains("Work done before yours"));
+    }
+
     #[test]
     fn plan_json_is_taken_from_the_last_fenced_block_or_the_outermost_braces() {
         let reply = "Here is a draft:\n```json\n{\"units\": []}\n```\nActually, final:\n```json\n{\"units\": [{\"name\": \"a\", \"files\": [\"a\"], \"brief\": \"x\"}]}\n```\nDone.";
@@ -1475,7 +1742,7 @@ mod tests {
 
     #[test]
     fn briefs_carry_files_brief_shared_context_and_the_rules_workers_kept_breaking() {
-        let p = plan(vec![PlanUnit { name: "parser".into(), files: vec!["lib/parse.test.ts".into()], brief: "Cover parse()".into(), verify: Some("npx vitest run lib".into()) }]);
+        let p = plan(vec![PlanUnit { name: "parser".into(), files: vec!["lib/parse.test.ts".into()], brief: "Cover parse()".into(), verify: Some("npx vitest run lib".into()), depends_on: vec![] }]);
         let brief = render_brief(&p, &p.units[0]);
         for expected in ["# Unit `parser`", "> big task", "- `lib/parse.test.ts`", "Do the task above for the files you own", "Cover parse()", "use vitest", "Do not install packages", "Do not commit", "`npx vitest run lib`", "reply DONE"] {
             assert!(brief.contains(expected), "missing {expected:?} in:\n{brief}");
@@ -1487,7 +1754,7 @@ mod tests {
     /// any, the unit's own check is all the brief can ask for.
     #[test]
     fn briefs_hand_the_project_wide_checks_to_pact_and_scope_the_worker_to_its_own_files() {
-        let mut p = plan(vec![PlanUnit { name: "u".into(), files: vec!["a.ts".into()], brief: "x".into(), verify: Some("npx vitest run a".into()) }, unit("v", &["b.ts"])]);
+        let mut p = plan(vec![PlanUnit { name: "u".into(), files: vec!["a.ts".into()], brief: "x".into(), verify: Some("npx vitest run a".into()), depends_on: vec![] }, unit("v", &["b.ts"])]);
         p.verify = vec!["npm test".into(), "npm run typecheck".into(), " ".into()];
         let with_check = render_brief(&p, &p.units[0]);
         assert!(with_check.contains("pact runs the project-wide checks once on the combined result after every unit finishes: `npm test`, `npm run typecheck`."), "{with_check}");

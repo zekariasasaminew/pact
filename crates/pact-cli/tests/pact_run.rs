@@ -606,6 +606,70 @@ fn run_names_a_lane_that_writes_another_units_file_or_an_unowned_one() {
 }
 
 #[test]
+fn run_starts_a_dependent_unit_from_a_tree_that_holds_its_dependencys_work() {
+    // Issue #462: `b` reads what `a` writes, so it runs in a second wave
+    // after `a` is committed. The fake fails a turn whose `require_files`
+    // are missing.
+    let repo = init_repo("waves");
+    let shim = shim_dir();
+    let b = serde_json::json!({ "require_files": ["a.txt"], "writes": { "b.txt": "B" }, "summary": "b" }).to_string();
+    let plan = serde_json::json!({
+        "task": "two dependent files",
+        "units": [
+            { "name": "b", "files": ["b.txt"], "brief": b, "depends_on": ["a"] },
+            { "name": "a", "files": ["a.txt"], "brief": write_task("a.txt", "A", "a") }
+        ],
+    });
+    let plan_path = shim.join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--plan", plan_path.to_str().unwrap(), "x"]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "{text}\n{}", stderr(&out));
+    assert!(text.contains("  b (wave 2, after a): 1 file") && text.contains("  a (wave 1): 1 file"), "{text}");
+    assert!(text.contains("[planner] [phase] wave 2/2 starting: b"), "{text}");
+    assert!(text.contains("unit a: done") && text.contains("unit b: done"), "{text}");
+    let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
+    let batch = manager.list_workspaces().unwrap().into_iter().find(|w| w.shared_batch.is_none()).expect("a shared-tree batch");
+    assert_eq!(run_git(&batch.path, &["rev-list", "--count", &format!("{}..HEAD", batch.base_commit)]).trim(), "2", "one commit per wave");
+    let brief_dirs: Vec<PathBuf> = std::fs::read_dir(state_dir(&repo).join("briefs")).unwrap().map(|e| e.unwrap().path()).collect();
+    let b_brief = std::fs::read_to_string(brief_dirs[0].join("b.md")).unwrap();
+    assert!(b_brief.contains("- unit `a`: `a.txt`"), "{b_brief}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
+fn run_skips_the_units_that_depend_on_a_failed_one_and_runs_the_rest() {
+    let repo = init_repo("waves-fail");
+    let shim = shim_dir();
+    let plan = serde_json::json!({
+        "task": "dependent files, one failing",
+        "units": [
+            { "name": "a", "files": ["a.txt"], "brief": serde_json::json!({ "summary": "gave up", "stop": "refusal" }).to_string() },
+            { "name": "b", "files": ["b.txt"], "brief": write_task("b.txt", "B", "b"), "depends_on": ["a"] },
+            { "name": "c", "files": ["c.txt"], "brief": write_task("c.txt", "C", "c") },
+            { "name": "d", "files": ["d.txt"], "brief": write_task("d.txt", "D", "d"), "depends_on": ["b"] }
+        ],
+    });
+    let plan_path = shim.join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+
+    let out = pact(&repo, &shim, None, &["run", "--agent", "copilot", "--max-units", "4", "--plan", plan_path.to_str().unwrap(), "x"]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}\n{}", stderr(&out));
+    assert!(text.contains("unit a: failed") && text.contains("unit c: done"), "{text}");
+    assert!(text.contains("unit b: skipped: depends on a") && text.contains("unit d: skipped: depends on a"), "{text}");
+    let manager = pact_vcs::WorkspaceManager::open(&repo).unwrap();
+    let lanes: Vec<String> = manager.list_workspaces().unwrap().into_iter().filter(|w| w.shared_batch.is_some()).map(|w| w.id).collect();
+    assert!(!lanes.contains(&"b".to_string()) && !lanes.contains(&"d".to_string()), "skipped units never launch: {lanes:?}");
+
+    cleanup(&repo);
+    cleanup(&shim);
+}
+
+#[test]
 fn run_refuses_a_plan_file_that_cannot_run() {
     let repo = init_repo("bad-file");
     let shim = shim_dir();

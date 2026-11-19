@@ -2978,8 +2978,15 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
     if let Some(log) = &report.planner_log {
         println!("  planner log: {}", log.display());
     }
-    for (unit, brief) in report.plan.units.iter().zip(&report.brief_paths) {
-        println!("  {}: {} file{} -- brief {}", unit.name, unit.files.len(), if unit.files.len() == 1 { "" } else { "s" }, brief.display());
+    let waves = pact_core::run::plan_waves(&report.plan);
+    let multi_wave = waves.iter().any(|&wave| wave > 1);
+    for ((unit, brief), wave) in report.plan.units.iter().zip(&report.brief_paths).zip(&waves) {
+        let wave = match (multi_wave, unit.depends_on.is_empty()) {
+            (false, _) => String::new(),
+            (true, true) => format!(" (wave {wave})"),
+            (true, false) => format!(" (wave {wave}, after {})", unit.depends_on.join(", ")),
+        };
+        println!("  {}{wave}: {} file{} -- brief {}", unit.name, unit.files.len(), if unit.files.len() == 1 { "" } else { "s" }, brief.display());
         for file in &unit.files {
             println!("      {file}");
         }
@@ -3012,6 +3019,9 @@ fn print_run_report(report: &pact_core::run::RunReport, orchestrator: &Orchestra
                 println!("unit {unit}: FAILED, never ran: {err:#}");
             }
         }
+    }
+    for skipped in &report.skipped {
+        println!("unit {}: skipped: {}", skipped.unit, skipped.reason);
     }
     for violation in &report.ownership {
         println!("ownership: {violation}");

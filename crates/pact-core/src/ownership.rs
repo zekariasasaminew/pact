@@ -117,11 +117,13 @@ pub(crate) fn edits_in_log(log: &Path, tree: &Path) -> Vec<String> {
 }
 
 /// Every ownership violation in a finished batch: `changed` is what the
-/// tree carries over its base, `lane_edits` the paths each unit's lane
-/// logged editing, `snapshots` the owned files hashed as each lane
-/// finished and `current_hash` the same hash now.
+/// tree carries over its base, `lanes` the units whose lanes ran (one
+/// wave's, issue #462), `lane_edits` the paths each unit's lane logged
+/// editing, `snapshots` the owned files hashed as each lane finished and
+/// `current_hash` the same hash now.
 pub(crate) fn check_ownership(
     plan: &Plan,
+    lanes: &[usize],
     changed: &[String],
     lane_edits: &[(usize, Vec<String>)],
     snapshots: FinishSnapshots,
@@ -157,7 +159,9 @@ pub(crate) fn check_ownership(
             if current_hash(file) == *at_finish {
                 continue;
             }
-            let still_running: Vec<String> = (0..plan.units.len())
+            let still_running: Vec<String> = lanes
+                .iter()
+                .copied()
                 .filter(|other| other != unit && !finished[..=position].iter().any(|(done, _)| done == other))
                 .map(name)
                 .collect();
@@ -184,7 +188,7 @@ mod tests {
         Plan {
             task: "t".into(),
             shared_context: String::new(),
-            units: units.iter().map(|(name, files)| PlanUnit { name: name.to_string(), files: files.iter().map(|f| f.to_string()).collect(), brief: "b".into(), verify: None }).collect(),
+            units: units.iter().map(|(name, files)| PlanUnit { name: name.to_string(), files: files.iter().map(|f| f.to_string()).collect(), brief: "b".into(), verify: None, depends_on: vec![] }).collect(),
             verify: vec![],
         }
     }
@@ -198,7 +202,7 @@ mod tests {
         let p = plan(&[("alpha", &["a.txt"]), ("beta", &["b.txt"])]);
         let changed = strings(&["a.txt", "b.txt", "shared.json", "stray.txt"]);
         let edits = vec![(0, strings(&["a.txt", "b.txt", "shared.json"])), (1, strings(&["b.txt"]))];
-        let found = check_ownership(&p, &changed, &edits, FinishSnapshots::default(), |_| None);
+        let found = check_ownership(&p, &[0, 1], &changed, &edits, FinishSnapshots::default(), |_| None);
         let lines: Vec<String> = found.iter().map(ToString::to_string).collect();
         assert_eq!(
             lines,
@@ -216,7 +220,7 @@ mod tests {
         let snapshots = FinishSnapshots::default();
         snapshots.finished.lock().unwrap().extend([(1, vec![("b.txt".to_string(), Some(1))]), (2, vec![("c.txt".to_string(), Some(7))])]);
         let now = |file: &str| Some(if file == "b.txt" { 2 } else { 7 });
-        let found = check_ownership(&p, &strings(&["a.txt", "b.txt", "c.txt"]), &[], snapshots, now);
+        let found = check_ownership(&p, &[0, 1, 2], &strings(&["a.txt", "b.txt", "c.txt"]), &[], snapshots, now);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].owner.as_deref(), Some("beta"));
         assert_eq!(found[0].writers, ["alpha", "gamma"], "gamma finished after beta and alpha never reported finishing");

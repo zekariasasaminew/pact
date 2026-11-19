@@ -72,8 +72,21 @@ a batch to review with `pact diff <batch>` and put on your branch with
 Measured on the benchmark (arm R2, issue #308): `pact run` on a 39-file
 test-writing task finished in 12.5 min against 15.8 for Copilot's own
 in-process sub-agents, 21% cheaper, with higher coverage, 26% less peak
-and 49% less mean memory, and nobody wrote a brief. One wave only for
-now: units that depend on each other are #282.
+and 49% less mean memory, and nobody wrote a brief.
+
+A unit in the plan JSON may name the units whose files it must read,
+`"depends_on": ["calc-core"]` (issue #462). Such a unit runs in a later
+wave: one more than the latest wave among the units it names. Each
+wave's lanes run in parallel, pact checks ownership and commits after
+each wave, so the next wave starts from a tree holding that work, and
+its brief names those units' files as read-only. Verification and
+repair run once at the end, as for a single wave. A unit whose lane
+failed makes every unit depending on it, directly or not, `skipped`:
+never launched, listed in the report, and the run exits 1; units that
+do not depend on it still run. Unknown names, a unit depending on itself
+and cycles are plan violations. The plan listing shows each unit's wave
+when there is more than one. Waves run one after another, so the
+planner is asked to prefer independent units.
 
 ### Independent tasks across repositories: `pact fleet`
 
