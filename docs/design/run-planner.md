@@ -2,16 +2,16 @@
 
 ## Current design
 
-`pact run "<task>"` takes one task and does the whole loop (#305): a planner splits it into units that own disjoint files, the units run as parallel lanes in one shared tree, pact commits once and verifies the combined result against a baseline, with repair lanes when a check regresses. `pact run --dry-run` plans, prints and stops. `--plan <file>` skips the planner. Plans are saved to `meta/plans/` and briefs to `briefs/<stamp>/`. Units are workspace names, so a rerun after a failed run needs `pact teardown` first.
+`pact run "<task>"` takes one task and does the whole loop (#305): a planner splits it into units that own disjoint files, the units run as parallel lanes in one shared tree, in waves when units depend on units (#462), pact commits each wave and verifies the combined result against a baseline, with repair lanes when a check regresses. `pact run --dry-run` plans, prints and stops. `--plan <file>` skips the planner. Plans are saved to `meta/plans/` and briefs to `briefs/<stamp>/`. Units are workspace names, so a rerun after a failed run needs `pact teardown` first.
 
 Steps, in order:
 
 1. **Preflight.** `run_task` refuses a checkout with uncommitted or untracked changes and lists them; `--allow-dirty` proceeds and the report repeats the list (#411).
 2. **Plan.** `plan_task` runs the planner in the repo root with no workspace through `converse`: one ACP session in a throwaway process when the agent has ACP, else fresh headless processes. `planner_prompt` carries the rules, the JSON shape, up to six tracked test files to imitate (`discover_test_anchors`) and a unit count. Workers get the task verbatim, so the prompt tells the planner to restate nothing and keep briefs to two or three sentences (#347, #352). A planner that modifies the repo is refused. Every update goes to `logs/planner-<stamp>.jsonl` with a `t` timestamp (#348, #358).
-3. **Validate.** `validate_plan` (pure) rejects shared files, duplicate or unsafe names (`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 48 characters, unique by slug, #414), absolute or `..` paths, empty briefs and too many units. Violations go back to the same conversation, up to `--plan-retries` (default 2, #413). Under the process runtime the retry resends the whole prompt.
+3. **Validate.** `validate_plan` (pure) rejects shared files, duplicate or unsafe names (`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 48 characters, unique by slug, #414), absolute or `..` paths, empty briefs, too many units, and `depends_on` naming an unknown unit, the unit itself or a cycle (#462). Violations go back to the same conversation, up to `--plan-retries` (default 2, #413). Under the process runtime the retry resends the whole prompt.
 4. **Size and prepare.** Unit count and `--max-concurrent` default from `suggested_units` and the unit count (see admission, #356). While the planner works, the shared tree, its dependency prep and the baselines are prepared on a second thread (#353). `prepare` commands run once per tree (#301).
-5. **Execute.** `render_brief` gives every unit its files, the planner's words and `shared_context`, and rules. When the plan has project-wide checks the brief tells workers not to run them and to run only scoped checks, since pact runs them once on the combined result (#361). The batch is a shared tree under the default runtime (#315, #337).
-6. **Ownership check.** After the units finish and before the commit, `changed_since` is compared with the plan (#409): unowned files from the tree, cross-unit writes from ACP `locations` in the lane log, and for process lanes from hashes of each unit's files. Violations fail the run (exit 1) and nothing is reverted.
+5. **Execute, in waves.** `render_brief` gives every unit its files, the planner's words and `shared_context`, the units it depends on with their files (already committed, read-only), and rules. When the plan has project-wide checks the brief tells workers not to run them and to run only scoped checks, since pact runs them once on the combined result (#361). The batch is a shared tree under the default runtime (#315, #337). `wave_groups` puts a unit with no `depends_on` in wave 1 and any other one wave after its latest dependency (#462); each wave is one `spawn_many_in` call into the batch. A unit depending, directly or not, on a failed lane is skipped, reported, and fails the run. A plan without `depends_on` is one wave, as before.
+6. **Ownership check and commit, per wave.** After a wave's units finish and before its commit, `changed_since` the wave's starting commit is compared with the plan (#409): unowned files from the tree, cross-unit writes from ACP `locations` in the lane log, and for process lanes from hashes of each unit's files. Violations fail the run (exit 1), nothing is reverted, and later waves still run. Each wave is committed, so the next starts from its work.
 7. **Verify.** `verify` is a list (`--verify` is repeatable and replaces the plan's list, #360). Each command has a baseline on the untouched tree and a verdict after: pass/pass `Passed`, fail/pass `Fixed`, pass/fail `Regressed`, fail/fail `Inconclusive` (exit 3), fail with no baseline `Failed`. `worst_verdict` sets the exit code. Each command runs under `--verify-timeout` (default 20 min) with `CI=true`, stdin closed, output to `meta/verify/<run>/`, and its process tree is killed at the deadline (#410). A timed-out baseline counts as no baseline.
 8. **Repair.** `Regressed` or `Failed` starts repair rounds, `--repair-attempts` (default 1, 0 disables). `failing_files` finds the files each check names (#373), `route_repairs` sends each to the unit that owns it, and the round's lanes run in parallel, each editing only its own files (#372). One extra lane takes unowned failures and timeouts, and may edit touched files no unit holds. Untouched files are never editable. Each round commits once and reruns every check. `Inconclusive` never triggers repair.
 
@@ -24,12 +24,14 @@ flowchart TD
     B --> T["prepare shared tree and baselines in parallel"]
     C --> D["plan saved, briefs rendered"]
     T --> E
-    D --> E["shared-tree lanes via spawn_many_in"]
+    D --> E["one wave of shared-tree lanes via spawn_many_in"]
     E --> F["ownership check"]
-    F --> G["commit once"]
+    F --> G["commit the wave"]
+    G -->|"next wave"| E
     G --> H["verify each command against baseline"]
     H -->|"Regressed or Failed"| R["route_repairs: per-unit repair lanes"]
-    R --> G
+    R --> C2["commit the repair"]
+    C2 --> H
     H --> Z["report and exit code"]
 ```
 
@@ -46,6 +48,7 @@ flowchart TD
 - Plan names and lane writes trusted (#305): superseded by #414 (name validation) and #409 (ownership check).
 - Running against a dirty checkout without notice (#305): superseded by #411, refused unless `--allow-dirty`.
 - `land` refused a shared-tree batch along with its lanes, and `pact run` pointed at `merge-all` (#389): superseded by #440, the batch lands whole.
+- One wave only, with dependent units left to #282's 12-piece epic: closed for this. #462 runs units in waves by `depends_on`.
 
 ## History
 
@@ -589,3 +592,38 @@ committed), ran both lanes in 10 s, committed 4 files, and the verify
 passed in 2.9 s. `pact land <batch>` (#440) fast-forwarded `main`, and
 `npm test` there ran 9 passing tests with the root install intact after
 teardown removed the link.
+
+### Units that depend on units: waves (issue #462)
+
+`pact run` ran every unit at once, so a unit that needed another unit's
+output (a component importing a module another unit creates, tests for
+code another unit writes) could not be planned: the planner merged the
+two into one unit or the worker guessed the interface. #282 proposed a
+12-piece epic for this; on 2026-11-19 it was closed for the minimal
+version here.
+
+A unit may name `depends_on: ["unit", ...]`. `validate_plan` names an
+unknown unit, a self-dependency and each cycle (as "x depends on y"
+steps) so the planner can fix them; duplicates are dropped. `plan_waves`
+is pure: wave 1 for no dependencies, else one more than the latest
+dependency's wave; `wave_groups` keeps plan order inside a wave.
+`run_plan` runs one `spawn_many_in` per wave into the same batch, then
+that wave's ownership check against the commit the wave started from
+(`check_ownership` takes the wave's lanes, so a lane of another wave is
+never blamed as still running), then commits. The next wave's workers
+read committed files, and their brief lists the dependency units' files
+as written, committed and not theirs to edit. Verification and repair
+stay once, at the end, against the baseline.
+
+A failed lane skips every unit depending on it, directly or through a
+skipped unit, with the original failure named (`skipped: depends on
+a`); skipped units fail the run like a failed lane, and units outside
+that chain still run. Ownership violations are not failures for this:
+the files exist, so later waves run and the violation is reported as
+before. A plan without `depends_on` is one wave and produces the same
+events, report and single commit as before. The planner prompt allows
+`depends_on` only when a unit must read another's new files, because
+waves run one after another and each costs wall-clock time. The fake
+ACP agent gained `require_files`, which ends a turn with `refusal` when
+a file is missing, so the end-to-end test proves a second-wave lane sees
+the first wave's file.

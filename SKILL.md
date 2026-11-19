@@ -30,6 +30,8 @@ pact run --agent copilot --plan saved-plan.json "Add Vitest tests for every file
 
 - Do not write briefs yourself. The planner splits the task; pact validates
   the split (no file in two units) and renders every brief.
+- A unit may name `depends_on` units whose files it reads; it runs in a
+  later wave after they are committed, and is skipped (exit 1) when one fails.
 - `--verify` is repeatable and names the project-wide checks. pact runs each
   once on the untouched tree (baseline) and once on the combined result;
   workers check only their own files.
