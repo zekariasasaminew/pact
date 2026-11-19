@@ -987,3 +987,19 @@ because `--acp` arguments hold no newline. Resolution now follows
 Windows: PATH directories in order, `.exe` before `.cmd` and `.bat`
 within one directory. Found in a live `pact fleet` run against Copilot
 CLI 1.0.114; the same fleet then ran to completion.
+
+### Every adapter against its current CLI (2026-11-18)
+
+One small `pact fleet` task per agent on a scratch Python repo, Windows,
+after #446, #448 and #450:
+
+| agent | CLI | result | time | notes |
+|---|---|---|---|---|
+| Copilot (process) | 1.0.114 | done, report read | 19 to 27 s | needed #446 (PATH order) and #448 (final message); usage recorded |
+| Copilot (ACP) | 1.0.106 to 1.0.114 | done | 9 to 11 s per lane | model selection, `locations`, repair routing checked (run-planner.md) |
+| Claude Code | 2.1.328 | done, report read | 30 to 33 s | no raw noise; cost recorded after #455 |
+| Codex | 0.144.3 | done, report read | 280 s | `item.started` and turn events printed raw until #457; made no pact-coord calls, so the warning is accurate |
+| Antigravity (`agy`) | 1.5.3 | done | 68 s | no raw noise |
+
+Gemini CLI (0.57.0) was not run: no API key or OAuth is configured here,
+the same gap as before.

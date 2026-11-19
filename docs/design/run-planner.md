@@ -578,3 +578,14 @@ run record stores it as `final_message`, the report is read from the
 summary and then from it, and `RunMetadata::last_message` gives the ui
 and the reply prompt the message itself. The same fleet then reported
 both tasks done.
+
+### A whole run on an npm project (2026-11-18)
+
+A scratch ESM package with one dependency (`lodash`, installed at the
+repo root) and `node --test`: `pact run --agent copilot --model
+claude-haiku-5.5 --verify "npm test"` planned 2 units in 22 s, linked
+the root `node_modules` into the shared tree as a junction (not
+committed), ran both lanes in 10 s, committed 4 files, and the verify
+passed in 2.9 s. `pact land <batch>` (#440) fast-forwarded `main`, and
+`npm test` there ran 9 passing tests with the root install intact after
+teardown removed the link.
