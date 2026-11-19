@@ -859,3 +859,19 @@ so the "does it look right" question is unconfirmed here, same
 applies to the Gemini adapter, the Homebrew tap, and the winget
 manifest. Worth a real look on a machine with an actual display before
 calling this fully done.
+
+### `gc` must not age coordination directories by looking at them
+
+On the dev machine, with about 7,400 coordination directories, the
+first `pact gc --dry-run` took 143 s, and a second one a minute later
+found nothing to prune. Both came from the live-lease check (#416):
+it opened every candidate's database read-only, about 16 ms each on
+Windows, and a read-only open of a WAL database creates `state.db-shm`
+and an empty `state.db-wal`. Those fresh files made every directory look
+written to just now, so one dry run postponed the real `gc` by the whole
+cutoff. Two changes: a directory untouched for longer than the 24 h
+lease TTL cap cannot hold a live lease (claiming one writes the
+database), so its database is not opened at all, which covers every
+directory past the default 7-day cutoff; and age ignores `-shm` files
+and empty `-wal` files. The same dry run now takes 3 s and finds the
+same 6,405 directories.
