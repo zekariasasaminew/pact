@@ -3340,6 +3340,12 @@ const SUPPRESSED_OTHER_EVENT_TYPES: &[&str] = &[
     "session.mcp_server_tools_loaded",
     "session.custom_agents_updated",
     "session.managed_settings_resolved",
+    // Codex CLI 0.144.3: `item.started` repeats the command or file change
+    // its `item.completed` then prints as a `[tool]` line, and the turn
+    // events carry only token counts (issue #456).
+    "item.started",
+    "turn.started",
+    "turn.completed",
 ];
 
 /// Whether an `AgentEvent::Other`'s raw JSON should be printed -- `false`
