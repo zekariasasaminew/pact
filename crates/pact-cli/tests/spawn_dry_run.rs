@@ -51,7 +51,7 @@ fn spawn_dry_run_prints_a_preview_and_creates_no_workspace() {
     let repo = init_repo();
 
     let output = Command::new(env!("CARGO_BIN_EXE_pact"))
-        .args(["--repo", repo.to_str().unwrap(), "spawn", "do the thing", "--dry-run"])
+        .args(["--repo", repo.to_str().unwrap(), "spawn", "--agent", "claude", "do the thing", "--dry-run"])
         .output()
         .unwrap();
 
