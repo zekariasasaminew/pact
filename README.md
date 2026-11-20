@@ -1,5 +1,7 @@
 # pact
 
+![pact: parallel AI coding agents in one shared tree, one commit, verified against a baseline](docs/matchcut.gif)
+
 **Write-up:** [The fastest isolation is the one you skip](https://www.zekariasasaminew.com/blog/pact),
 the whole arc from worktree-per-agent to `pact run`, with the benchmark numbers.
 
